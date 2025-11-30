@@ -24,7 +24,7 @@ CLAN_TAG: str = get_env_var("CLAN_TAG")
 
 # MongoDB configuration
 MONGODB_URI: str = get_env_var("MONGODB_URI")
-MONGODB_DB_NAME: str = get_env_var("MONGODB_DB_NAME", default="clash_royale_bot")
+MONGODB_DB_NAME: str = get_env_var("MONGODB_DB_NAME", default="clash_royale_bot", required=False)
 
 # Background task configuration
 FETCH_INTERVAL_SECONDS: int = int(

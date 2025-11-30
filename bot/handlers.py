@@ -46,7 +46,9 @@ async def cmd_ping(message: Message) -> None:
     try:
         api_client = await get_api_client()
         clan_data = await api_client.get_clan(CLAN_TAG)
-        clan_name = clan_data.get("name", "Unknown")
+        # Validate response is a dictionary before accessing properties
+        if isinstance(clan_data, dict):
+            clan_name = clan_data.get("name", "Unknown")
     except ClashRoyaleAPIError as e:
         api_status = f"❌ Error: {e.message}"
         logger.warning(f"API check failed: {e}")

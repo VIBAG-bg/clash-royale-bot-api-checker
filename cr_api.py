@@ -47,8 +47,8 @@ class ClashRoyaleAPI:
     
     def _encode_tag(self, tag: str) -> str:
         """Encode a player or clan tag for URL usage."""
-        # Remove # if present and URL encode
-        clean_tag = tag.lstrip("#")
+        # Remove # if present (safely, only remove first character if it's #)
+        clean_tag = tag[1:] if tag.startswith("#") else tag
         return quote(f"#{clean_tag}")
     
     async def _request(self, endpoint: str) -> dict[str, Any]:

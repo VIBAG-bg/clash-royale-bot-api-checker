@@ -49,7 +49,7 @@ async def fetch_river_race_stats() -> None:
         period_type = river_race.get("periodType", "unknown")
         
         # Determine if this is a Colosseum week
-        # Colosseum weeks occur every 4th week (section_index 3, 7, 11, etc.)
+        # Colosseum weeks occur every 4th week (section_index is 0-based: 3, 7, 11, etc.)
         # The period type may also indicate "colosseum"
         is_colosseum = (
             period_type.lower() == "colosseum" or
