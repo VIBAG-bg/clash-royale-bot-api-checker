@@ -6,6 +6,7 @@ import os
 from typing import Any, AsyncIterator
 
 from sqlalchemy import Boolean, DateTime, Index, Integer, String, UniqueConstraint, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -13,6 +14,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -133,12 +135,94 @@ async def close_db() -> None:
 
 
 @asynccontextmanager
+async def get_session() -> AsyncIterator[AsyncSession]:
+    async with _get_session() as session:
+        yield session
+
+
+@asynccontextmanager
 async def _get_session() -> AsyncIterator[AsyncSession]:
     if _session_factory is None:
         await connect_db()
     assert _session_factory is not None
     async with _session_factory() as session:
         yield session
+
+
+async def _upsert_player_participation(
+    session: AsyncSession,
+    now: datetime,
+    player_tag: str,
+    player_name: str,
+    season_id: int,
+    section_index: int,
+    is_colosseum: bool,
+    fame: int,
+    repair_points: int,
+    boat_attacks: int,
+    decks_used: int,
+    decks_used_today: int,
+) -> None:
+    stmt = pg_insert(PlayerParticipation.__table__).values(
+        player_tag=player_tag,
+        player_name=player_name,
+        season_id=season_id,
+        section_index=section_index,
+        is_colosseum=is_colosseum,
+        fame=fame,
+        repair_points=repair_points,
+        boat_attacks=boat_attacks,
+        decks_used=decks_used,
+        decks_used_today=decks_used_today,
+        created_at=now,
+        updated_at=now,
+    )
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["player_tag", "season_id", "section_index"],
+        set_={
+            "player_name": stmt.excluded.player_name,
+            "is_colosseum": stmt.excluded.is_colosseum,
+            "fame": stmt.excluded.fame,
+            "repair_points": stmt.excluded.repair_points,
+            "boat_attacks": stmt.excluded.boat_attacks,
+            "decks_used": stmt.excluded.decks_used,
+            "decks_used_today": stmt.excluded.decks_used_today,
+            "updated_at": now,
+        },
+    )
+    await session.execute(stmt)
+
+
+async def _upsert_river_race_state(
+    session: AsyncSession,
+    now: datetime,
+    clan_tag: str,
+    season_id: int,
+    section_index: int,
+    is_colosseum: bool,
+    period_type: str,
+    clan_score: int,
+) -> None:
+    stmt = pg_insert(RiverRaceState.__table__).values(
+        clan_tag=clan_tag,
+        season_id=season_id,
+        section_index=section_index,
+        is_colosseum=is_colosseum,
+        period_type=period_type,
+        clan_score=clan_score,
+        created_at=now,
+        updated_at=now,
+    )
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["clan_tag", "season_id", "section_index"],
+        set_={
+            "is_colosseum": stmt.excluded.is_colosseum,
+            "period_type": stmt.excluded.period_type,
+            "clan_score": stmt.excluded.clan_score,
+            "updated_at": now,
+        },
+    )
+    await session.execute(stmt)
 
 
 def _player_participation_to_dict(player: PlayerParticipation) -> dict[str, Any]:
@@ -184,45 +268,46 @@ async def save_player_participation(
     boat_attacks: int,
     decks_used: int,
     decks_used_today: int,
+    session: AsyncSession | None = None,
 ) -> None:
     """Save or update player participation data for a River Race week."""
     now = _utc_now()
-    async with _get_session() as session:
-        result = await session.execute(
-            select(PlayerParticipation).where(
-                PlayerParticipation.player_tag == player_tag,
-                PlayerParticipation.season_id == season_id,
-                PlayerParticipation.section_index == section_index,
-            )
-        )
-        existing = result.scalar_one_or_none()
-        if existing:
-            existing.player_name = player_name
-            existing.is_colosseum = is_colosseum
-            existing.fame = fame
-            existing.repair_points = repair_points
-            existing.boat_attacks = boat_attacks
-            existing.decks_used = decks_used
-            existing.decks_used_today = decks_used_today
-            existing.updated_at = now
-        else:
-            session.add(
-                PlayerParticipation(
-                    player_tag=player_tag,
-                    player_name=player_name,
-                    season_id=season_id,
-                    section_index=section_index,
-                    is_colosseum=is_colosseum,
-                    fame=fame,
-                    repair_points=repair_points,
-                    boat_attacks=boat_attacks,
-                    decks_used=decks_used,
-                    decks_used_today=decks_used_today,
-                    created_at=now,
-                    updated_at=now,
+    if session is None:
+        async with _get_session() as session:
+            try:
+                await _upsert_player_participation(
+                    session,
+                    now,
+                    player_tag,
+                    player_name,
+                    season_id,
+                    section_index,
+                    is_colosseum,
+                    fame,
+                    repair_points,
+                    boat_attacks,
+                    decks_used,
+                    decks_used_today,
                 )
-            )
-        await session.commit()
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+    else:
+        await _upsert_player_participation(
+            session,
+            now,
+            player_tag,
+            player_name,
+            season_id,
+            section_index,
+            is_colosseum,
+            fame,
+            repair_points,
+            boat_attacks,
+            decks_used,
+            decks_used_today,
+        )
 
 
 async def get_inactive_players(
@@ -283,37 +368,38 @@ async def save_river_race_state(
     is_colosseum: bool,
     period_type: str,
     clan_score: int,
+    session: AsyncSession | None = None,
 ) -> None:
     """Save the current River Race state for tracking."""
     now = _utc_now()
-    async with _get_session() as session:
-        result = await session.execute(
-            select(RiverRaceState).where(
-                RiverRaceState.clan_tag == clan_tag,
-                RiverRaceState.season_id == season_id,
-                RiverRaceState.section_index == section_index,
-            )
-        )
-        existing = result.scalar_one_or_none()
-        if existing:
-            existing.is_colosseum = is_colosseum
-            existing.period_type = period_type
-            existing.clan_score = clan_score
-            existing.updated_at = now
-        else:
-            session.add(
-                RiverRaceState(
-                    clan_tag=clan_tag,
-                    season_id=season_id,
-                    section_index=section_index,
-                    is_colosseum=is_colosseum,
-                    period_type=period_type,
-                    clan_score=clan_score,
-                    created_at=now,
-                    updated_at=now,
+    if session is None:
+        async with _get_session() as session:
+            try:
+                await _upsert_river_race_state(
+                    session,
+                    now,
+                    clan_tag,
+                    season_id,
+                    section_index,
+                    is_colosseum,
+                    period_type,
+                    clan_score,
                 )
-            )
-        await session.commit()
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+    else:
+        await _upsert_river_race_state(
+            session,
+            now,
+            clan_tag,
+            season_id,
+            section_index,
+            is_colosseum,
+            period_type,
+            clan_score,
+        )
 
 
 async def get_latest_river_race_state(clan_tag: str) -> dict[str, Any] | None:
