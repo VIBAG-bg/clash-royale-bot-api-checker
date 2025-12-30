@@ -158,7 +158,10 @@ async def lifespan(dispatcher: Dispatcher):
     logger.info("Background fetch task started")
     
     # Run initial fetch
-    await fetch_river_race_stats()
+    try:
+        await fetch_river_race_stats()
+    except Exception as e:
+        logger.error("Initial fetch failed: %s", e, exc_info=True)
     
     yield
     

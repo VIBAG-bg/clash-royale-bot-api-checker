@@ -2,6 +2,7 @@
 
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+import os
 from typing import Any, AsyncIterator
 
 from sqlalchemy import Boolean, DateTime, Index, Integer, String, UniqueConstraint, select
@@ -12,9 +13,6 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-
-from config import DATABASE_URL
-
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -97,11 +95,12 @@ _session_factory: async_sessionmaker[AsyncSession] | None = None
 
 
 def _require_database_url() -> str:
-    if not DATABASE_URL:
+    database_url = os.getenv("DATABASE_URL")
+    if not database_url:
         raise ValueError(
             "DATABASE_URL is not set. Configure it in the environment before starting the bot."
         )
-    return DATABASE_URL
+    return database_url
 
 
 def _build_async_database_url(raw_url: str) -> str:
@@ -114,7 +113,7 @@ def _build_async_database_url(raw_url: str) -> str:
     return raw_url
 
 
-async def connect_db() -> AsyncEngine:
+async def connect_db() -> None:
     """Create the async engine and session factory."""
     global _engine, _session_factory
     if _engine is None:
@@ -122,7 +121,6 @@ async def connect_db() -> AsyncEngine:
         async_url = _build_async_database_url(raw_url)
         _engine = create_async_engine(async_url, pool_pre_ping=True)
         _session_factory = async_sessionmaker(_engine, expire_on_commit=False)
-    return _engine
 
 
 async def close_db() -> None:
