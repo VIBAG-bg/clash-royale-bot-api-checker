@@ -38,4 +38,4 @@ INACTIVE_DAYS_THRESHOLD: int = int(
 )
 
 # Clash Royale API base URL
-CR_API_BASE_URL: str = "https://api.clashroyale.com/v1"
+CR_API_BASE_URL: str = os.getenv("CR_API_BASE_URL", "https://api.clashroyale.com/v1")
