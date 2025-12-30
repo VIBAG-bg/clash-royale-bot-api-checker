@@ -151,7 +151,7 @@ async def lifespan(dispatcher: Dispatcher):
     
     # Connect to database
     await connect_db()
-    logger.info("Connected to MongoDB")
+    logger.info("Connected to PostgreSQL")
     
     # Start background task
     fetch_task = asyncio.create_task(background_fetch_task())

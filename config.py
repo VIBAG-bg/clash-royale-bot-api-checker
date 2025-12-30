@@ -7,7 +7,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-def get_env_var(name: str, default: str | None = None, required: bool = True) -> str:
+def get_env_var(
+    name: str, default: str | None = None, required: bool = True
+) -> str | None:
     """Get environment variable with optional default value."""
     value = os.getenv(name, default)
     if required and value is None:
@@ -22,9 +24,8 @@ TELEGRAM_BOT_TOKEN: str = get_env_var("TELEGRAM_BOT_TOKEN")
 CR_API_TOKEN: str = get_env_var("CR_API_TOKEN")
 CLAN_TAG: str = get_env_var("CLAN_TAG")
 
-# MongoDB configuration
-MONGODB_URI: str = get_env_var("MONGODB_URI")
-MONGODB_DB_NAME: str = get_env_var("MONGODB_DB_NAME", default="clash_royale_bot", required=False)
+# PostgreSQL configuration (Heroku provides DATABASE_URL)
+DATABASE_URL: str | None = get_env_var("DATABASE_URL", required=False)
 
 # Background task configuration
 FETCH_INTERVAL_SECONDS: int = int(

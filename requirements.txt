@@ -1,4 +1,7 @@
 aiogram>=3.0.0,<4.0.0
 httpx>=0.25.0
-motor>=3.3.0
+SQLAlchemy>=2.0
+asyncpg>=0.29
+alembic>=1.13
+psycopg[binary]>=3.1
 python-dotenv>=1.0.0

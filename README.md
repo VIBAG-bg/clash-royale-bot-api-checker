@@ -1,6 +1,6 @@
 # Clash Royale Bot API Checker
 
-A Python Telegram bot that monitors a Clash Royale clan using the official Clash Royale API and MongoDB Atlas.
+A Python Telegram bot that monitors a Clash Royale clan using the official Clash Royale API and PostgreSQL.
 
 ## Features
 
@@ -20,14 +20,15 @@ A Python Telegram bot that monitors a Clash Royale clan using the official Clash
 
 - **aiogram v3** - Modern async Telegram Bot framework
 - **httpx** - Async HTTP client for Clash Royale API calls
-- **motor** - Async MongoDB driver
+- **SQLAlchemy 2.x** - Async ORM with asyncpg
+- **Alembic** - Database migrations
 - **python-dotenv** - Environment variable management
 
 ## Project Structure
 
 ```
 ├── config.py           # Environment variable configuration
-├── db.py               # MongoDB connection and operations
+├── db.py               # PostgreSQL connection and operations
 ├── cr_api.py           # Clash Royale API client
 ├── bot/
 │   ├── __init__.py     # Bot package initialization
@@ -73,8 +74,7 @@ Edit `.env` with your values:
 - `TELEGRAM_BOT_TOKEN` - Get from [@BotFather](https://t.me/BotFather)
 - `CR_API_TOKEN` - Get from [Clash Royale Developer Portal](https://developer.clashroyale.com)
 - `CLAN_TAG` - Your clan tag (without the #)
-- `MONGODB_URI` - MongoDB Atlas connection string
-- `MONGODB_DB_NAME` - Database name (default: `clash_royale_bot`)
+- `DATABASE_URL` - PostgreSQL connection string (Heroku provides this)
 - `FETCH_INTERVAL_SECONDS` - Background fetch interval (default: 3600)
 - `INACTIVE_DAYS_THRESHOLD` - Days threshold for inactivity (default: 7)
 
@@ -86,7 +86,7 @@ python main.py
 
 ## Database Schema
 
-### player_participation Collection
+### player_participation Table
 
 Stores player participation data for each River Race week:
 
@@ -107,7 +107,7 @@ Stores player participation data for each River Race week:
 }
 ```
 
-### river_race_state Collection
+### river_race_state Table
 
 Tracks the current River Race state:
 
