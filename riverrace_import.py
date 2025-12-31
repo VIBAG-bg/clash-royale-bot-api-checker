@@ -126,3 +126,30 @@ async def import_riverrace_log(weeks: int, clan_tag: str | None = None) -> tuple
         players_imported,
     )
     return weeks_imported, players_imported
+
+
+async def get_last_completed_weeks(
+    count: int, clan_tag: str | None = None
+) -> list[tuple[int, int]]:
+    target_tag = clan_tag or CLAN_TAG
+    api_client = await get_api_client()
+    items = await api_client.get_river_race_log(target_tag)
+    if isinstance(items, dict):
+        items = items.get("items", [])
+    weeks: list[tuple[int, int]] = []
+    for item in items[: max(0, count)]:
+        season_id = item.get("seasonId", 0)
+        section_index = item.get("sectionIndex", 0)
+        if season_id <= 0:
+            continue
+        if section_index is None:
+            continue
+        weeks.append((int(season_id), int(section_index)))
+    return weeks
+
+
+async def get_last_completed_week(
+    clan_tag: str | None = None,
+) -> tuple[int, int] | None:
+    weeks = await get_last_completed_weeks(1, clan_tag=clan_tag)
+    return weeks[0] if weeks else None

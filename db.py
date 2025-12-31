@@ -7,6 +7,7 @@ from typing import Any, AsyncIterator
 
 from sqlalchemy import (
     Boolean,
+    BigInteger,
     Date,
     DateTime,
     Index,
@@ -14,7 +15,9 @@ from sqlalchemy import (
     String,
     UniqueConstraint,
     delete,
+    func,
     select,
+    tuple_,
 )
 from sqlalchemy.dialects.postgresql import JSONB, insert as pg_insert
 from sqlalchemy.ext.asyncio import (
@@ -164,6 +167,25 @@ class ClanMemberDaily(Base):
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utc_now, onupdate=_utc_now, nullable=False
+    )
+
+
+class ClanChat(Base):
+    __tablename__ = "clan_chats"
+    __table_args__ = (
+        UniqueConstraint(
+            "clan_tag",
+            "chat_id",
+            name="uq_clan_chats_clan_chat",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    clan_tag: Mapped[str] = mapped_column(String(32), nullable=False)
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, nullable=False
     )
 
 
@@ -389,6 +411,22 @@ async def _upsert_clan_member_daily(
             "trophies": stmt.excluded.trophies,
             "updated_at": now,
         },
+    )
+    await session.execute(stmt)
+
+
+async def _upsert_clan_chat(
+    session: AsyncSession, now: datetime, clan_tag: str, chat_id: int, enabled: bool
+) -> None:
+    stmt = pg_insert(ClanChat.__table__).values(
+        clan_tag=clan_tag,
+        chat_id=chat_id,
+        enabled=enabled,
+        created_at=now,
+    )
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["clan_tag", "chat_id"],
+        set_={"enabled": stmt.excluded.enabled},
     )
     await session.execute(stmt)
 
@@ -683,6 +721,205 @@ async def save_clan_member_daily(
             role,
             trophies,
         )
+
+
+async def upsert_clan_chat(
+    clan_tag: str, chat_id: int, enabled: bool = True, session: AsyncSession | None = None
+) -> None:
+    now = _utc_now()
+    if session is None:
+        async with _get_session() as session:
+            try:
+                await _upsert_clan_chat(session, now, clan_tag, chat_id, enabled)
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+    else:
+        await _upsert_clan_chat(session, now, clan_tag, chat_id, enabled)
+
+
+async def get_enabled_clan_chats(
+    clan_tag: str, session: AsyncSession | None = None
+) -> list[int]:
+    if session is None:
+        async with _get_session() as session:
+            result = await session.execute(
+                select(ClanChat.chat_id).where(
+                    ClanChat.clan_tag == clan_tag, ClanChat.enabled.is_(True)
+                )
+            )
+            return [row[0] for row in result.all()]
+    result = await session.execute(
+        select(ClanChat.chat_id).where(
+            ClanChat.clan_tag == clan_tag, ClanChat.enabled.is_(True)
+        )
+    )
+    return [row[0] for row in result.all()]
+
+
+async def get_latest_membership_date(
+    clan_tag: str, session: AsyncSession | None = None
+) -> date | None:
+    if session is None:
+        async with _get_session() as session:
+            result = await session.execute(
+                select(func.max(ClanMemberDaily.snapshot_date)).where(
+                    ClanMemberDaily.clan_tag == clan_tag
+                )
+            )
+            return result.scalar_one()
+    result = await session.execute(
+        select(func.max(ClanMemberDaily.snapshot_date)).where(
+            ClanMemberDaily.clan_tag == clan_tag
+        )
+    )
+    return result.scalar_one()
+
+
+async def get_current_member_tags(
+    clan_tag: str, session: AsyncSession | None = None
+) -> set[str]:
+    if session is None:
+        async with _get_session() as session:
+            latest_date = await get_latest_membership_date(clan_tag, session=session)
+            if latest_date is None:
+                return set()
+            result = await session.execute(
+                select(ClanMemberDaily.player_tag).where(
+                    ClanMemberDaily.clan_tag == clan_tag,
+                    ClanMemberDaily.snapshot_date == latest_date,
+                )
+            )
+            return {row[0] for row in result.all()}
+    latest_date = await get_latest_membership_date(clan_tag, session=session)
+    if latest_date is None:
+        return set()
+    result = await session.execute(
+        select(ClanMemberDaily.player_tag).where(
+            ClanMemberDaily.clan_tag == clan_tag,
+            ClanMemberDaily.snapshot_date == latest_date,
+        )
+    )
+    return {row[0] for row in result.all()}
+
+
+async def get_week_leaderboard(
+    season_id: int,
+    section_index: int,
+    clan_tag: str,
+    session: AsyncSession | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if session is None:
+        async with _get_session() as session:
+            return await get_week_leaderboard(
+                season_id, section_index, clan_tag, session=session
+            )
+    current_members = await get_current_member_tags(clan_tag, session=session)
+    if not current_members:
+        return [], []
+    base = (
+        select(
+            PlayerParticipation.player_name,
+            PlayerParticipation.player_tag,
+            PlayerParticipation.decks_used,
+            PlayerParticipation.fame,
+        )
+        .where(
+            PlayerParticipation.season_id == season_id,
+            PlayerParticipation.section_index == section_index,
+            PlayerParticipation.player_tag.in_(current_members),
+        )
+    )
+    inactive_result = await session.execute(
+        base.order_by(
+            PlayerParticipation.decks_used.asc(),
+            PlayerParticipation.fame.asc(),
+        ).limit(10)
+    )
+    active_result = await session.execute(
+        base.order_by(
+            PlayerParticipation.decks_used.desc(),
+            PlayerParticipation.fame.desc(),
+        ).limit(10)
+    )
+    inactive = [
+        {
+            "player_name": row.player_name,
+            "player_tag": row.player_tag,
+            "decks_used": int(row.decks_used),
+            "fame": int(row.fame),
+        }
+        for row in inactive_result.all()
+    ]
+    active = [
+        {
+            "player_name": row.player_name,
+            "player_tag": row.player_tag,
+            "decks_used": int(row.decks_used),
+            "fame": int(row.fame),
+        }
+        for row in active_result.all()
+    ]
+    return inactive, active
+
+
+async def get_rolling_leaderboard(
+    weeks: list[tuple[int, int]],
+    clan_tag: str,
+    session: AsyncSession | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if session is None:
+        async with _get_session() as session:
+            return await get_rolling_leaderboard(weeks, clan_tag, session=session)
+    if not weeks:
+        return [], []
+    current_members = await get_current_member_tags(clan_tag, session=session)
+    if not current_members:
+        return [], []
+    decks_sum = func.sum(PlayerParticipation.decks_used).label("decks_used_sum")
+    fame_sum = func.sum(PlayerParticipation.fame).label("fame_sum")
+    name_max = func.max(PlayerParticipation.player_name).label("player_name")
+    base = (
+        select(
+            PlayerParticipation.player_tag,
+            name_max,
+            decks_sum,
+            fame_sum,
+        )
+        .where(
+            tuple_(PlayerParticipation.season_id, PlayerParticipation.section_index).in_(
+                weeks
+            ),
+            PlayerParticipation.player_tag.in_(current_members),
+        )
+        .group_by(PlayerParticipation.player_tag)
+    )
+    inactive_result = await session.execute(
+        base.order_by(decks_sum.asc(), fame_sum.asc()).limit(10)
+    )
+    active_result = await session.execute(
+        base.order_by(decks_sum.desc(), fame_sum.desc()).limit(10)
+    )
+    inactive = [
+        {
+            "player_name": row.player_name,
+            "player_tag": row.player_tag,
+            "decks_used": int(row.decks_used_sum or 0),
+            "fame": int(row.fame_sum or 0),
+        }
+        for row in inactive_result.all()
+    ]
+    active = [
+        {
+            "player_name": row.player_name,
+            "player_tag": row.player_tag,
+            "decks_used": int(row.decks_used_sum or 0),
+            "fame": int(row.fame_sum or 0),
+        }
+        for row in active_result.all()
+    ]
+    return inactive, active
 
 
 async def get_app_state(

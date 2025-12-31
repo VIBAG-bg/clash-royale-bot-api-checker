@@ -17,6 +17,7 @@ from db import (
     close_db,
     delete_app_state,
     get_app_state,
+    get_enabled_clan_chats,
     get_session,
     set_app_state,
     save_clan_member_daily,
@@ -24,7 +25,8 @@ from db import (
     save_player_participation_daily,
     save_river_race_state,
 )
-from riverrace_import import get_latest_riverrace_log_info
+from reports import build_weekly_report
+from riverrace_import import get_last_completed_week, get_latest_riverrace_log_info
 
 # Configure logging
 logging.basicConfig(
@@ -35,6 +37,8 @@ logger = logging.getLogger(__name__)
 
 FETCH_LOCK = asyncio.Lock()
 ACTIVE_WEEK_KEY = "active_week"
+LAST_REPORTED_WEEK_KEY = "last_reported_week"
+BOT: Bot | None = None
 
 
 async def fetch_river_race_stats() -> None:
@@ -294,6 +298,55 @@ async def fetch_river_race_stats() -> None:
             logger.error(f"Error fetching River Race stats: {e}", exc_info=True)
 
 
+async def maybe_post_weekly_report(bot: Bot) -> None:
+    week = await get_last_completed_week(CLAN_TAG)
+    if not week:
+        logger.info("No completed week found for reporting")
+        return
+    season_id, section_index = week
+    last_state = await get_app_state(LAST_REPORTED_WEEK_KEY)
+    last_season_id = 0
+    last_section_index = -1
+    if last_state:
+        try:
+            last_season_id = int(last_state.get("season_id", 0))
+            last_section_index = int(last_state.get("section_index", -1))
+        except (TypeError, ValueError):
+            last_season_id = 0
+            last_section_index = -1
+    if last_season_id == season_id and last_section_index == section_index:
+        return
+
+    chat_ids = await get_enabled_clan_chats(CLAN_TAG)
+    if not chat_ids:
+        logger.info("No enabled clan chats for weekly reporting")
+        return
+
+    report = await build_weekly_report(season_id, section_index, CLAN_TAG)
+    sent_count = 0
+    for chat_id in chat_ids:
+        try:
+            await bot.send_message(chat_id, report)
+            sent_count += 1
+        except Exception as e:
+            logger.error("Failed to send weekly report to %s: %s", chat_id, e)
+
+    await set_app_state(
+        LAST_REPORTED_WEEK_KEY,
+        {
+            "season_id": season_id,
+            "section_index": section_index,
+            "set_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+    logger.info(
+        "Posted weekly report for season %s section %s to %s chat(s)",
+        season_id,
+        section_index,
+        sent_count,
+    )
+
+
 async def background_fetch_task() -> None:
     """Background task that periodically fetches River Race stats."""
     logger.info(
@@ -303,6 +356,10 @@ async def background_fetch_task() -> None:
     while True:
         try:
             await fetch_river_race_stats()
+            if BOT is None:
+                logger.warning("Bot instance not available for weekly reports")
+            else:
+                await maybe_post_weekly_report(BOT)
         except asyncio.CancelledError:
             logger.info("Background fetch task cancelled")
             break
@@ -359,6 +416,8 @@ async def main() -> None:
         token=TELEGRAM_BOT_TOKEN,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
+    global BOT
+    BOT = bot
     
     # Create dispatcher
     dp = Dispatcher()

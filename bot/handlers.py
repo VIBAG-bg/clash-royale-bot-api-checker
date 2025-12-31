@@ -4,12 +4,15 @@ import logging
 from datetime import datetime, timezone
 
 from aiogram import Router
+from aiogram.enums import ChatMemberStatus, ChatType
 from aiogram.filters import Command
 from aiogram.types import Message
 
 from config import CLAN_TAG
 from cr_api import get_api_client, ClashRoyaleAPIError
-from db import get_inactive_players, get_latest_war_race_state
+from db import get_inactive_players, get_latest_war_race_state, upsert_clan_chat
+from reports import build_rolling_report, build_weekly_report
+from riverrace_import import get_last_completed_week, get_last_completed_weeks
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +71,53 @@ async def cmd_ping(message: Message) -> None:
     )
     
     await message.answer(response_text)
+
+
+@router.message(Command("bind"))
+async def cmd_bind(message: Message) -> None:
+    """Bind the current group chat for weekly war reports."""
+    if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await message.answer("This command can only be used in a group chat.")
+        return
+    if message.from_user is None:
+        await message.answer("Unable to verify permissions for this user.")
+        return
+    try:
+        member = await message.bot.get_chat_member(
+            chat_id=message.chat.id, user_id=message.from_user.id
+        )
+    except Exception as e:
+        logger.error("Failed to verify chat member: %s", e, exc_info=True)
+        await message.answer("Unable to verify permissions right now.")
+        return
+    if member.status not in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR):
+        await message.answer("Only chat admins can bind this group.")
+        return
+    await upsert_clan_chat(CLAN_TAG, message.chat.id, enabled=True)
+    await message.answer("Chat bound for weekly war reports.")
+
+
+@router.message(Command("war"))
+async def cmd_war(message: Message) -> None:
+    """Show the weekly war report for the last completed week."""
+    week = await get_last_completed_week(CLAN_TAG)
+    if not week:
+        await message.answer("No completed war weeks found yet.")
+        return
+    season_id, section_index = week
+    report = await build_weekly_report(season_id, section_index, CLAN_TAG)
+    await message.answer(report)
+
+
+@router.message(Command("war8"))
+async def cmd_war8(message: Message) -> None:
+    """Show the rolling war report for the last 8 completed weeks."""
+    weeks = await get_last_completed_weeks(8, CLAN_TAG)
+    if not weeks:
+        await message.answer("No completed war weeks found yet.")
+        return
+    report = await build_rolling_report(weeks, CLAN_TAG)
+    await message.answer(report)
 
 
 @router.message(Command("inactive"))
