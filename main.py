@@ -330,6 +330,8 @@ async def maybe_post_weekly_report(bot: Bot) -> None:
             sent_count += 1
         except Exception as e:
             logger.error("Failed to send weekly report to %s: %s", chat_id, e)
+            if "parse entities" in str(e).lower():
+                logger.warning("Telegram parse error while sending weekly report")
 
     await set_app_state(
         LAST_REPORTED_WEEK_KEY,

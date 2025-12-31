@@ -1,5 +1,6 @@
 """Report builders for weekly and rolling war summaries."""
 
+from html import escape
 from typing import Iterable
 
 from db import get_rolling_leaderboard, get_week_leaderboard
@@ -8,7 +9,8 @@ from db import get_rolling_leaderboard, get_week_leaderboard
 def _format_entries(entries: Iterable[dict[str, object]]) -> list[str]:
     lines: list[str] = []
     for index, row in enumerate(entries, 1):
-        name = str(row.get("player_name", "Unknown"))
+        player_name = row.get("player_name") or "Unknown"
+        name = escape(str(player_name))
         decks_used = int(row.get("decks_used", 0))
         fame = int(row.get("fame", 0))
         lines.append(f"{index}) {name} - decks: {decks_used}, fame: {fame}")
