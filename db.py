@@ -13,9 +13,10 @@ from sqlalchemy import (
     Integer,
     String,
     UniqueConstraint,
+    delete,
     select,
 )
-from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.postgresql import JSONB, insert as pg_insert
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -161,6 +162,16 @@ class ClanMemberDaily(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utc_now, nullable=False
     )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, onupdate=_utc_now, nullable=False
+    )
+
+
+class AppState(Base):
+    __tablename__ = "app_state"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utc_now, onupdate=_utc_now, nullable=False
     )
@@ -376,6 +387,24 @@ async def _upsert_clan_member_daily(
             "player_name": stmt.excluded.player_name,
             "role": stmt.excluded.role,
             "trophies": stmt.excluded.trophies,
+            "updated_at": now,
+        },
+    )
+    await session.execute(stmt)
+
+
+async def _upsert_app_state(
+    session: AsyncSession, now: datetime, key: str, value: dict[str, Any]
+) -> None:
+    stmt = pg_insert(AppState.__table__).values(
+        key=key,
+        value=value,
+        updated_at=now,
+    )
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["key"],
+        set_={
+            "value": stmt.excluded.value,
             "updated_at": now,
         },
     )
@@ -654,6 +683,50 @@ async def save_clan_member_daily(
             role,
             trophies,
         )
+
+
+async def get_app_state(
+    key: str, session: AsyncSession | None = None
+) -> dict[str, Any] | None:
+    if session is None:
+        async with _get_session() as session:
+            result = await session.execute(
+                select(AppState).where(AppState.key == key)
+            )
+            state = result.scalar_one_or_none()
+            return state.value if state else None
+    result = await session.execute(select(AppState).where(AppState.key == key))
+    state = result.scalar_one_or_none()
+    return state.value if state else None
+
+
+async def set_app_state(
+    key: str, value: dict[str, Any], session: AsyncSession | None = None
+) -> None:
+    now = _utc_now()
+    if session is None:
+        async with _get_session() as session:
+            try:
+                await _upsert_app_state(session, now, key, value)
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+    else:
+        await _upsert_app_state(session, now, key, value)
+
+
+async def delete_app_state(key: str, session: AsyncSession | None = None) -> None:
+    if session is None:
+        async with _get_session() as session:
+            try:
+                await session.execute(delete(AppState).where(AppState.key == key))
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+    else:
+        await session.execute(delete(AppState).where(AppState.key == key))
 
 
 async def get_latest_river_race_state(clan_tag: str) -> dict[str, Any] | None:
