@@ -32,6 +32,12 @@ FETCH_INTERVAL_SECONDS: int = int(
     get_env_var("FETCH_INTERVAL_SECONDS", default="3600", required=False)
 )
 
+# Backfill configuration
+BACKFILL_WEEKS: int = int(get_env_var("BACKFILL_WEEKS", default="8", required=False))
+
+# Daily snapshot hour (UTC)
+SNAPSHOT_UTC_HOUR: int = int(get_env_var("SNAPSHOT_UTC_HOUR", default="0", required=False))
+
 # Inactivity threshold in days
 INACTIVE_DAYS_THRESHOLD: int = int(
     get_env_var("INACTIVE_DAYS_THRESHOLD", default="7", required=False)

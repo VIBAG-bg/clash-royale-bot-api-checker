@@ -9,7 +9,7 @@ from aiogram.types import Message
 
 from config import CLAN_TAG
 from cr_api import get_api_client, ClashRoyaleAPIError
-from db import get_latest_river_race_state, get_inactive_players
+from db import get_inactive_players, get_latest_war_race_state
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +75,7 @@ async def cmd_inactive(message: Message) -> None:
     """Handle /inactive command - Show players with low River Race participation."""
     try:
         # Get the latest River Race state to know current season/section
-        state = await get_latest_river_race_state(CLAN_TAG)
+        state = await get_latest_war_race_state(CLAN_TAG)
         
         if state is None:
             await message.answer(

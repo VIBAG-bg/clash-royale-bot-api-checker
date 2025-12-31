@@ -76,12 +76,29 @@ Edit `.env` with your values:
 - `CLAN_TAG` - Your clan tag (without the #)
 - `DATABASE_URL` - PostgreSQL connection string (Heroku provides this)
 - `FETCH_INTERVAL_SECONDS` - Background fetch interval (default: 3600)
+- `BACKFILL_WEEKS` - Default weeks to import for River Race log backfill (default: 8)
+- `SNAPSHOT_UTC_HOUR` - Daily snapshot hour in UTC (default: 0)
 - `INACTIVE_DAYS_THRESHOLD` - Days threshold for inactivity (default: 7)
+- `CR_API_BASE_URL` - Optional reverse proxy base URL for CR API
 
 ### 5. Run the Bot
 
 ```bash
 python main.py
+```
+
+## Heroku Maintenance
+
+Cleanup invalid rows:
+
+```bash
+heroku run python scripts/cleanup_bad_rows.py -a <APP>
+```
+
+Backfill River Race log:
+
+```bash
+heroku run python scripts/backfill_riverracelog.py --weeks 8 -a <APP>
 ```
 
 ## Database Schema
@@ -121,6 +138,44 @@ Tracks the current River Race state:
   "clan_score": 45000,
   "created_at": "2024-01-15T10:00:00Z",
   "updated_at": "2024-01-15T18:00:00Z"
+}
+```
+
+### player_participation_daily Table
+
+Stores daily snapshots of player participation:
+
+```json
+{
+  "player_tag": "#ABC123",
+  "player_name": "Player Name",
+  "season_id": 75,
+  "section_index": 2,
+  "is_colosseum": false,
+  "snapshot_date": "2024-01-15",
+  "fame": 1500,
+  "repair_points": 500,
+  "boat_attacks": 2,
+  "decks_used": 12,
+  "decks_used_today": 4,
+  "created_at": "2024-01-15T10:00:00Z",
+  "updated_at": "2024-01-15T18:00:00Z"
+}
+```
+
+### clan_member_daily Table
+
+Stores daily snapshots of clan members:
+
+```json
+{
+  "snapshot_date": "2024-01-15",
+  "clan_tag": "ABC123",
+  "player_tag": "#ABC123",
+  "player_name": "Player Name",
+  "role": "member",
+  "trophies": 6500,
+  "created_at": "2024-01-15T10:00:00Z"
 }
 ```
 

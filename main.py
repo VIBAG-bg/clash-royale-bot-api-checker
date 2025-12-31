@@ -3,6 +3,7 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -15,9 +16,12 @@ from db import (
     connect_db,
     close_db,
     get_session,
+    save_clan_member_daily,
     save_player_participation,
+    save_player_participation_daily,
     save_river_race_state,
 )
+from riverrace_import import get_latest_riverrace_log_info
 
 # Configure logging
 logging.basicConfig(
@@ -43,21 +47,30 @@ async def fetch_river_race_stats() -> None:
     async with FETCH_LOCK:
         try:
             api_client = await get_api_client()
-            
+
             # Get current River Race data
             river_race = await api_client.get_current_river_race(CLAN_TAG)
-            
+
             # Extract race metadata
-            season_id = river_race.get("seasonId", 0)
-            section_index = river_race.get("sectionIndex", 0)
-            period_type = river_race.get("periodType", "unknown")
-            
+            season_id = river_race.get("seasonId")
+            section_index = river_race.get("sectionIndex")
+            period_type = river_race.get("periodType", "unknown") or "unknown"
+
+            missing_season = season_id is None
+            missing_section = section_index is None
+
+            if season_id is None:
+                season_id = 0
+            if section_index is None:
+                section_index = 0
+
+            period_type_lower = period_type.lower()
+
             # Determine if this is a Colosseum week
             # Colosseum weeks occur every 4th week (section_index is 0-based: 3, 7, 11, etc.)
             # The period type may also indicate "colosseum"
             is_colosseum = (
-                period_type.lower() == "colosseum" or
-                (section_index + 1) % 4 == 0
+                period_type_lower == "colosseum" or (section_index + 1) % 4 == 0
             )
             
             logger.info(
@@ -69,50 +82,128 @@ async def fetch_river_race_stats() -> None:
             # Find our clan in the race data
             clan_data = river_race.get("clan", {})
             clan_score = clan_data.get("fame", 0)
-            
+
             # Get participant data from our clan
             participants = clan_data.get("participants", [])
-            
-            if not participants:
-                logger.warning("No participants found in River Race data")
-                return
-            
-            # Save participation data for each player
-            saved_count = 0
+
+            snapshot_date = datetime.now(timezone.utc).date()
+
             async with get_session() as session:
                 try:
-                    for participant in participants:
-                        player_tag = participant.get("tag", "")
-                        player_name = participant.get("name", "Unknown")
-                        fame = participant.get("fame", 0)
-                        repair_points = participant.get("repairPoints", 0)
-                        boat_attacks = participant.get("boatAttacks", 0)
-                        decks_used = participant.get("decksUsed", 0)
-                        decks_used_today = participant.get("decksUsedToday", 0)
-                        
-                        if player_tag:
-                            await save_player_participation(
-                                player_tag=player_tag,
-                                player_name=player_name,
+                    members = await api_client.get_clan_members(CLAN_TAG)
+                    for member in members:
+                        player_tag = member.get("tag", "")
+                        if not player_tag:
+                            continue
+                        await save_clan_member_daily(
+                            snapshot_date=snapshot_date,
+                            clan_tag=CLAN_TAG,
+                            player_tag=player_tag,
+                            player_name=member.get("name", "Unknown"),
+                            role=member.get("role"),
+                            trophies=member.get("trophies"),
+                            session=session,
+                        )
+
+                    if period_type_lower == "training":
+                        if season_id > 0:
+                            await save_river_race_state(
+                                clan_tag=CLAN_TAG,
                                 season_id=season_id,
                                 section_index=section_index,
                                 is_colosseum=is_colosseum,
-                                fame=fame,
-                                repair_points=repair_points,
-                                boat_attacks=boat_attacks,
-                                decks_used=decks_used,
-                                decks_used_today=decks_used_today,
+                                period_type=period_type_lower,
+                                clan_score=clan_score,
                                 session=session,
                             )
-                            saved_count += 1
-                    
+                        await session.commit()
+                        return
+
+                    log_info = await get_latest_riverrace_log_info(CLAN_TAG)
+                    if log_info:
+                        log_season_id = log_info["season_id"]
+                        log_section_index = log_info["section_index"]
+                        if missing_season or missing_section or season_id <= 0:
+                            season_id = log_season_id
+                            section_index = log_section_index
+                            is_colosseum = log_info["is_colosseum"]
+                        elif (
+                            season_id != log_season_id
+                            or section_index != log_section_index
+                        ):
+                            logger.warning(
+                                "Season/section mismatch (current %s/%s, log %s/%s); using log values",
+                                season_id,
+                                section_index,
+                                log_season_id,
+                                log_section_index,
+                            )
+                            season_id = log_season_id
+                            section_index = log_section_index
+                            is_colosseum = log_info["is_colosseum"]
+
+                    if season_id <= 0:
+                        logger.warning(
+                            "Skipping participation updates due to missing season/section"
+                        )
+                        await session.commit()
+                        return
+
+                    if not participants:
+                        logger.warning("No participants found in River Race data")
+                    else:
+                        # Save participation data for each player
+                        saved_count = 0
+                        for participant in participants:
+                            player_tag = participant.get("tag", "")
+                            player_name = participant.get("name", "Unknown")
+                            fame = participant.get("fame", 0)
+                            repair_points = participant.get("repairPoints", 0)
+                            boat_attacks = participant.get("boatAttacks", 0)
+                            decks_used = participant.get("decksUsed", 0)
+                            decks_used_today = participant.get("decksUsedToday", 0)
+
+                            if player_tag:
+                                await save_player_participation(
+                                    player_tag=player_tag,
+                                    player_name=player_name,
+                                    season_id=season_id,
+                                    section_index=section_index,
+                                    is_colosseum=is_colosseum,
+                                    fame=fame,
+                                    repair_points=repair_points,
+                                    boat_attacks=boat_attacks,
+                                    decks_used=decks_used,
+                                    decks_used_today=decks_used_today,
+                                    session=session,
+                                )
+                                await save_player_participation_daily(
+                                    player_tag=player_tag,
+                                    player_name=player_name,
+                                    season_id=season_id,
+                                    section_index=section_index,
+                                    is_colosseum=is_colosseum,
+                                    snapshot_date=snapshot_date,
+                                    fame=fame,
+                                    repair_points=repair_points,
+                                    boat_attacks=boat_attacks,
+                                    decks_used=decks_used,
+                                    decks_used_today=decks_used_today,
+                                    session=session,
+                                )
+                                saved_count += 1
+
+                        logger.info(
+                            f"Successfully saved participation data for {saved_count} players"
+                        )
+
                     # Save the River Race state
                     await save_river_race_state(
                         clan_tag=CLAN_TAG,
                         season_id=season_id,
                         section_index=section_index,
                         is_colosseum=is_colosseum,
-                        period_type=period_type,
+                        period_type=period_type_lower,
                         clan_score=clan_score,
                         session=session,
                     )
@@ -120,10 +211,6 @@ async def fetch_river_race_stats() -> None:
                 except Exception:
                     await session.rollback()
                     raise
-            
-            logger.info(
-                f"Successfully saved participation data for {saved_count} players"
-            )
         except ClashRoyaleAPIError as e:
             logger.error(f"Clash Royale API error: {e}")
         except Exception as e:

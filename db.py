@@ -1,11 +1,20 @@
 """Database module for PostgreSQL operations using SQLAlchemy async."""
 
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import os
 from typing import Any, AsyncIterator
 
-from sqlalchemy import Boolean, DateTime, Index, Integer, String, UniqueConstraint, select
+from sqlalchemy import (
+    Boolean,
+    Date,
+    DateTime,
+    Index,
+    Integer,
+    String,
+    UniqueConstraint,
+    select,
+)
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -84,6 +93,71 @@ class PlayerParticipation(Base):
     boat_attacks: Mapped[int] = mapped_column(Integer, nullable=False)
     decks_used: Mapped[int] = mapped_column(Integer, nullable=False)
     decks_used_today: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, onupdate=_utc_now, nullable=False
+    )
+
+
+class PlayerParticipationDaily(Base):
+    __tablename__ = "player_participation_daily"
+    __table_args__ = (
+        UniqueConstraint(
+            "player_tag",
+            "season_id",
+            "section_index",
+            "is_colosseum",
+            "snapshot_date",
+            name="uq_player_participation_daily_player_season_section_date",
+        ),
+        Index(
+            "ix_player_participation_daily_season_section_date",
+            "season_id",
+            "section_index",
+            "snapshot_date",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    player_tag: Mapped[str] = mapped_column(String(32), nullable=False)
+    player_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    season_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    section_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    is_colosseum: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    snapshot_date: Mapped[date] = mapped_column(Date, nullable=False)
+    fame: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    repair_points: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    boat_attacks: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    decks_used: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    decks_used_today: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, onupdate=_utc_now, nullable=False
+    )
+
+
+class ClanMemberDaily(Base):
+    __tablename__ = "clan_member_daily"
+    __table_args__ = (
+        UniqueConstraint(
+            "snapshot_date",
+            "clan_tag",
+            "player_tag",
+            name="uq_clan_member_daily_date_clan_player",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    snapshot_date: Mapped[date] = mapped_column(Date, nullable=False)
+    clan_tag: Mapped[str] = mapped_column(String(32), nullable=False)
+    player_tag: Mapped[str] = mapped_column(String(32), nullable=False)
+    player_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    role: Mapped[str | None] = mapped_column(String(32))
+    trophies: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utc_now, nullable=False
     )
@@ -219,6 +293,89 @@ async def _upsert_river_race_state(
             "is_colosseum": stmt.excluded.is_colosseum,
             "period_type": stmt.excluded.period_type,
             "clan_score": stmt.excluded.clan_score,
+            "updated_at": now,
+        },
+    )
+    await session.execute(stmt)
+
+
+async def _upsert_player_participation_daily(
+    session: AsyncSession,
+    now: datetime,
+    snapshot_date: date,
+    player_tag: str,
+    player_name: str,
+    season_id: int,
+    section_index: int,
+    is_colosseum: bool,
+    fame: int,
+    repair_points: int,
+    boat_attacks: int,
+    decks_used: int,
+    decks_used_today: int,
+) -> None:
+    stmt = pg_insert(PlayerParticipationDaily.__table__).values(
+        player_tag=player_tag,
+        player_name=player_name,
+        season_id=season_id,
+        section_index=section_index,
+        is_colosseum=is_colosseum,
+        snapshot_date=snapshot_date,
+        fame=fame,
+        repair_points=repair_points,
+        boat_attacks=boat_attacks,
+        decks_used=decks_used,
+        decks_used_today=decks_used_today,
+        created_at=now,
+        updated_at=now,
+    )
+    stmt = stmt.on_conflict_do_update(
+        index_elements=[
+            "player_tag",
+            "season_id",
+            "section_index",
+            "is_colosseum",
+            "snapshot_date",
+        ],
+        set_={
+            "player_name": stmt.excluded.player_name,
+            "fame": stmt.excluded.fame,
+            "repair_points": stmt.excluded.repair_points,
+            "boat_attacks": stmt.excluded.boat_attacks,
+            "decks_used": stmt.excluded.decks_used,
+            "decks_used_today": stmt.excluded.decks_used_today,
+            "updated_at": now,
+        },
+    )
+    await session.execute(stmt)
+
+
+async def _upsert_clan_member_daily(
+    session: AsyncSession,
+    now: datetime,
+    snapshot_date: date,
+    clan_tag: str,
+    player_tag: str,
+    player_name: str,
+    role: str | None,
+    trophies: int | None,
+) -> None:
+    stmt = pg_insert(ClanMemberDaily.__table__).values(
+        snapshot_date=snapshot_date,
+        clan_tag=clan_tag,
+        player_tag=player_tag,
+        player_name=player_name,
+        role=role,
+        trophies=trophies,
+        created_at=now,
+        updated_at=now,
+    )
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["snapshot_date", "clan_tag", "player_tag"],
+        set_={
+            "player_name": stmt.excluded.player_name,
+            "role": stmt.excluded.role,
+            "trophies": stmt.excluded.trophies,
             "updated_at": now,
         },
     )
@@ -402,12 +559,128 @@ async def save_river_race_state(
         )
 
 
+async def save_player_participation_daily(
+    player_tag: str,
+    player_name: str,
+    season_id: int,
+    section_index: int,
+    is_colosseum: bool,
+    snapshot_date: date,
+    fame: int,
+    repair_points: int,
+    boat_attacks: int,
+    decks_used: int,
+    decks_used_today: int,
+    session: AsyncSession | None = None,
+) -> None:
+    """Save or update daily participation snapshot for a player."""
+    now = _utc_now()
+    if session is None:
+        async with _get_session() as session:
+            try:
+                await _upsert_player_participation_daily(
+                    session,
+                    now,
+                    snapshot_date,
+                    player_tag,
+                    player_name,
+                    season_id,
+                    section_index,
+                    is_colosseum,
+                    fame,
+                    repair_points,
+                    boat_attacks,
+                    decks_used,
+                    decks_used_today,
+                )
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+    else:
+        await _upsert_player_participation_daily(
+            session,
+            now,
+            snapshot_date,
+            player_tag,
+            player_name,
+            season_id,
+            section_index,
+            is_colosseum,
+            fame,
+            repair_points,
+            boat_attacks,
+            decks_used,
+            decks_used_today,
+        )
+
+
+async def save_clan_member_daily(
+    snapshot_date: date,
+    clan_tag: str,
+    player_tag: str,
+    player_name: str,
+    role: str | None,
+    trophies: int | None,
+    session: AsyncSession | None = None,
+) -> None:
+    """Save or update daily snapshot of a clan member."""
+    now = _utc_now()
+    if session is None:
+        async with _get_session() as session:
+            try:
+                await _upsert_clan_member_daily(
+                    session,
+                    now,
+                    snapshot_date,
+                    clan_tag,
+                    player_tag,
+                    player_name,
+                    role,
+                    trophies,
+                )
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+    else:
+        await _upsert_clan_member_daily(
+            session,
+            now,
+            snapshot_date,
+            clan_tag,
+            player_tag,
+            player_name,
+            role,
+            trophies,
+        )
+
+
 async def get_latest_river_race_state(clan_tag: str) -> dict[str, Any] | None:
     """Get the latest River Race state for a clan."""
     async with _get_session() as session:
         result = await session.execute(
             select(RiverRaceState)
             .where(RiverRaceState.clan_tag == clan_tag)
+            .order_by(
+                RiverRaceState.season_id.desc(),
+                RiverRaceState.section_index.desc(),
+            )
+            .limit(1)
+        )
+        state = result.scalar_one_or_none()
+        return _river_race_state_to_dict(state) if state else None
+
+
+async def get_latest_war_race_state(clan_tag: str) -> dict[str, Any] | None:
+    """Get the latest non-training River Race state for a clan."""
+    async with _get_session() as session:
+        result = await session.execute(
+            select(RiverRaceState)
+            .where(
+                RiverRaceState.clan_tag == clan_tag,
+                RiverRaceState.period_type != "training",
+            )
             .order_by(
                 RiverRaceState.season_id.desc(),
                 RiverRaceState.section_index.desc(),
