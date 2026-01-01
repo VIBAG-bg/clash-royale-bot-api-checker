@@ -62,9 +62,10 @@ def _normalize_tag(tag: str) -> str:
 async def _get_bot_username(message: Message) -> str | None:
     if BOT_USERNAME:
         return BOT_USERNAME.lstrip("@")
-    if message.bot.username:
-        return message.bot.username
-    me = await message.bot.get_me()
+    try:
+        me = await message.bot.get_me()
+    except Exception:
+        return None
     return me.username if me else None
 
 
