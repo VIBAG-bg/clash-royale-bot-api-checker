@@ -184,6 +184,14 @@ def _compare_to_avg(value: float, avg: float) -> str:
     return "≈ Near"
 
 
+def _compare_simple(value: int, avg: int) -> str:
+    if value > avg:
+        return "✅ Above"
+    if value < avg:
+        return "❌ Below"
+    return "➖ Equal"
+
+
 async def _resolve_active_week_key(
     clan_tag: str,
 ) -> tuple[int, int] | None:
@@ -804,11 +812,11 @@ async def build_my_activity_report(
     wtd_donations_text = str(wtd_donations) if wtd_donations is not None else "n/a"
     wtd_received_text = str(wtd_received) if wtd_received is not None else "n/a"
     if wtd_donations is None or clan_avg_wtd is None:
-        donation_compare_line = "• vs clan avg (WTD): n/a"
+        donation_compare_line = "🤝 You: n/a | Clan avg: n/a → ⚠️ No data"
     else:
-        delta = int(wtd_donations) - int(clan_avg_wtd)
         donation_compare_line = (
-            f"• vs clan avg (WTD): {delta:+d}  (you {wtd_donations}, avg {clan_avg_wtd})"
+            f"🤝 You: {wtd_donations} cards | Clan avg: {clan_avg_wtd} cards → "
+            f"{_compare_simple(int(wtd_donations), int(clan_avg_wtd))}"
         )
     donation_lines = [
         "🤝 Donations",
@@ -818,7 +826,6 @@ async def build_my_activity_report(
         donation_lines.append(
             f"• last {DONATION_WEEKS_WINDOW} donation weeks: {donation_sum} ({donation_weeks}/{DONATION_WEEKS_WINDOW})"
         )
-    donation_lines.append(donation_compare_line)
     if DONATION_WEEKS_WINDOW > 0:
         if donation_weeks > 0:
             avg_donations = donation_sum / donation_weeks
@@ -851,8 +858,9 @@ async def build_my_activity_report(
         "",
         SEPARATOR_LINE,
         "🏁 Compared to clan average (last 8 weeks)",
-        f"🃏 You: {avg_user_decks_str} | Clan avg: {clan_avg_decks_str} → {decks_comp}",
-        f"🏆 You: {avg_user_fame_str}  | Clan avg: {clan_avg_fame_str}  → {fame_comp}",
+        f"🃏 You: {avg_user_decks_str} decks | Clan avg: {clan_avg_decks_str} decks → {decks_comp}",
+        f"🏆 You: {avg_user_fame_str} fame points | Clan avg: {clan_avg_fame_str} fame points → {fame_comp}",
+        donation_compare_line,
         "",
         SEPARATOR_LINE,
         *donation_lines,
