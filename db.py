@@ -1113,6 +1113,109 @@ async def get_clan_wtd_donation_average(
     return int(round(avg_value))
 
 
+async def get_current_members_with_wtd_donations(
+    clan_tag: str,
+    session: AsyncSession | None = None,
+) -> list[dict[str, object]]:
+    if session is None:
+        async with _get_session() as session:
+            return await get_current_members_with_wtd_donations(
+                clan_tag, session=session
+            )
+    latest_date = await get_latest_membership_date(clan_tag, session=session)
+    if latest_date is None:
+        return []
+    result = await session.execute(
+        select(
+            ClanMemberDaily.player_tag,
+            ClanMemberDaily.player_name,
+            ClanMemberDaily.donations,
+        ).where(
+            ClanMemberDaily.clan_tag == clan_tag,
+            ClanMemberDaily.snapshot_date == latest_date,
+        )
+    )
+    return [
+        {
+            "player_tag": row.player_tag,
+            "player_name": row.player_name,
+            "donations": int(row.donations) if row.donations is not None else None,
+        }
+        for row in result.all()
+    ]
+
+
+async def get_donation_weekly_sums_for_window(
+    clan_tag: str,
+    window_weeks: int,
+    session: AsyncSession | None = None,
+) -> tuple[list[dict[str, object]], int]:
+    if window_weeks <= 0:
+        return [], 0
+    if session is None:
+        async with _get_session() as session:
+            return await get_donation_weekly_sums_for_window(
+                clan_tag, window_weeks=window_weeks, session=session
+            )
+    latest_date = await get_latest_membership_date(clan_tag, session=session)
+    if latest_date is None:
+        return [], 0
+    current_members = (
+        select(ClanMemberDaily.player_tag, ClanMemberDaily.player_name)
+        .where(
+            ClanMemberDaily.clan_tag == clan_tag,
+            ClanMemberDaily.snapshot_date == latest_date,
+        )
+        .subquery()
+    )
+    week_dates_result = await session.execute(
+        select(ClanMemberDonationsWeekly.week_start_date)
+        .where(ClanMemberDonationsWeekly.clan_tag == clan_tag)
+        .distinct()
+        .order_by(ClanMemberDonationsWeekly.week_start_date.desc())
+        .limit(window_weeks)
+    )
+    week_dates = [row.week_start_date for row in week_dates_result.all()]
+    if not week_dates:
+        return [], 0
+    coverage = len(week_dates)
+    name_expr = func.coalesce(
+        func.max(ClanMemberDonationsWeekly.player_name),
+        func.max(current_members.c.player_name),
+    )
+    sum_expr = func.sum(ClanMemberDonationsWeekly.donations_week_total)
+    weeks_expr = func.count(func.distinct(ClanMemberDonationsWeekly.week_start_date))
+    result = await session.execute(
+        select(
+            ClanMemberDonationsWeekly.player_tag,
+            name_expr.label("player_name"),
+            sum_expr.label("donations_sum"),
+            weeks_expr.label("weeks_present"),
+        )
+        .join(
+            current_members,
+            current_members.c.player_tag == ClanMemberDonationsWeekly.player_tag,
+        )
+        .where(
+            ClanMemberDonationsWeekly.clan_tag == clan_tag,
+            ClanMemberDonationsWeekly.week_start_date.in_(week_dates),
+        )
+        .group_by(ClanMemberDonationsWeekly.player_tag)
+    )
+    return (
+        [
+            {
+                "player_tag": row.player_tag,
+                "player_name": row.player_name,
+                "donations_sum": int(row.donations_sum or 0),
+                "weeks_present": int(row.weeks_present or 0),
+            }
+            for row in result.all()
+        ],
+        coverage,
+    )
+
+
 async def get_top_donors_wtd(
     clan_tag: str,
     limit: int = 5,

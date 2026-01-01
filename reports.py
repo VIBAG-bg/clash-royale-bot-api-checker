@@ -3,6 +3,8 @@
 from datetime import datetime, timezone
 from typing import Iterable
 
+from statistics import median
+
 from sqlalchemy import func, select, tuple_
 
 from config import (
@@ -19,6 +21,8 @@ from db import (
     get_current_member_tags,
     get_clan_wtd_donation_average,
     get_current_wtd_donations,
+    get_current_members_with_wtd_donations,
+    get_donation_weekly_sums_for_window,
     get_last_weeks_from_db,
     get_latest_river_race_state,
     get_participation_week_counts,
@@ -173,6 +177,12 @@ def _format_avg(value: float) -> str:
     return f"{value:.1f}"
 
 
+def _format_median(values: list[int]) -> str:
+    if not values:
+        return "n/a"
+    return f"{median(values):.1f}"
+
+
 def _compare_to_avg(value: float, avg: float) -> str:
     if avg <= 0:
         return "≈ Near"
@@ -279,6 +289,117 @@ async def build_rolling_report(
         lines.extend(
             await _build_top_donors_window_block(clan_tag, DONATION_WEEKS_WINDOW)
         )
+    return "\n".join(lines)
+
+
+async def build_donations_report(clan_tag: str, clan_name: str | None = None) -> str:
+    today_utc = datetime.now(timezone.utc).date().isoformat()
+    clan_label = clan_name or "Unknown"
+
+    member_rows = await get_current_members_with_wtd_donations(clan_tag)
+    member_rows = _filter_protected(member_rows)
+    members_count = len(member_rows)
+    donation_values = [
+        int(row["donations"])
+        for row in member_rows
+        if row.get("donations") is not None
+    ]
+
+    top_rows = sorted(
+        [row for row in member_rows if row.get("donations") is not None],
+        key=lambda row: (-int(row.get("donations", 0)), str(row.get("player_name") or "")),
+    )[:5]
+
+    lines = [
+        HEADER_LINE,
+        "🤝 DONATIONS LEADERBOARD",
+        HEADER_LINE,
+        f"🏠 Clan: {clan_label} ({clan_tag})",
+        f"📅 Week: {today_utc} (donation week in progress)",
+        "",
+        SEPARATOR_LINE,
+        "🔥 Top donors this week",
+    ]
+
+    if top_rows:
+        for index, row in enumerate(top_rows, 1):
+            name = row.get("player_name") or row.get("player_tag") or "Unknown"
+            donations = row.get("donations")
+            donations_text = str(donations) if donations is not None else "n/a"
+            lines.append(f"{index}) {name} — {donations_text} cards")
+        total_cards = sum(donation_values)
+        avg_cards = total_cards / members_count if members_count else 0.0
+        lines.extend(
+            [
+                "",
+                "📌 Clan totals (this week):",
+                f"• total: {total_cards} cards",
+                f"• average per member: {avg_cards:.1f} cards ({members_count} members)",
+                f"• median: {_format_median(donation_values)} cards",
+            ]
+        )
+    else:
+        lines.append("No donation data yet.")
+
+    if DONATION_WEEKS_WINDOW > 0:
+        weekly_rows, coverage = await get_donation_weekly_sums_for_window(
+            clan_tag, DONATION_WEEKS_WINDOW
+        )
+        weekly_rows = _filter_protected(weekly_rows)
+        top_weekly = sorted(
+            weekly_rows,
+            key=lambda row: (
+                -int(row.get("donations_sum", 0)),
+                -int(row.get("weeks_present", 0)),
+                str(row.get("player_name") or ""),
+            ),
+        )[:5]
+
+        lines.extend(["", SEPARATOR_LINE, f"🏁 Top donors (last {DONATION_WEEKS_WINDOW} weeks)"])
+        if top_weekly:
+            for index, row in enumerate(top_weekly, 1):
+                name = row.get("player_name") or row.get("player_tag") or "Unknown"
+                donations_sum = int(row.get("donations_sum", 0))
+                weeks_present = int(row.get("weeks_present", 0))
+                lines.append(
+                    f"{index}) {name} — {donations_sum} cards ({weeks_present}/{DONATION_WEEKS_WINDOW} weeks)"
+                )
+
+            total_cards_8w = sum(int(row.get("donations_sum", 0)) for row in weekly_rows)
+            avg_member_8w = total_cards_8w / members_count if members_count else 0.0
+            avg_clan_per_week = total_cards_8w / coverage if coverage else 0.0
+            avg_member_per_week = (
+                total_cards_8w / (members_count * coverage)
+                if members_count and coverage
+                else 0.0
+            )
+            lines.extend(
+                [
+                    "",
+                    f"📌 Clan totals (last {DONATION_WEEKS_WINDOW} weeks):",
+                    f"• total: {total_cards_8w} cards ({coverage}/{DONATION_WEEKS_WINDOW} weeks coverage)",
+                    f"• average per member: {avg_member_8w:.1f} cards",
+                    f"• average per week (clan): {avg_clan_per_week:.1f} cards/week",
+                    f"• average per member/week: {avg_member_per_week:.1f} cards/week",
+                ]
+            )
+        else:
+            lines.append("No donation history yet.")
+
+    lines.extend(
+        [
+            "",
+            SEPARATOR_LINE,
+            "ℹ️ Notes",
+            "• Only current clan members are included.",
+            "• \"This week\" updates live and resets on Sunday (UTC).",
+        ]
+    )
+    if DONATION_WEEKS_WINDOW <= 0:
+        lines.append(
+            "• Last N weeks block is disabled (DONATION_WEEKS_WINDOW=0)."
+        )
+
     return "\n".join(lines)
 
 

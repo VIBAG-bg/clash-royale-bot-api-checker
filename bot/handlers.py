@@ -31,6 +31,7 @@ from db import (
 )
 from reports import (
     build_current_war_report,
+    build_donations_report,
     build_kick_shortlist_report,
     build_my_activity_report,
     build_rolling_report,
@@ -202,7 +203,8 @@ async def cmd_start(message: Message) -> None:
         "/list_for_kick - Kick shortlist\n"
         "/current_war - Current war snapshot\n"
         "/my_activity - Your activity report\n"
-        "/activity - Show activity by nickname or @username"
+        "/activity - Show activity by nickname or @username\n"
+        "/donations - Donations leaderboard"
     )
     await message.answer(welcome_text, parse_mode=None)
 
@@ -428,6 +430,27 @@ async def cmd_current_war(message: Message) -> None:
         await message.answer("CLAN_TAG is not configured.", parse_mode=None)
         return
     report = await build_current_war_report(clan_tag)
+    await message.answer(report, parse_mode=None)
+
+
+@router.message(Command("donations"))
+async def cmd_donations(message: Message) -> None:
+    """Show donation leaderboards for the clan."""
+    clan_tag = _require_clan_tag()
+    if not clan_tag:
+        await message.answer("CLAN_TAG is not configured.", parse_mode=None)
+        return
+    clan_name = "Unknown"
+    try:
+        api_client = await get_api_client()
+        clan_data = await api_client.get_clan(clan_tag)
+        if isinstance(clan_data, dict):
+            clan_name = clan_data.get("name") or clan_name
+    except ClashRoyaleAPIError as e:
+        logger.warning("Failed to fetch clan name: %s", e)
+    except Exception as e:
+        logger.warning("Failed to fetch clan name: %s", e)
+    report = await build_donations_report(clan_tag, clan_name)
     await message.answer(report, parse_mode=None)
 
 
