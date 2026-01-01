@@ -1086,6 +1086,33 @@ async def get_current_wtd_donations(
     return donations_map
 
 
+async def get_clan_wtd_donation_average(
+    clan_tag: str,
+    snapshot_date: date | None = None,
+    session: AsyncSession | None = None,
+) -> int | None:
+    if session is None:
+        async with _get_session() as session:
+            return await get_clan_wtd_donation_average(
+                clan_tag, snapshot_date=snapshot_date, session=session
+            )
+    if snapshot_date is None:
+        snapshot_date = await get_latest_membership_date(clan_tag, session=session)
+    if snapshot_date is None:
+        return None
+    result = await session.execute(
+        select(func.avg(ClanMemberDaily.donations)).where(
+            ClanMemberDaily.clan_tag == clan_tag,
+            ClanMemberDaily.snapshot_date == snapshot_date,
+            ClanMemberDaily.donations.is_not(None),
+        )
+    )
+    avg_value = result.scalar_one_or_none()
+    if avg_value is None:
+        return None
+    return int(round(avg_value))
+
+
 async def get_donations_weekly_sums(
     clan_tag: str,
     player_tags: set[str] | None,
