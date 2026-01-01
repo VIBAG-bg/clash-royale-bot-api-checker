@@ -26,6 +26,8 @@ from db import (
     get_donations_weekly_sums,
     get_rolling_leaderboard,
     get_session,
+    get_top_donors_window,
+    get_top_donors_wtd,
     get_week_decks_map,
     get_week_leaderboard,
 )
@@ -118,6 +120,48 @@ async def _collect_wtd_donations(
     return await get_current_wtd_donations(clan_tag, player_tags=normalized_tags)
 
 
+async def _build_top_donors_wtd_block(clan_tag: str) -> list[str]:
+    donors = await get_top_donors_wtd(clan_tag, limit=10)
+    donors = _filter_protected(donors)[:5]
+    lines = ["🤝 Top donors this week"]
+    if donors:
+        for index, row in enumerate(donors, 1):
+            name = row.get("player_name") or row.get("player_tag") or "Unknown"
+            donations = row.get("donations")
+            donations_text = str(donations) if donations is not None else "n/a"
+            lines.append(f"{index}) {name} — {donations_text} donations")
+    else:
+        lines.append("No donation data yet.")
+    return lines
+
+
+async def _build_top_donors_window_block(
+    clan_tag: str, window_weeks: int
+) -> list[str]:
+    donors = await get_top_donors_window(
+        clan_tag, window_weeks=window_weeks, limit=10
+    )
+    donors = _filter_protected(donors)[:5]
+    lines = [f"🤝 Top donors (last {window_weeks} weeks)"]
+    if donors:
+        for index, row in enumerate(donors, 1):
+            name = row.get("player_name") or row.get("player_tag") or "Unknown"
+            donations_sum = row.get("donations_sum")
+            weeks_present = row.get("weeks_present")
+            donations_text = str(donations_sum) if donations_sum is not None else "0"
+            weeks_text = (
+                f"{weeks_present}/{window_weeks}"
+                if weeks_present is not None
+                else f"0/{window_weeks}"
+            )
+            lines.append(
+                f"{index}) {name} — {donations_text} donations ({weeks_text} weeks)"
+            )
+    else:
+        lines.append("No donation history yet.")
+    return lines
+
+
 def _coerce_int(value: object) -> int | None:
     try:
         return int(value)
@@ -192,6 +236,8 @@ async def build_weekly_report(
         "🔥 TOP 10 ACTIVE (highest decks, then fame)",
         *_format_entries(active),
     ]
+    lines.extend(["", DIVIDER_LINE, ""])
+    lines.extend(await _build_top_donors_wtd_block(clan_tag))
     return "\n".join(lines)
 
 
@@ -220,6 +266,11 @@ async def build_rolling_report(
         "🔥 TOP 10 ACTIVE (sum of decks, then fame)",
         *_format_entries(active),
     ]
+    if DONATION_WEEKS_WINDOW > 0:
+        lines.extend(["", DIVIDER_LINE, ""])
+        lines.extend(
+            await _build_top_donors_window_block(clan_tag, DONATION_WEEKS_WINDOW)
+        )
     return "\n".join(lines)
 
 
