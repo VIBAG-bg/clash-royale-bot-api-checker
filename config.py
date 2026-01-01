@@ -64,6 +64,17 @@ KICK_SHORTLIST_LIMIT: int = int(
     get_env_var("KICK_SHORTLIST_LIMIT", default="3", required=False)
 )
 
+# Donation configuration
+DONATION_WEEKS_WINDOW: int = int(
+    get_env_var("DONATION_WEEKS_WINDOW", default="8", required=False)
+)
+DONATION_REVIVE_WTD_THRESHOLD: int = int(
+    get_env_var("DONATION_REVIVE_WTD_THRESHOLD", default="30", required=False)
+)
+DONATION_REVIVE_8W_THRESHOLD: int = int(
+    get_env_var("DONATION_REVIVE_8W_THRESHOLD", default="120", required=False)
+)
+
 # Clash Royale API base URL
 CR_API_BASE_URL: str = os.getenv("CR_API_BASE_URL", "https://api.clashroyale.com/v1")
 

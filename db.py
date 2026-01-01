@@ -1,7 +1,7 @@
 """Database module for PostgreSQL operations using SQLAlchemy async."""
 
 from contextlib import asynccontextmanager
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import logging
 import os
 from typing import Any, AsyncIterator
@@ -37,6 +37,15 @@ logger = logging.getLogger(__name__)
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def get_donation_week_start_date(dt_utc: datetime) -> date:
+    if dt_utc.tzinfo is None:
+        dt_utc = dt_utc.replace(tzinfo=timezone.utc)
+    current_date = dt_utc.astimezone(timezone.utc).date()
+    weekday = current_date.weekday()  # Mon=0..Sun=6
+    days_since_sunday = (weekday + 1) % 7
+    return current_date - timedelta(days=days_since_sunday)
 
 
 class Base(DeclarativeBase):
@@ -168,9 +177,52 @@ class ClanMemberDaily(Base):
     player_name: Mapped[str] = mapped_column(String(128), nullable=False)
     role: Mapped[str | None] = mapped_column(String(32))
     trophies: Mapped[int | None] = mapped_column(Integer)
+    donations: Mapped[int | None] = mapped_column(Integer)
+    donations_received: Mapped[int | None] = mapped_column(Integer)
+    clan_rank: Mapped[int | None] = mapped_column(Integer)
+    previous_clan_rank: Mapped[int | None] = mapped_column(Integer)
+    exp_level: Mapped[int | None] = mapped_column(Integer)
+    last_seen: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utc_now, nullable=False
     )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, onupdate=_utc_now, nullable=False
+    )
+
+
+class ClanMemberDonationsWeekly(Base):
+    __tablename__ = "clan_member_donations_weekly"
+    __table_args__ = (
+        UniqueConstraint(
+            "clan_tag",
+            "week_start_date",
+            "player_tag",
+            name="uq_clan_member_donations_weekly_clan_week_player",
+        ),
+        Index(
+            "ix_clan_member_donations_weekly_clan_week",
+            "clan_tag",
+            "week_start_date",
+        ),
+        Index(
+            "ix_clan_member_donations_weekly_player_tag",
+            "player_tag",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    clan_tag: Mapped[str] = mapped_column(String(32), nullable=False)
+    week_start_date: Mapped[date] = mapped_column(Date, nullable=False)
+    player_tag: Mapped[str] = mapped_column(String(32), nullable=False)
+    player_name: Mapped[str | None] = mapped_column(String(128))
+    donations_week_total: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0
+    )
+    donations_received_week_total: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0
+    )
+    snapshots_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utc_now, onupdate=_utc_now, nullable=False
     )
@@ -424,6 +476,12 @@ async def _upsert_clan_member_daily(
     player_name: str,
     role: str | None,
     trophies: int | None,
+    donations: int | None,
+    donations_received: int | None,
+    clan_rank: int | None,
+    previous_clan_rank: int | None,
+    exp_level: int | None,
+    last_seen: str | None,
 ) -> None:
     stmt = pg_insert(ClanMemberDaily.__table__).values(
         snapshot_date=snapshot_date,
@@ -432,6 +490,12 @@ async def _upsert_clan_member_daily(
         player_name=player_name,
         role=role,
         trophies=trophies,
+        donations=donations,
+        donations_received=donations_received,
+        clan_rank=clan_rank,
+        previous_clan_rank=previous_clan_rank,
+        exp_level=exp_level,
+        last_seen=last_seen,
         created_at=now,
         updated_at=now,
     )
@@ -441,6 +505,12 @@ async def _upsert_clan_member_daily(
             "player_name": stmt.excluded.player_name,
             "role": stmt.excluded.role,
             "trophies": stmt.excluded.trophies,
+            "donations": stmt.excluded.donations,
+            "donations_received": stmt.excluded.donations_received,
+            "clan_rank": stmt.excluded.clan_rank,
+            "previous_clan_rank": stmt.excluded.previous_clan_rank,
+            "exp_level": stmt.excluded.exp_level,
+            "last_seen": stmt.excluded.last_seen,
             "updated_at": now,
         },
     )
@@ -727,6 +797,12 @@ async def save_clan_member_daily(
     player_name: str,
     role: str | None,
     trophies: int | None,
+    donations: int | None = None,
+    donations_received: int | None = None,
+    clan_rank: int | None = None,
+    previous_clan_rank: int | None = None,
+    exp_level: int | None = None,
+    last_seen: str | None = None,
     session: AsyncSession | None = None,
 ) -> None:
     """Save or update daily snapshot of a clan member."""
@@ -743,6 +819,12 @@ async def save_clan_member_daily(
                     player_name,
                     role,
                     trophies,
+                    donations,
+                    donations_received,
+                    clan_rank,
+                    previous_clan_rank,
+                    exp_level,
+                    last_seen,
                 )
                 await session.commit()
             except Exception:
@@ -758,7 +840,114 @@ async def save_clan_member_daily(
             player_name,
             role,
             trophies,
+            donations,
+            donations_received,
+            clan_rank,
+            previous_clan_rank,
+            exp_level,
+            last_seen,
         )
+
+
+async def upsert_clan_member_daily(
+    snapshot_date: date,
+    clan_tag: str,
+    members: list[dict[str, Any]],
+    session: AsyncSession | None = None,
+) -> None:
+    now = _utc_now()
+    if session is None:
+        async with _get_session() as session:
+            try:
+                await upsert_clan_member_daily(
+                    snapshot_date, clan_tag, members, session=session
+                )
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+            return
+    for member in members:
+        player_tag = member.get("tag", "")
+        if not player_tag:
+            continue
+        donations = member.get("donations")
+        donations_received = member.get("donationsReceived")
+        clan_rank = member.get("clanRank")
+        previous_clan_rank = member.get("previousClanRank")
+        exp_level = member.get("expLevel")
+        await _upsert_clan_member_daily(
+            session,
+            now,
+            snapshot_date,
+            clan_tag,
+            player_tag,
+            member.get("name", "Unknown"),
+            member.get("role"),
+            member.get("trophies"),
+            int(donations) if donations is not None else None,
+            int(donations_received) if donations_received is not None else None,
+            int(clan_rank) if clan_rank is not None else None,
+            int(previous_clan_rank) if previous_clan_rank is not None else None,
+            int(exp_level) if exp_level is not None else None,
+            member.get("lastSeen"),
+        )
+
+
+async def upsert_donations_weekly(
+    clan_tag: str,
+    week_start_date: date,
+    members: list[dict[str, Any]],
+    session: AsyncSession | None = None,
+) -> None:
+    now = _utc_now()
+    if session is None:
+        async with _get_session() as session:
+            try:
+                await upsert_donations_weekly(
+                    clan_tag, week_start_date, members, session=session
+                )
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+            return
+
+    for member in members:
+        player_tag = member.get("tag", "")
+        if not player_tag:
+            continue
+        donations = member.get("donations")
+        donations_received = member.get("donationsReceived")
+        stmt = pg_insert(ClanMemberDonationsWeekly.__table__).values(
+            clan_tag=clan_tag,
+            week_start_date=week_start_date,
+            player_tag=player_tag,
+            player_name=member.get("name"),
+            donations_week_total=int(donations) if donations is not None else 0,
+            donations_received_week_total=int(donations_received)
+            if donations_received is not None
+            else 0,
+            snapshots_count=1,
+            updated_at=now,
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["clan_tag", "week_start_date", "player_tag"],
+            set_={
+                "player_name": stmt.excluded.player_name,
+                "donations_week_total": func.greatest(
+                    ClanMemberDonationsWeekly.donations_week_total,
+                    stmt.excluded.donations_week_total,
+                ),
+                "donations_received_week_total": func.greatest(
+                    ClanMemberDonationsWeekly.donations_received_week_total,
+                    stmt.excluded.donations_received_week_total,
+                ),
+                "snapshots_count": ClanMemberDonationsWeekly.snapshots_count + 1,
+                "updated_at": now,
+            },
+        )
+        await session.execute(stmt)
 
 
 async def upsert_clan_chat(
@@ -858,6 +1047,96 @@ async def get_current_member_snapshot(
         )
     )
     return {row.player_tag: row.player_name for row in result.all()}
+
+
+async def get_current_wtd_donations(
+    clan_tag: str,
+    player_tags: set[str] | None = None,
+    session: AsyncSession | None = None,
+) -> dict[str, dict[str, int | None]]:
+    if session is None:
+        async with _get_session() as session:
+            return await get_current_wtd_donations(
+                clan_tag, player_tags=player_tags, session=session
+            )
+    if player_tags is not None and not player_tags:
+        return {}
+    latest_date = await get_latest_membership_date(clan_tag, session=session)
+    if latest_date is None:
+        return {}
+    query = select(
+        ClanMemberDaily.player_tag,
+        ClanMemberDaily.donations,
+        ClanMemberDaily.donations_received,
+    ).where(
+        ClanMemberDaily.clan_tag == clan_tag,
+        ClanMemberDaily.snapshot_date == latest_date,
+    )
+    if player_tags:
+        query = query.where(ClanMemberDaily.player_tag.in_(player_tags))
+    result = await session.execute(query)
+    donations_map: dict[str, dict[str, int | None]] = {}
+    for row in result.all():
+        donations_map[row.player_tag] = {
+            "donations": int(row.donations) if row.donations is not None else None,
+            "donations_received": int(row.donations_received)
+            if row.donations_received is not None
+            else None,
+        }
+    return donations_map
+
+
+async def get_donations_weekly_sums(
+    clan_tag: str,
+    player_tags: set[str] | None,
+    window_weeks: int,
+    session: AsyncSession | None = None,
+) -> dict[str, dict[str, int]]:
+    if window_weeks <= 0:
+        return {}
+    if session is None:
+        async with _get_session() as session:
+            return await get_donations_weekly_sums(
+                clan_tag,
+                player_tags=player_tags,
+                window_weeks=window_weeks,
+                session=session,
+            )
+    if player_tags is not None and not player_tags:
+        return {}
+    week_dates_result = await session.execute(
+        select(ClanMemberDonationsWeekly.week_start_date)
+        .where(ClanMemberDonationsWeekly.clan_tag == clan_tag)
+        .distinct()
+        .order_by(ClanMemberDonationsWeekly.week_start_date.desc())
+        .limit(window_weeks)
+    )
+    week_dates = [row.week_start_date for row in week_dates_result.all()]
+    if not week_dates:
+        return {}
+
+    query = (
+        select(
+            ClanMemberDonationsWeekly.player_tag,
+            func.sum(ClanMemberDonationsWeekly.donations_week_total).label("sum_total"),
+            func.count().label("weeks_present"),
+        )
+        .where(
+            ClanMemberDonationsWeekly.clan_tag == clan_tag,
+            ClanMemberDonationsWeekly.week_start_date.in_(week_dates),
+        )
+        .group_by(ClanMemberDonationsWeekly.player_tag)
+    )
+    if player_tags:
+        query = query.where(ClanMemberDonationsWeekly.player_tag.in_(player_tags))
+    result = await session.execute(query)
+    return {
+        row.player_tag: {
+            "sum": int(row.sum_total or 0),
+            "weeks_present": int(row.weeks_present or 0),
+        }
+        for row in result.all()
+    }
 
 
 async def get_player_name_for_tag(

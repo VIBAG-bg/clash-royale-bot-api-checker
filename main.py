@@ -21,16 +21,18 @@ from cr_api import get_api_client, close_api_client, ClashRoyaleAPIError
 from db import (
     connect_db,
     close_db,
+    get_donation_week_start_date,
     get_colosseum_index_for_season,
     get_app_state,
     get_enabled_clan_chats,
     get_session,
     set_colosseum_index_for_season,
     set_app_state,
-    save_clan_member_daily,
     save_player_participation,
     save_player_participation_daily,
     save_river_race_state,
+    upsert_clan_member_daily,
+    upsert_donations_weekly,
 )
 from reports import (
     build_kick_shortlist_report,
@@ -172,21 +174,30 @@ async def fetch_river_race_stats() -> None:
             participants = clan_data.get("participants", [])
 
             snapshot_date = datetime.now(timezone.utc).date()
+            week_start_date = get_donation_week_start_date(datetime.now(timezone.utc))
+            members: list[dict[str, object]] = []
+            try:
+                members = await api_client.get_clan_members(CLAN_TAG)
+            except ClashRoyaleAPIError as e:
+                logger.warning("Failed to fetch clan members: %s", e)
+            except Exception as e:
+                logger.warning(
+                    "Failed to fetch clan members: %s", e, exc_info=True
+                )
 
             async with get_session() as session:
                 try:
-                    members = await api_client.get_clan_members(CLAN_TAG)
-                    for member in members:
-                        player_tag = member.get("tag", "")
-                        if not player_tag:
-                            continue
-                        await save_clan_member_daily(
+                    if members:
+                        await upsert_clan_member_daily(
                             snapshot_date=snapshot_date,
                             clan_tag=CLAN_TAG,
-                            player_tag=player_tag,
-                            player_name=member.get("name", "Unknown"),
-                            role=member.get("role"),
-                            trophies=member.get("trophies"),
+                            members=members,
+                            session=session,
+                        )
+                        await upsert_donations_weekly(
+                            clan_tag=CLAN_TAG,
+                            week_start_date=week_start_date,
+                            members=members,
                             session=session,
                         )
 

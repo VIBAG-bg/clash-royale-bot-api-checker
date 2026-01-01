@@ -6,6 +6,9 @@ from typing import Iterable
 from sqlalchemy import func, select, tuple_
 
 from config import (
+    DONATION_REVIVE_8W_THRESHOLD,
+    DONATION_REVIVE_WTD_THRESHOLD,
+    DONATION_WEEKS_WINDOW,
     KICK_SHORTLIST_LIMIT,
     NEW_MEMBER_WEEKS_PLAYED,
     PROTECTED_PLAYER_TAGS,
@@ -15,6 +18,8 @@ from db import (
     PlayerParticipation,
     get_app_state,
     get_current_member_tags,
+    get_current_wtd_donations,
+    get_donations_weekly_sums,
     get_last_weeks_from_db,
     get_latest_river_race_state,
     get_participation_week_counts,
@@ -64,7 +69,12 @@ def _format_name(raw_name: object) -> str:
     return name.ljust(NAME_WIDTH)
 
 
-def _format_entries(entries: Iterable[dict[str, object]]) -> list[str]:
+def _format_entries(
+    entries: Iterable[dict[str, object]],
+    donations_wtd: dict[str, dict[str, int | None]] | None = None,
+    donations_8w: dict[str, dict[str, int]] | None = None,
+    donation_window: int | None = None,
+) -> list[str]:
     rows = list(entries)
     if not rows:
         return ["No data available."]
@@ -79,10 +89,58 @@ def _format_entries(entries: Iterable[dict[str, object]]) -> list[str]:
         name = _format_name(row.get("player_name"))
         decks_used = int(row.get("decks_used", 0))
         fame = int(row.get("fame", 0))
+        suffix = _format_donation_suffix(
+            row.get("player_tag"),
+            donations_wtd,
+            donations_8w,
+            donation_window,
+        )
         lines.append(
-            f"{index:>2}) {name} — decks: {decks_used:>{decks_width}} | fame: {fame:>{fame_width}}"
+            f"{index:>2}) {name} — decks: {decks_used:>{decks_width}} | fame: {fame:>{fame_width}}{suffix}"
         )
     return lines
+
+
+def _format_donation_suffix(
+    player_tag: object,
+    donations_wtd: dict[str, dict[str, int | None]] | None,
+    donations_8w: dict[str, dict[str, int]] | None,
+    donation_window: int | None,
+) -> str:
+    tag = _normalize_tag(player_tag)
+    wtd_value: int | None = None
+    if donations_wtd and tag in donations_wtd:
+        wtd_value = donations_wtd[tag].get("donations")
+    wtd_text = f"donWTD: {wtd_value}" if wtd_value is not None else "donWTD: n/a"
+    parts = [wtd_text]
+    if donation_window and donation_window > 0:
+        weekly_sum = 0
+        weeks_present = 0
+        if donations_8w and tag in donations_8w:
+            weekly_sum = int(donations_8w[tag].get("sum", 0))
+            weeks_present = int(donations_8w[tag].get("weeks_present", 0))
+        parts.append(
+            f"don{donation_window}w: {weekly_sum} ({weeks_present}/{donation_window})"
+        )
+    return f" | {' | '.join(parts)}"
+
+
+async def _collect_donation_maps(
+    clan_tag: str,
+    tags: set[str],
+) -> tuple[dict[str, dict[str, int | None]], dict[str, dict[str, int]]]:
+    if not tags:
+        return {}, {}
+    normalized_tags = {_normalize_tag(tag) for tag in tags if tag}
+    donations_wtd = await get_current_wtd_donations(
+        clan_tag, player_tags=normalized_tags
+    )
+    donations_8w: dict[str, dict[str, int]] = {}
+    if DONATION_WEEKS_WINDOW > 0:
+        donations_8w = await get_donations_weekly_sums(
+            clan_tag, player_tags=normalized_tags, window_weeks=DONATION_WEEKS_WINDOW
+        )
+    return donations_wtd, donations_8w
 
 
 def _coerce_int(value: object) -> int | None:
@@ -144,6 +202,12 @@ async def build_weekly_report(
         clan_tag=clan_tag,
     )
     inactive = _filter_protected(inactive)
+    tags = {
+        _normalize_tag(row.get("player_tag"))
+        for row in [*inactive, *active]
+        if row.get("player_tag")
+    }
+    donations_wtd, donations_8w = await _collect_donation_maps(clan_tag, tags)
     member_count = len(await get_current_member_tags(clan_tag))
     lines = [
         HEADER_LINE,
@@ -152,12 +216,22 @@ async def build_weekly_report(
         f"Members considered: {member_count} (current clan members)",
         "",
         "🧊 TOP 10 INACTIVE (lowest decks, then fame)",
-        *_format_entries(inactive),
+        *_format_entries(
+            inactive,
+            donations_wtd=donations_wtd,
+            donations_8w=donations_8w,
+            donation_window=DONATION_WEEKS_WINDOW,
+        ),
         "",
         DIVIDER_LINE,
         "",
         "🔥 TOP 10 ACTIVE (highest decks, then fame)",
-        *_format_entries(active),
+        *_format_entries(
+            active,
+            donations_wtd=donations_wtd,
+            donations_8w=donations_8w,
+            donation_window=DONATION_WEEKS_WINDOW,
+        ),
     ]
     return "\n".join(lines)
 
@@ -170,6 +244,12 @@ async def build_rolling_report(
         clan_tag=clan_tag,
     )
     inactive = _filter_protected(inactive)
+    tags = {
+        _normalize_tag(row.get("player_tag"))
+        for row in [*inactive, *active]
+        if row.get("player_tag")
+    }
+    donations_wtd, donations_8w = await _collect_donation_maps(clan_tag, tags)
     member_count = len(await get_current_member_tags(clan_tag))
     weeks_label = ", ".join(f"{season}/{section + 1}" for season, section in weeks)
     lines = [
@@ -180,12 +260,22 @@ async def build_rolling_report(
         f"Weeks: {weeks_label}" if weeks_label else "Weeks: n/a",
         "",
         "🧊 TOP 10 INACTIVE (sum of decks, then fame)",
-        *_format_entries(inactive),
+        *_format_entries(
+            inactive,
+            donations_wtd=donations_wtd,
+            donations_8w=donations_8w,
+            donation_window=DONATION_WEEKS_WINDOW,
+        ),
         "",
         DIVIDER_LINE,
         "",
         "🔥 TOP 10 ACTIVE (sum of decks, then fame)",
-        *_format_entries(active),
+        *_format_entries(
+            active,
+            donations_wtd=donations_wtd,
+            donations_8w=donations_8w,
+            donation_window=DONATION_WEEKS_WINDOW,
+        ),
     ]
     return "\n".join(lines)
 
@@ -217,7 +307,11 @@ async def build_kick_shortlist_report(
             return "\n".join(lines)
 
         inactive = _filter_protected(inactive)
-        inactive_tags = {row.get("player_tag") for row in inactive if row.get("player_tag")}
+        inactive_tags = {
+            _normalize_tag(row.get("player_tag"))
+            for row in inactive
+            if row.get("player_tag")
+        }
         if not inactive_tags:
             lines.append("No clear kick candidates.")
             return "\n".join(lines)
@@ -232,35 +326,72 @@ async def build_kick_shortlist_report(
             session=session,
         )
 
+    donations_wtd = await get_current_wtd_donations(clan_tag, player_tags=inactive_tags)
+    donations_8w = await get_donations_weekly_sums(
+        clan_tag, player_tags=inactive_tags, window_weeks=DONATION_WEEKS_WINDOW
+    )
+
     candidates: list[dict[str, object]] = []
     warnings: list[dict[str, object]] = []
+    donation_warnings: list[dict[str, object]] = []
     new_members: list[dict[str, object]] = []
     for row in inactive:
         tag = row.get("player_tag")
         if not tag:
             continue
+        normalized_tag = _normalize_tag(tag)
         weeks_played = int(history_counts.get(tag, 0))
         last_decks = int(last_week_decks.get(tag, 0))
+        wtd_donations = None
+        if normalized_tag in donations_wtd:
+            wtd_donations = donations_wtd[normalized_tag].get("donations")
+        donation_sum = 0
+        donation_weeks = 0
+        if DONATION_WEEKS_WINDOW > 0 and normalized_tag in donations_8w:
+            donation_sum = int(donations_8w[normalized_tag].get("sum", 0))
+            donation_weeks = int(donations_8w[normalized_tag].get("weeks_present", 0))
         if weeks_played <= NEW_MEMBER_WEEKS_PLAYED:
             if last_decks < REVIVED_DECKS_THRESHOLD:
                 new_members.append(
                     {
                         "player_name": row.get("player_name") or "Unknown",
+                        "player_tag": normalized_tag,
                         "decks_used": int(row.get("decks_used", 0)),
                         "fame": int(row.get("fame", 0)),
                         "weeks_played": weeks_played,
+                        "donations_wtd": wtd_donations,
+                        "donations_sum": donation_sum,
+                        "donations_weeks": donation_weeks,
                     }
                 )
             continue
         entry = {
-            "player_tag": tag,
+            "player_tag": normalized_tag,
             "player_name": row.get("player_name") or "Unknown",
             "decks_used": int(row.get("decks_used", 0)),
             "fame": int(row.get("fame", 0)),
             "last_week_decks": last_decks,
+            "donations_wtd": wtd_donations,
+            "donations_sum": donation_sum,
+            "donations_weeks": donation_weeks,
         }
         if last_decks >= REVIVED_DECKS_THRESHOLD:
             warnings.append(entry)
+            continue
+        donation_revive = False
+        if (
+            wtd_donations is not None
+            and wtd_donations >= DONATION_REVIVE_WTD_THRESHOLD
+        ):
+            donation_revive = True
+        if (
+            DONATION_WEEKS_WINDOW > 0
+            and DONATION_REVIVE_8W_THRESHOLD > 0
+            and donation_sum >= DONATION_REVIVE_8W_THRESHOLD
+        ):
+            donation_revive = True
+        if donation_revive:
+            donation_warnings.append(entry)
         else:
             candidates.append(entry)
 
@@ -269,9 +400,16 @@ async def build_kick_shortlist_report(
         lines.append("Kick candidates:")
         for index, row in enumerate(shortlist, 1):
             name = _format_name(row.get("player_name"))
+            donation_suffix = _format_donation_suffix(
+                row.get("player_tag"),
+                donations_wtd,
+                donations_8w,
+                DONATION_WEEKS_WINDOW,
+            )
             lines.append(
                 f"{index}) {name} — 8w decks: {row.get('decks_used', 0)} | "
                 f"8w fame: {row.get('fame', 0)} | last week: {row.get('last_week_decks', 0)}"
+                f"{donation_suffix}"
             )
     else:
         lines.append("No clear kick candidates.")
@@ -285,9 +423,37 @@ async def build_kick_shortlist_report(
         )
         for index, row in enumerate(warnings, 1):
             name = _format_name(row.get("player_name"))
+            donation_suffix = _format_donation_suffix(
+                row.get("player_tag"),
+                donations_wtd,
+                donations_8w,
+                DONATION_WEEKS_WINDOW,
+            )
             lines.append(
                 f"{index}) {name} — 8w decks: {row.get('decks_used', 0)} | "
                 f"8w fame: {row.get('fame', 0)} | last week: {row.get('last_week_decks', 0)}"
+                f"{donation_suffix}"
+            )
+
+    if donation_warnings:
+        lines.extend(
+            [
+                "",
+                "Warnings: inactive overall, but donating — consider keeping",
+            ]
+        )
+        for index, row in enumerate(donation_warnings, 1):
+            name = _format_name(row.get("player_name"))
+            donation_suffix = _format_donation_suffix(
+                row.get("player_tag"),
+                donations_wtd,
+                donations_8w,
+                DONATION_WEEKS_WINDOW,
+            )
+            lines.append(
+                f"{index}) {name} — 8w decks: {row.get('decks_used', 0)} | "
+                f"8w fame: {row.get('fame', 0)} | last week: {row.get('last_week_decks', 0)}"
+                f"{donation_suffix}"
             )
 
     if new_members:
@@ -300,9 +466,16 @@ async def build_kick_shortlist_report(
         )
         for index, row in enumerate(new_members, 1):
             name = _format_name(row.get("player_name"))
+            donation_suffix = _format_donation_suffix(
+                row.get("player_tag"),
+                donations_wtd,
+                donations_8w,
+                DONATION_WEEKS_WINDOW,
+            )
             lines.append(
                 f"{index}) {name} — 8w decks: {row.get('decks_used', 0)} | "
                 f"8w fame: {row.get('fame', 0)} | weeks played: {row.get('weeks_played', 0)}"
+                f"{donation_suffix}"
             )
 
     return "\n".join(lines)
@@ -423,6 +596,13 @@ async def build_current_war_report(clan_tag: str) -> str:
                 for row in bottom_result.all()
             ]
 
+    tags = {
+        _normalize_tag(row.get("player_tag"))
+        for row in [*top_rows, *bottom_rows]
+        if row.get("player_tag")
+    }
+    donations_wtd, donations_8w = await _collect_donation_maps(clan_tag, tags)
+
     filtered_bottom = [
         row
         for row in bottom_rows
@@ -456,8 +636,15 @@ async def build_current_war_report(clan_tag: str) -> str:
     if top_rows:
         for index, row in enumerate(top_rows, 1):
             name = row.get("player_name") or row.get("player_tag") or "Unknown"
+            donation_suffix = _format_donation_suffix(
+                row.get("player_tag"),
+                donations_wtd,
+                donations_8w,
+                DONATION_WEEKS_WINDOW,
+            )
             lines.append(
                 f"{index}) {name} — {row.get('decks_used', 0)} • {row.get('fame', 0)}"
+                f"{donation_suffix}"
             )
     else:
         lines.append("No data available.")
@@ -472,8 +659,15 @@ async def build_current_war_report(clan_tag: str) -> str:
     if filtered_bottom:
         for index, row in enumerate(filtered_bottom, 1):
             name = row.get("player_name") or row.get("player_tag") or "Unknown"
+            donation_suffix = _format_donation_suffix(
+                row.get("player_tag"),
+                donations_wtd,
+                donations_8w,
+                DONATION_WEEKS_WINDOW,
+            )
             lines.append(
                 f"{index}) {name} — {row.get('decks_used', 0)} • {row.get('fame', 0)}"
+                f"{donation_suffix}"
             )
     else:
         lines.append("No data available.")
@@ -633,6 +827,24 @@ async def build_my_activity_report(
     decks_comp = _compare_to_avg(avg_user_decks, clan_avg_decks)
     fame_comp = _compare_to_avg(avg_user_fame, clan_avg_fame)
 
+    donations_wtd_map = await get_current_wtd_donations(
+        clan_tag, player_tags={_normalize_tag(player_tag)}
+    )
+    donations_8w_map = await get_donations_weekly_sums(
+        clan_tag,
+        player_tags={_normalize_tag(player_tag)},
+        window_weeks=DONATION_WEEKS_WINDOW,
+    )
+    tag_key = _normalize_tag(player_tag)
+    wtd_entry = donations_wtd_map.get(tag_key, {})
+    wtd_donations = wtd_entry.get("donations")
+    wtd_received = wtd_entry.get("donations_received")
+    donation_sum = 0
+    donation_weeks = 0
+    if DONATION_WEEKS_WINDOW > 0 and tag_key in donations_8w_map:
+        donation_sum = int(donations_8w_map[tag_key].get("sum", 0))
+        donation_weeks = int(donations_8w_map[tag_key].get("weeks_present", 0))
+
     if current_decks == 0:
         status_label = "🔴 DANGER"
         reason_line = "Reason: 0 decks this week."
@@ -647,6 +859,21 @@ async def build_my_activity_report(
     avg_user_fame_str = _format_avg(avg_user_fame)
     clan_avg_decks_str = _format_avg(clan_avg_decks)
     clan_avg_fame_str = _format_avg(clan_avg_fame)
+    wtd_donations_text = str(wtd_donations) if wtd_donations is not None else "n/a"
+    wtd_received_text = str(wtd_received) if wtd_received is not None else "n/a"
+    donation_lines = [
+        "🤝 Donations",
+        f"• this donation week (WTD): {wtd_donations_text} | received: {wtd_received_text}",
+    ]
+    if DONATION_WEEKS_WINDOW > 0:
+        donation_lines.append(
+            f"• last {DONATION_WEEKS_WINDOW} donation weeks: {donation_sum} ({donation_weeks}/{DONATION_WEEKS_WINDOW})"
+        )
+        if donation_weeks > 0:
+            avg_donations = donation_sum / donation_weeks
+            donation_lines.append(
+                f"• average per active week: {avg_donations:.1f}"
+            )
 
     lines = [
         "👤 My War Activity",
@@ -675,6 +902,9 @@ async def build_my_activity_report(
         "🏁 Compared to clan average (last 8 weeks)",
         f"🃏 You: {avg_user_decks_str} | Clan avg: {clan_avg_decks_str} → {decks_comp}",
         f"🏆 You: {avg_user_fame_str}  | Clan avg: {clan_avg_fame_str}  → {fame_comp}",
+        "",
+        SEPARATOR_LINE,
+        *donation_lines,
         "",
         SEPARATOR_LINE,
         f"🚦 Status: {status_label}",
