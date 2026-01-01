@@ -177,14 +177,24 @@ async def build_kick_shortlist_report(
 
     candidates: list[dict[str, object]] = []
     warnings: list[dict[str, object]] = []
+    new_members: list[dict[str, object]] = []
     for row in inactive:
         tag = row.get("player_tag")
         if not tag:
             continue
         weeks_played = int(history_counts.get(tag, 0))
-        if weeks_played <= NEW_MEMBER_WEEKS_PLAYED:
-            continue
         last_decks = int(last_week_decks.get(tag, 0))
+        if weeks_played <= NEW_MEMBER_WEEKS_PLAYED:
+            if last_decks < REVIVED_DECKS_THRESHOLD:
+                new_members.append(
+                    {
+                        "player_name": row.get("player_name") or "Unknown",
+                        "decks_used": int(row.get("decks_used", 0)),
+                        "fame": int(row.get("fame", 0)),
+                        "weeks_played": weeks_played,
+                    }
+                )
+            continue
         entry = {
             "player_tag": tag,
             "player_name": row.get("player_name") or "Unknown",
@@ -221,6 +231,21 @@ async def build_kick_shortlist_report(
             lines.append(
                 f"{index}) {name} — 8w decks: {row.get('decks_used', 0)} | "
                 f"8w fame: {row.get('fame', 0)} | last week: {row.get('last_week_decks', 0)}"
+            )
+
+    if new_members:
+        lines.extend(
+            [
+                "",
+                "Attention: new members (under %s CW weeks in clan)"
+                % NEW_MEMBER_WEEKS_PLAYED,
+            ]
+        )
+        for index, row in enumerate(new_members, 1):
+            name = _format_name(row.get("player_name"))
+            lines.append(
+                f"{index}) {name} — 8w decks: {row.get('decks_used', 0)} | "
+                f"8w fame: {row.get('fame', 0)} | weeks played: {row.get('weeks_played', 0)}"
             )
 
     return "\n".join(lines)
