@@ -2,6 +2,7 @@
 
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
+import logging
 import os
 from typing import Any, AsyncIterator
 
@@ -14,10 +15,12 @@ from sqlalchemy import (
     Integer,
     String,
     UniqueConstraint,
+    case,
     delete,
     func,
     select,
     tuple_,
+    update,
 )
 from sqlalchemy.dialects.postgresql import JSONB, insert as pg_insert
 from sqlalchemy.ext.asyncio import (
@@ -27,6 +30,9 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+
+logger = logging.getLogger(__name__)
 
 
 def _utc_now() -> datetime:
@@ -197,6 +203,9 @@ class AppState(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utc_now, onupdate=_utc_now, nullable=False
     )
+
+
+APP_STATE_COLOSSEUM_KEY = "colosseum_index_by_season"
 
 
 _engine: AsyncEngine | None = None
@@ -970,6 +979,120 @@ async def delete_app_state(key: str, session: AsyncSession | None = None) -> Non
                 raise
     else:
         await session.execute(delete(AppState).where(AppState.key == key))
+
+
+def _coerce_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_colosseum_map(value: Any) -> dict[int, int]:
+    mapping: dict[int, int] = {}
+    if not isinstance(value, dict):
+        return mapping
+    for key, raw_val in value.items():
+        season_id = _coerce_int(key)
+        section_index = _coerce_int(raw_val)
+        if season_id is None or section_index is None:
+            continue
+        if season_id < 0 or section_index < 0:
+            continue
+        mapping[season_id] = section_index
+    return mapping
+
+
+async def get_colosseum_index_map(
+    session: AsyncSession | None = None,
+) -> dict[int, int]:
+    state = await get_app_state(APP_STATE_COLOSSEUM_KEY, session=session)
+    return _parse_colosseum_map(state)
+
+
+async def get_colosseum_index_for_season(
+    season_id: int, session: AsyncSession | None = None
+) -> int | None:
+    mapping = await get_colosseum_index_map(session=session)
+    return mapping.get(season_id)
+
+
+async def _apply_colosseum_corrections(
+    session: AsyncSession, now: datetime, season_id: int, section_index: int
+) -> None:
+    logger.info(
+        "Running colosseum correction for season=%s section=%s",
+        season_id,
+        section_index,
+    )
+    is_colosseum_expr = case(
+        (PlayerParticipation.section_index == section_index, True),
+        else_=False,
+    )
+    await session.execute(
+        update(PlayerParticipation)
+        .where(PlayerParticipation.season_id == season_id)
+        .values(is_colosseum=is_colosseum_expr, updated_at=now)
+    )
+    is_colosseum_daily_expr = case(
+        (PlayerParticipationDaily.section_index == section_index, True),
+        else_=False,
+    )
+    await session.execute(
+        update(PlayerParticipationDaily)
+        .where(PlayerParticipationDaily.season_id == season_id)
+        .values(is_colosseum=is_colosseum_daily_expr, updated_at=now)
+    )
+    is_colosseum_state_expr = case(
+        (RiverRaceState.section_index == section_index, True),
+        else_=False,
+    )
+    await session.execute(
+        update(RiverRaceState)
+        .where(RiverRaceState.season_id == season_id)
+        .values(is_colosseum=is_colosseum_state_expr, updated_at=now)
+    )
+
+
+async def _set_colosseum_index_for_season(
+    session: AsyncSession, now: datetime, season_id: int, section_index: int
+) -> bool:
+    current_state = await get_app_state(APP_STATE_COLOSSEUM_KEY, session=session)
+    mapping = _parse_colosseum_map(current_state)
+    if mapping.get(season_id) == section_index:
+        return False
+    mapping[season_id] = section_index
+    logger.info(
+        "Set colosseum mapping for season=%s section=%s",
+        season_id,
+        section_index,
+    )
+    await _upsert_app_state(
+        session,
+        now,
+        APP_STATE_COLOSSEUM_KEY,
+        {str(key): value for key, value in mapping.items()},
+    )
+    await _apply_colosseum_corrections(session, now, season_id, section_index)
+    return True
+
+
+async def set_colosseum_index_for_season(
+    season_id: int, section_index: int, session: AsyncSession | None = None
+) -> bool:
+    now = _utc_now()
+    if session is None:
+        async with _get_session() as session:
+            try:
+                updated = await _set_colosseum_index_for_season(
+                    session, now, season_id, section_index
+                )
+                await session.commit()
+                return updated
+            except Exception:
+                await session.rollback()
+                raise
+    return await _set_colosseum_index_for_season(session, now, season_id, section_index)
 
 
 async def get_latest_river_race_state(clan_tag: str) -> dict[str, Any] | None:

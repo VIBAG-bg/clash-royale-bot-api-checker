@@ -5,7 +5,12 @@ from typing import Any
 
 from config import CLAN_TAG
 from cr_api import get_api_client
-from db import get_session, save_player_participation, save_river_race_state
+from db import (
+    get_colosseum_index_map,
+    get_session,
+    save_player_participation,
+    save_river_race_state,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -27,10 +32,15 @@ def _find_clan_entry(standings: list[dict[str, Any]], clan_tag: str) -> dict[str
     return None
 
 
-def _get_is_colosseum(item: dict[str, Any], section_index: int) -> bool:
+def _resolve_is_colosseum(
+    item: dict[str, Any], season_id: int, section_index: int, colosseum_map: dict[int, int]
+) -> bool:
     if "isColosseum" in item:
         return bool(item.get("isColosseum"))
-    return (section_index + 1) % 4 == 0
+    mapped_index = colosseum_map.get(season_id)
+    if mapped_index is not None:
+        return section_index == mapped_index
+    return False
 
 
 async def get_latest_riverrace_log_info(clan_tag: str | None = None) -> dict[str, Any] | None:
@@ -48,7 +58,6 @@ async def get_latest_riverrace_log_info(clan_tag: str | None = None) -> dict[str
     return {
         "season_id": season_id,
         "section_index": section_index,
-        "is_colosseum": _get_is_colosseum(item, section_index),
         "period_type": period_type,
     }
 
@@ -68,6 +77,7 @@ async def import_riverrace_log(weeks: int, clan_tag: str | None = None) -> tuple
 
     async with get_session() as session:
         try:
+            colosseum_map = await get_colosseum_index_map(session=session)
             for item in items:
                 standings = item.get("standings", [])
                 clan = _find_clan_entry(standings, target_tag)
@@ -79,7 +89,9 @@ async def import_riverrace_log(weeks: int, clan_tag: str | None = None) -> tuple
                 if season_id <= 0:
                     continue
 
-                is_colosseum = _get_is_colosseum(item, section_index)
+                is_colosseum = _resolve_is_colosseum(
+                    item, season_id, section_index, colosseum_map
+                )
                 period_type = (item.get("periodType") or "completed").lower()
                 clan_score = clan.get("fame", 0)
 

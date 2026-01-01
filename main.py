@@ -15,10 +15,11 @@ from cr_api import get_api_client, close_api_client, ClashRoyaleAPIError
 from db import (
     connect_db,
     close_db,
-    delete_app_state,
+    get_colosseum_index_for_season,
     get_app_state,
     get_enabled_clan_chats,
     get_session,
+    set_colosseum_index_for_season,
     set_app_state,
     save_clan_member_daily,
     save_player_participation,
@@ -41,6 +42,99 @@ LAST_REPORTED_WEEK_KEY = "last_reported_week"
 BOT: Bot | None = None
 
 
+def _coerce_non_negative_int(value: object) -> int | None:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number >= 0 else None
+
+
+def _parse_season_id(value: object) -> int | None:
+    number = _coerce_non_negative_int(value)
+    if number is None or number <= 0:
+        return None
+    return number
+
+
+def _parse_section_index(value: object) -> int | None:
+    return _coerce_non_negative_int(value)
+
+
+def _parse_active_week_state(
+    state: dict[str, object] | None,
+) -> tuple[int | None, int | None]:
+    if not isinstance(state, dict):
+        return None, None
+    season_id = _parse_season_id(state.get("season_id"))
+    section_index = _parse_section_index(state.get("section_index"))
+    if season_id is None or section_index is None:
+        return None, None
+    return season_id, section_index
+
+
+def _build_active_week_state(season_id: int, section_index: int) -> dict[str, object]:
+    return {
+        "season_id": season_id,
+        "section_index": section_index,
+        "set_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+async def _store_active_week(
+    season_id: int, section_index: int, session
+) -> None:
+    await set_app_state(
+        ACTIVE_WEEK_KEY,
+        _build_active_week_state(season_id, section_index),
+        session=session,
+    )
+
+
+async def _resolve_active_week(
+    *,
+    current_season_id: int | None,
+    current_section_index: int | None,
+    session,
+) -> tuple[int | None, int | None, str]:
+    stored_state = await get_app_state(ACTIVE_WEEK_KEY, session=session)
+    stored_season_id, stored_section_index = _parse_active_week_state(stored_state)
+
+    if current_section_index is None:
+        if stored_season_id is not None and stored_section_index is not None:
+            return stored_season_id, stored_section_index, "app_state"
+        return None, None, "missing"
+
+    if current_season_id is not None:
+        await _store_active_week(current_season_id, current_section_index, session)
+        return current_season_id, current_section_index, "currentriverrace"
+
+    if (
+        stored_season_id is not None
+        and stored_section_index == current_section_index
+    ):
+        return stored_season_id, current_section_index, "app_state"
+
+    log_info = await get_latest_riverrace_log_info(CLAN_TAG)
+    log_season_id = _parse_season_id(log_info["season_id"]) if log_info else None
+    log_section_index = (
+        _parse_section_index(log_info["section_index"]) if log_info else None
+    )
+    if log_season_id is not None and log_section_index is not None:
+        if current_section_index < log_section_index:
+            derived_season_id = log_season_id + 1
+        else:
+            derived_season_id = log_season_id
+        await _store_active_week(derived_season_id, current_section_index, session)
+        return derived_season_id, current_section_index, "derived(log_anchor)"
+
+    if stored_season_id is not None:
+        await _store_active_week(stored_season_id, current_section_index, session)
+        return stored_season_id, current_section_index, "app_state"
+
+    return None, None, "missing"
+
+
 async def fetch_river_race_stats() -> None:
     """
     Fetch current River Race stats and store player participation data.
@@ -60,31 +154,17 @@ async def fetch_river_race_stats() -> None:
             river_race = await api_client.get_current_river_race(CLAN_TAG)
 
             # Extract race metadata
-            season_id = river_race.get("seasonId")
-            section_index = river_race.get("sectionIndex")
+            season_id = _parse_season_id(river_race.get("seasonId"))
+            section_index = _parse_section_index(river_race.get("sectionIndex"))
             period_type = river_race.get("periodType", "unknown") or "unknown"
 
-            missing_season = season_id is None
-            missing_section = section_index is None
-
-            if season_id is None:
-                season_id = 0
-            if section_index is None:
-                section_index = 0
-
             period_type_lower = period_type.lower()
-
-            # Determine if this is a Colosseum week
-            # Colosseum weeks occur every 4th week (section_index is 0-based: 3, 7, 11, etc.)
-            # The period type may also indicate "colosseum"
-            is_colosseum = (
-                period_type_lower == "colosseum" or (section_index + 1) % 4 == 0
-            )
             
             logger.info(
-                f"Fetching River Race stats - Season: {season_id}, "
-                f"Section: {section_index}, Period: {period_type}, "
-                f"Colosseum: {is_colosseum}"
+                "Fetched River Race stats - Season: %s, Section: %s, Period: %s",
+                season_id if season_id is not None else "n/a",
+                section_index if section_index is not None else "n/a",
+                period_type,
             )
             
             # Find our clan in the race data
@@ -113,19 +193,53 @@ async def fetch_river_race_stats() -> None:
                             session=session,
                         )
 
-                    if period_type_lower == "training":
-                        log_info = await get_latest_riverrace_log_info(CLAN_TAG)
-                        stored_active_week = await get_app_state(
-                            ACTIVE_WEEK_KEY, session=session
+                    (
+                        resolved_season_id,
+                        resolved_section_index,
+                        source,
+                    ) = await _resolve_active_week(
+                        current_season_id=season_id,
+                        current_section_index=section_index,
+                        session=session,
+                    )
+
+                    if (
+                        resolved_season_id is not None
+                        and resolved_section_index is not None
+                    ):
+                        logger.info(
+                            "Week resolve: source=%s season=%s section=%s period=%s",
+                            source,
+                            resolved_season_id,
+                            resolved_section_index,
+                            period_type_lower,
                         )
-                        if stored_active_week and log_info:
-                            await delete_app_state(ACTIVE_WEEK_KEY, session=session)
-                            logger.info("Cleared active_week from DB during training")
-                        if season_id > 0:
+                    else:
+                        logger.warning(
+                            "Week resolve failed: source=%s season=%s section=%s period=%s",
+                            source,
+                            resolved_season_id,
+                            resolved_section_index,
+                            period_type_lower,
+                        )
+
+                    if period_type_lower == "training":
+                        if (
+                            resolved_season_id is not None
+                            and resolved_section_index is not None
+                        ):
+                            colosseum_index = await get_colosseum_index_for_season(
+                                resolved_season_id, session=session
+                            )
+                            is_colosseum = (
+                                resolved_section_index == colosseum_index
+                                if colosseum_index is not None
+                                else False
+                            )
                             await save_river_race_state(
                                 clan_tag=CLAN_TAG,
-                                season_id=season_id,
-                                section_index=section_index,
+                                season_id=resolved_season_id,
+                                section_index=resolved_section_index,
                                 is_colosseum=is_colosseum,
                                 period_type=period_type_lower,
                                 clan_score=clan_score,
@@ -134,101 +248,34 @@ async def fetch_river_race_stats() -> None:
                         await session.commit()
                         return
 
-                    resolved_season_id = 0
-                    resolved_section_index = 0
-                    current_valid = (
-                        not missing_season
-                        and not missing_section
-                        and season_id > 0
-                        and 0 <= section_index <= 3
-                    )
-
-                    if current_valid:
-                        resolved_season_id = season_id
-                        resolved_section_index = section_index
-                        await set_app_state(
-                            ACTIVE_WEEK_KEY,
-                            {
-                                "season_id": resolved_season_id,
-                                "section_index": resolved_section_index,
-                                "set_at": datetime.now(timezone.utc).isoformat(),
-                            },
-                            session=session,
-                        )
-                        logger.info(
-                            "Using week key from currentriverrace: season=%s, section=%s",
-                            resolved_season_id,
-                            resolved_section_index,
-                        )
-                    else:
-                        stored_active_week = await get_app_state(
-                            ACTIVE_WEEK_KEY, session=session
-                        )
-                        stored_season_id = 0
-                        stored_section_index = -1
-                        if stored_active_week:
-                            try:
-                                stored_season_id = int(
-                                    stored_active_week.get("season_id", 0)
-                                )
-                                stored_section_index = int(
-                                    stored_active_week.get("section_index", -1)
-                                )
-                            except (TypeError, ValueError):
-                                stored_season_id = 0
-                                stored_section_index = -1
-
-                        if stored_season_id > 0 and 0 <= stored_section_index <= 3:
-                            resolved_season_id = stored_season_id
-                            resolved_section_index = stored_section_index
-                            logger.info(
-                                "Using stored active_week from DB: season=%s, section=%s",
-                                resolved_season_id,
-                                resolved_section_index,
-                            )
-                        else:
-                            log_info = await get_latest_riverrace_log_info(CLAN_TAG)
-                            if not log_info or log_info["season_id"] <= 0:
-                                logger.warning(
-                                    "No active week available; skipping participation updates"
-                                )
-                                await session.commit()
-                                return
-                            derived_season_id = log_info["season_id"]
-                            derived_section_index = log_info["section_index"] + 1
-                            if derived_section_index > 3:
-                                derived_section_index = 0
-                                derived_season_id += 1
-                            resolved_season_id = derived_season_id
-                            resolved_section_index = derived_section_index
-                            await set_app_state(
-                                ACTIVE_WEEK_KEY,
-                                {
-                                    "season_id": resolved_season_id,
-                                    "section_index": resolved_section_index,
-                                    "set_at": datetime.now(timezone.utc).isoformat(),
-                                },
-                                session=session,
-                            )
-                            logger.info(
-                                "Derived active_week from log_latest + 1: season=%s, section=%s",
-                                resolved_season_id,
-                                resolved_section_index,
-                            )
-
-                    season_id = resolved_season_id
-                    section_index = resolved_section_index
-                    is_colosseum = (
-                        period_type_lower == "colosseum"
-                        or (section_index + 1) % 4 == 0
-                    )
-
-                    if season_id <= 0:
+                    if resolved_season_id is None or resolved_section_index is None:
                         logger.warning(
                             "Skipping participation updates due to missing season/section"
                         )
                         await session.commit()
                         return
+
+                    season_id = resolved_season_id
+                    section_index = resolved_section_index
+
+                    if period_type_lower == "colosseum":
+                        updated = await set_colosseum_index_for_season(
+                            season_id, section_index, session=session
+                        )
+                        if updated:
+                            logger.info(
+                                "Updated colosseum mapping: season=%s section=%s",
+                                season_id,
+                                section_index,
+                            )
+
+                    colosseum_index = await get_colosseum_index_for_season(
+                        season_id, session=session
+                    )
+                    if colosseum_index is not None:
+                        is_colosseum = section_index == colosseum_index
+                    else:
+                        is_colosseum = period_type_lower == "colosseum"
 
                     if not participants:
                         logger.warning("No participants found in River Race data")
