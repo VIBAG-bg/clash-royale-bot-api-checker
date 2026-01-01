@@ -201,7 +201,8 @@ async def cmd_start(message: Message) -> None:
         "/war8 - Rolling 8-week report\n"
         "/list_for_kick - Kick shortlist\n"
         "/current_war - Current war snapshot\n"
-        "/my_activity - Your activity report"
+        "/my_activity - Your activity report\n"
+        "/activity - Show activity by nickname or @username"
     )
     await message.answer(welcome_text, parse_mode=None)
 
@@ -482,6 +483,92 @@ async def cmd_my_activity(message: Message) -> None:
         return
 
     await _send_link_button(message)
+
+
+@router.message(Command("activity"))
+async def cmd_activity(message: Message) -> None:
+    """Show a player's activity report by nickname, @username, or reply."""
+    clan_tag = _require_clan_tag()
+    if not clan_tag:
+        await message.answer("CLAN_TAG is not configured.", parse_mode=None)
+        return
+
+    args = ""
+    if message.text:
+        parts = message.text.split(maxsplit=1)
+        if len(parts) > 1:
+            args = parts[1].strip()
+
+    if args.startswith("@"):
+        try:
+            chat = await message.bot.get_chat(args)
+        except Exception:
+            chat = None
+        if not chat or chat.type != ChatType.PRIVATE:
+            await message.answer(
+                "Unable to resolve that Telegram username.",
+                parse_mode=None,
+            )
+            return
+        link = await get_user_link(chat.id)
+        if not link:
+            await message.answer(
+                "That user is not linked. Ask them to use /my_activity to link.",
+                parse_mode=None,
+            )
+            return
+        report = await build_my_activity_report(
+            link["player_tag"], link["player_name"], clan_tag
+        )
+        await message.answer(report, parse_mode=None)
+        return
+
+    if not args and message.reply_to_message and message.reply_to_message.from_user:
+        target_id = message.reply_to_message.from_user.id
+        link = await get_user_link(target_id)
+        if not link:
+            await message.answer(
+                "That user is not linked. Ask them to use /my_activity to link.",
+                parse_mode=None,
+            )
+            return
+        report = await build_my_activity_report(
+            link["player_tag"], link["player_name"], clan_tag
+        )
+        await message.answer(report, parse_mode=None)
+        return
+
+    if not args:
+        await message.answer(
+            "Usage: /activity <in-game nickname> or /activity @username (or reply to a user).",
+            parse_mode=None,
+        )
+        return
+
+    candidates = await search_player_candidates(clan_tag, args)
+    if not candidates:
+        await message.answer(
+            "No player found with that nickname in clan data. Please check spelling.",
+            parse_mode=None,
+        )
+        return
+
+    if len(candidates) > 1:
+        lines = ["Multiple matches found. Please be more specific:"]
+        for index, candidate in enumerate(candidates, 1):
+            tag = _normalize_tag(candidate["player_tag"])
+            status = "IN CLAN" if candidate.get("in_clan") else "NOT IN CLAN"
+            lines.append(f"{index}) {candidate['player_name']} — {tag} — {status}")
+        await message.answer("\n".join(lines), parse_mode=None)
+        return
+
+    candidate = candidates[0]
+    report = await build_my_activity_report(
+        _normalize_tag(candidate["player_tag"]),
+        candidate["player_name"],
+        clan_tag,
+    )
+    await message.answer(report, parse_mode=None)
 
 
 @router.message(Command("admin_link_name"))
