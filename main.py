@@ -27,7 +27,7 @@ from db import (
     save_river_race_state,
 )
 from reports import build_weekly_report
-from riverrace_import import get_last_completed_week, get_latest_riverrace_log_info
+from riverrace_import import get_last_completed_week
 
 # Configure logging
 logging.basicConfig(
@@ -100,37 +100,17 @@ async def _resolve_active_week(
     stored_state = await get_app_state(ACTIVE_WEEK_KEY, session=session)
     stored_season_id, stored_section_index = _parse_active_week_state(stored_state)
 
-    if current_section_index is None:
-        if stored_season_id is not None and stored_section_index is not None:
-            return stored_season_id, stored_section_index, "app_state"
+    if current_section_index is not None:
+        if current_season_id is not None:
+            await _store_active_week(current_season_id, current_section_index, session)
+            return current_season_id, current_section_index, "currentriverrace"
+        if stored_season_id is not None:
+            await _store_active_week(stored_season_id, current_section_index, session)
+            return stored_season_id, current_section_index, "stored_active_week"
         return None, None, "missing"
 
-    if current_season_id is not None:
-        await _store_active_week(current_season_id, current_section_index, session)
-        return current_season_id, current_section_index, "currentriverrace"
-
-    if (
-        stored_season_id is not None
-        and stored_section_index == current_section_index
-    ):
-        return stored_season_id, current_section_index, "app_state"
-
-    log_info = await get_latest_riverrace_log_info(CLAN_TAG)
-    log_season_id = _parse_season_id(log_info["season_id"]) if log_info else None
-    log_section_index = (
-        _parse_section_index(log_info["section_index"]) if log_info else None
-    )
-    if log_season_id is not None and log_section_index is not None:
-        if current_section_index < log_section_index:
-            derived_season_id = log_season_id + 1
-        else:
-            derived_season_id = log_season_id
-        await _store_active_week(derived_season_id, current_section_index, session)
-        return derived_season_id, current_section_index, "derived(log_anchor)"
-
-    if stored_season_id is not None:
-        await _store_active_week(stored_season_id, current_section_index, session)
-        return stored_season_id, current_section_index, "app_state"
+    if stored_season_id is not None and stored_section_index is not None:
+        return stored_season_id, stored_section_index, "stored_active_week"
 
     return None, None, "missing"
 

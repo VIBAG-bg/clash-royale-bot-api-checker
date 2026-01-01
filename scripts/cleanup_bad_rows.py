@@ -1,9 +1,9 @@
-"""Cleanup bad River Race rows with season_id = 0."""
+"""Cleanup bad River Race rows with season_id = 0 or bogus 128-0."""
 
 import asyncio
 import logging
 
-from sqlalchemy import delete
+from sqlalchemy import and_, delete, or_
 
 from db import (
     PlayerParticipation,
@@ -22,14 +22,36 @@ async def cleanup_bad_rows() -> None:
     async with get_session() as session:
         try:
             pp_result = await session.execute(
-                delete(PlayerParticipation).where(PlayerParticipation.season_id == 0)
+                delete(PlayerParticipation).where(
+                    or_(
+                        PlayerParticipation.season_id == 0,
+                        and_(
+                            PlayerParticipation.season_id == 128,
+                            PlayerParticipation.section_index == 0,
+                        ),
+                    )
+                )
             )
             rr_result = await session.execute(
-                delete(RiverRaceState).where(RiverRaceState.season_id == 0)
+                delete(RiverRaceState).where(
+                    or_(
+                        RiverRaceState.season_id == 0,
+                        and_(
+                            RiverRaceState.season_id == 128,
+                            RiverRaceState.section_index == 0,
+                        ),
+                    )
+                )
             )
             ppd_result = await session.execute(
                 delete(PlayerParticipationDaily).where(
-                    PlayerParticipationDaily.season_id == 0
+                    or_(
+                        PlayerParticipationDaily.season_id == 0,
+                        and_(
+                            PlayerParticipationDaily.season_id == 128,
+                            PlayerParticipationDaily.section_index == 0,
+                        ),
+                    )
                 )
             )
             await session.commit()
@@ -39,7 +61,8 @@ async def cleanup_bad_rows() -> None:
     await close_db()
 
     logger.info(
-        "Deleted rows - player_participation: %s, river_race_state: %s, player_participation_daily: %s",
+        "Deleted rows (season_id=0 or season_id=128 section_index=0) - "
+        "player_participation: %s, river_race_state: %s, player_participation_daily: %s",
         pp_result.rowcount,
         rr_result.rowcount,
         ppd_result.rowcount,
