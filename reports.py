@@ -3,19 +3,39 @@
 from html import escape
 from typing import Iterable
 
-from db import get_rolling_leaderboard, get_week_leaderboard
+from db import get_current_member_tags, get_rolling_leaderboard, get_week_leaderboard
+
+NAME_WIDTH = 20
+HEADER_LINE = "══════════════════════════════"
+DIVIDER_LINE = "──────────────────────────────"
+
+
+def _format_name(raw_name: object) -> str:
+    name = str(raw_name) if raw_name else "Unknown"
+    if len(name) > NAME_WIDTH:
+        name = f"{name[:NAME_WIDTH - 1]}…"
+    name = name.ljust(NAME_WIDTH)
+    return escape(name)
 
 
 def _format_entries(entries: Iterable[dict[str, object]]) -> list[str]:
+    rows = list(entries)
+    if not rows:
+        return ["No data available."]
+
+    decks_width = max(len(str(int(row.get("decks_used", 0)))) for row in rows)
+    fame_width = max(len(str(int(row.get("fame", 0)))) for row in rows)
+    decks_width = max(decks_width, 2)
+    fame_width = max(fame_width, 2)
+
     lines: list[str] = []
-    for index, row in enumerate(entries, 1):
-        player_name = row.get("player_name") or "Unknown"
-        name = escape(str(player_name))
+    for index, row in enumerate(rows, 1):
+        name = _format_name(row.get("player_name"))
         decks_used = int(row.get("decks_used", 0))
         fame = int(row.get("fame", 0))
-        lines.append(f"{index}) {name} - decks: {decks_used}, fame: {fame}")
-    if not lines:
-        lines.append("No data available.")
+        lines.append(
+            f"{index:>2}) {name} — decks: {decks_used:>{decks_width}} | fame: {fame:>{fame_width}}"
+        )
     return lines
 
 
@@ -27,14 +47,19 @@ async def build_weekly_report(
         section_index=section_index,
         clan_tag=clan_tag,
     )
+    member_count = len(await get_current_member_tags(clan_tag))
     lines = [
-        f"War Report - Season {season_id} Week {section_index + 1}",
-        "(weekly totals; current members only)",
+        HEADER_LINE,
+        f"🏁 WAR REPORT — Season {season_id} / Week {section_index + 1}",
+        HEADER_LINE,
+        f"Members considered: {member_count} (current clan members)",
         "",
-        "Top 10 Inactive (lowest decks, then fame)",
+        "🧊 TOP 10 INACTIVE (lowest decks, then fame)",
         *_format_entries(inactive),
         "",
-        "Top 10 Active (highest decks, then fame)",
+        DIVIDER_LINE,
+        "",
+        "🔥 TOP 10 ACTIVE (highest decks, then fame)",
         *_format_entries(active),
     ]
     return "\n".join(lines)
@@ -47,14 +72,21 @@ async def build_rolling_report(
         weeks=weeks,
         clan_tag=clan_tag,
     )
+    member_count = len(await get_current_member_tags(clan_tag))
+    weeks_label = ", ".join(f"{season}/{section + 1}" for season, section in weeks)
     lines = [
-        f"Rolling Report - Last {len(weeks)} completed weeks",
-        "(aggregated totals; current members only)",
+        HEADER_LINE,
+        f"📊 ROLLING REPORT — Last {len(weeks)} weeks",
+        HEADER_LINE,
+        f"Members considered: {member_count} (current clan members)",
+        f"Weeks: {weeks_label}" if weeks_label else "Weeks: n/a",
         "",
-        "Top 10 Inactive (lowest decks, then fame)",
+        "🧊 TOP 10 INACTIVE (sum of decks, then fame)",
         *_format_entries(inactive),
         "",
-        "Top 10 Active (highest decks, then fame)",
+        DIVIDER_LINE,
+        "",
+        "🔥 TOP 10 ACTIVE (sum of decks, then fame)",
         *_format_entries(active),
     ]
     return "\n".join(lines)
