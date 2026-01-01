@@ -43,5 +43,8 @@ INACTIVE_DAYS_THRESHOLD: int = int(
     get_env_var("INACTIVE_DAYS_THRESHOLD", default="7", required=False)
 )
 
+# Protected player tags to exclude from inactive reports
+PROTECTED_PLAYER_TAGS: set[str] = {"#LJJUQCJC"}
+
 # Clash Royale API base URL
 CR_API_BASE_URL: str = os.getenv("CR_API_BASE_URL", "https://api.clashroyale.com/v1")

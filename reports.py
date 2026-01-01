@@ -3,11 +3,38 @@
 from html import escape
 from typing import Iterable
 
+from config import PROTECTED_PLAYER_TAGS
 from db import get_current_member_tags, get_rolling_leaderboard, get_week_leaderboard
 
 NAME_WIDTH = 20
 HEADER_LINE = "══════════════════════════════"
 DIVIDER_LINE = "──────────────────────────────"
+
+
+def _normalize_tag(raw_tag: object) -> str:
+    tag = str(raw_tag).strip() if raw_tag else ""
+    if not tag:
+        return ""
+    if not tag.startswith("#"):
+        tag = f"#{tag}"
+    return tag.upper()
+
+
+PROTECTED_TAGS_NORMALIZED = {
+    _normalize_tag(tag) for tag in PROTECTED_PLAYER_TAGS if _normalize_tag(tag)
+}
+
+
+def _filter_protected(entries: Iterable[dict[str, object]]) -> list[dict[str, object]]:
+    if not PROTECTED_TAGS_NORMALIZED:
+        return list(entries)
+    filtered: list[dict[str, object]] = []
+    for row in entries:
+        tag = _normalize_tag(row.get("player_tag"))
+        if tag and tag in PROTECTED_TAGS_NORMALIZED:
+            continue
+        filtered.append(row)
+    return filtered
 
 
 def _format_name(raw_name: object) -> str:
@@ -47,6 +74,7 @@ async def build_weekly_report(
         section_index=section_index,
         clan_tag=clan_tag,
     )
+    inactive = _filter_protected(inactive)
     member_count = len(await get_current_member_tags(clan_tag))
     lines = [
         HEADER_LINE,
@@ -72,6 +100,7 @@ async def build_rolling_report(
         weeks=weeks,
         clan_tag=clan_tag,
     )
+    inactive = _filter_protected(inactive)
     member_count = len(await get_current_member_tags(clan_tag))
     weeks_label = ", ".join(f"{season}/{section + 1}" for season, section in weeks)
     lines = [
