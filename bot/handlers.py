@@ -16,7 +16,7 @@ from db import (
     get_latest_war_race_state,
     upsert_clan_chat,
 )
-from reports import build_rolling_report, build_weekly_report
+from reports import build_kick_shortlist_report, build_rolling_report, build_weekly_report
 from riverrace_import import get_last_completed_week, get_last_completed_weeks
 
 logger = logging.getLogger(__name__)
@@ -111,7 +111,7 @@ async def cmd_war(message: Message) -> None:
         return
     season_id, section_index = week
     report = await build_weekly_report(season_id, section_index, CLAN_TAG)
-    await message.answer(report)
+    await message.answer(report, parse_mode=None)
 
 
 @router.message(Command("war8"))
@@ -122,7 +122,41 @@ async def cmd_war8(message: Message) -> None:
         await message.answer("No completed war weeks found yet.")
         return
     report = await build_rolling_report(weeks, CLAN_TAG)
-    await message.answer(report)
+    await message.answer(report, parse_mode=None)
+
+
+@router.message(Command("war_all"))
+async def cmd_war_all(message: Message) -> None:
+    """Send weekly, rolling, and kick shortlist reports together."""
+    last_week = await get_last_completed_week(CLAN_TAG)
+    if not last_week:
+        await message.answer("No completed war weeks found yet.", parse_mode=None)
+        return
+    weeks = await get_last_completed_weeks(8, CLAN_TAG)
+    if not weeks:
+        weeks = [last_week]
+
+    weekly_report = await build_weekly_report(
+        last_week[0], last_week[1], CLAN_TAG
+    )
+    rolling_report = await build_rolling_report(weeks, CLAN_TAG)
+    kick_report = await build_kick_shortlist_report(weeks, last_week, CLAN_TAG)
+
+    await message.answer(weekly_report, parse_mode=None)
+    await message.answer(rolling_report, parse_mode=None)
+    await message.answer(kick_report, parse_mode=None)
+
+
+@router.message(Command("list_for_kick"))
+async def cmd_list_for_kick(message: Message) -> None:
+    """Show kick shortlist based on the last 8 completed weeks."""
+    weeks = await get_last_completed_weeks(8, CLAN_TAG)
+    last_week = await get_last_completed_week(CLAN_TAG)
+    if not weeks or not last_week:
+        await message.answer("No completed war weeks found yet.", parse_mode=None)
+        return
+    report = await build_kick_shortlist_report(weeks, last_week, CLAN_TAG)
+    await message.answer(report, parse_mode=None)
 
 
 @router.message(Command("inactive"))

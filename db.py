@@ -819,6 +819,50 @@ async def get_current_member_tags(
     return {row[0] for row in result.all()}
 
 
+async def get_current_member_snapshot(
+    clan_tag: str, session: AsyncSession | None = None
+) -> dict[str, str]:
+    if session is None:
+        async with _get_session() as session:
+            return await get_current_member_snapshot(clan_tag, session=session)
+    latest_date = await get_latest_membership_date(clan_tag, session=session)
+    if latest_date is None:
+        return {}
+    result = await session.execute(
+        select(ClanMemberDaily.player_tag, ClanMemberDaily.player_name).where(
+            ClanMemberDaily.clan_tag == clan_tag,
+            ClanMemberDaily.snapshot_date == latest_date,
+        )
+    )
+    return {row.player_tag: row.player_name for row in result.all()}
+
+
+async def get_member_first_seen_dates(
+    clan_tag: str,
+    player_tags: set[str] | None = None,
+    session: AsyncSession | None = None,
+) -> dict[str, date]:
+    if session is None:
+        async with _get_session() as session:
+            return await get_member_first_seen_dates(
+                clan_tag, player_tags=player_tags, session=session
+            )
+    if player_tags is not None and not player_tags:
+        return {}
+    query = (
+        select(
+            ClanMemberDaily.player_tag,
+            func.min(ClanMemberDaily.snapshot_date).label("first_seen"),
+        )
+        .where(ClanMemberDaily.clan_tag == clan_tag)
+        .group_by(ClanMemberDaily.player_tag)
+    )
+    if player_tags:
+        query = query.where(ClanMemberDaily.player_tag.in_(player_tags))
+    result = await session.execute(query)
+    return {row.player_tag: row.first_seen for row in result.all()}
+
+
 async def get_week_leaderboard(
     season_id: int,
     section_index: int,
@@ -877,6 +921,75 @@ async def get_week_leaderboard(
         for row in active_result.all()
     ]
     return inactive, active
+
+
+async def get_week_decks_map(
+    season_id: int,
+    section_index: int,
+    player_tags: set[str] | None = None,
+    session: AsyncSession | None = None,
+) -> dict[str, int]:
+    if session is None:
+        async with _get_session() as session:
+            return await get_week_decks_map(
+                season_id, section_index, player_tags=player_tags, session=session
+            )
+    if player_tags is not None and not player_tags:
+        return {}
+    query = select(
+        PlayerParticipation.player_tag,
+        PlayerParticipation.decks_used,
+    ).where(
+        PlayerParticipation.season_id == season_id,
+        PlayerParticipation.section_index == section_index,
+    )
+    if player_tags:
+        query = query.where(PlayerParticipation.player_tag.in_(player_tags))
+    result = await session.execute(query)
+    return {row.player_tag: int(row.decks_used) for row in result.all()}
+
+
+async def get_rolling_summary(
+    weeks: list[tuple[int, int]],
+    player_tags: set[str] | None = None,
+    session: AsyncSession | None = None,
+) -> list[dict[str, Any]]:
+    if session is None:
+        async with _get_session() as session:
+            return await get_rolling_summary(weeks, player_tags=player_tags, session=session)
+    if not weeks:
+        return []
+    if player_tags is not None and not player_tags:
+        return []
+    decks_sum = func.sum(PlayerParticipation.decks_used).label("decks_used_sum")
+    fame_sum = func.sum(PlayerParticipation.fame).label("fame_sum")
+    name_max = func.max(PlayerParticipation.player_name).label("player_name")
+    query = (
+        select(
+            PlayerParticipation.player_tag,
+            name_max,
+            decks_sum,
+            fame_sum,
+        )
+        .where(
+            tuple_(PlayerParticipation.season_id, PlayerParticipation.section_index).in_(
+                weeks
+            )
+        )
+        .group_by(PlayerParticipation.player_tag)
+    )
+    if player_tags:
+        query = query.where(PlayerParticipation.player_tag.in_(player_tags))
+    result = await session.execute(query)
+    return [
+        {
+            "player_tag": row.player_tag,
+            "player_name": row.player_name,
+            "decks_used": int(row.decks_used_sum or 0),
+            "fame": int(row.fame_sum or 0),
+        }
+        for row in result.all()
+    ]
 
 
 async def get_rolling_leaderboard(

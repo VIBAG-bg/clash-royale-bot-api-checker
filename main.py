@@ -26,8 +26,12 @@ from db import (
     save_player_participation_daily,
     save_river_race_state,
 )
-from reports import build_weekly_report
-from riverrace_import import get_last_completed_week
+from reports import (
+    build_kick_shortlist_report,
+    build_rolling_report,
+    build_weekly_report,
+)
+from riverrace_import import get_last_completed_week, get_last_completed_weeks
 
 # Configure logging
 logging.basicConfig(
@@ -349,16 +353,21 @@ async def maybe_post_weekly_report(bot: Bot) -> None:
         logger.info("No enabled clan chats for weekly reporting")
         return
 
-    report = await build_weekly_report(season_id, section_index, CLAN_TAG)
+    weeks = await get_last_completed_weeks(8, CLAN_TAG)
+    if not weeks:
+        weeks = [week]
+    weekly_report = await build_weekly_report(season_id, section_index, CLAN_TAG)
+    rolling_report = await build_rolling_report(weeks, CLAN_TAG)
+    kick_report = await build_kick_shortlist_report(weeks, week, CLAN_TAG)
     sent_count = 0
     for chat_id in chat_ids:
         try:
-            await bot.send_message(chat_id, report)
+            await bot.send_message(chat_id, weekly_report, parse_mode=None)
+            await bot.send_message(chat_id, rolling_report, parse_mode=None)
+            await bot.send_message(chat_id, kick_report, parse_mode=None)
             sent_count += 1
         except Exception as e:
-            logger.error("Failed to send weekly report to %s: %s", chat_id, e)
-            if "parse entities" in str(e).lower():
-                logger.warning("Telegram parse error while sending weekly report")
+            logger.error("Failed to send weekly reports to %s: %s", chat_id, e)
 
     await set_app_state(
         LAST_REPORTED_WEEK_KEY,
@@ -369,7 +378,7 @@ async def maybe_post_weekly_report(bot: Bot) -> None:
         },
     )
     logger.info(
-        "Posted weekly report for season %s section %s to %s chat(s)",
+        "Posted weekly/rolling/kick reports for season %s section %s to %s chat(s)",
         season_id,
         section_index,
         sent_count,

@@ -46,5 +46,13 @@ INACTIVE_DAYS_THRESHOLD: int = int(
 # Protected player tags to exclude from inactive reports
 PROTECTED_PLAYER_TAGS: set[str] = {"#LJJUQCJC"}
 
+# Kick shortlist configuration
+NEW_MEMBER_GRACE_DAYS: int = int(
+    get_env_var("NEW_MEMBER_GRACE_DAYS", default="7", required=False)
+)
+REVIVED_DECKS_THRESHOLD: int = int(
+    get_env_var("REVIVED_DECKS_THRESHOLD", default="8", required=False)
+)
+
 # Clash Royale API base URL
 CR_API_BASE_URL: str = os.getenv("CR_API_BASE_URL", "https://api.clashroyale.com/v1")
