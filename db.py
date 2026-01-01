@@ -949,6 +949,30 @@ async def get_week_decks_map(
     return {row.player_tag: int(row.decks_used) for row in result.all()}
 
 
+async def get_participation_week_counts(
+    player_tags: set[str] | None = None,
+    session: AsyncSession | None = None,
+) -> dict[str, int]:
+    if session is None:
+        async with _get_session() as session:
+            return await get_participation_week_counts(
+                player_tags=player_tags, session=session
+            )
+    if player_tags is not None and not player_tags:
+        return {}
+    query = (
+        select(
+            PlayerParticipation.player_tag,
+            func.count().label("week_count"),
+        )
+        .group_by(PlayerParticipation.player_tag)
+    )
+    if player_tags:
+        query = query.where(PlayerParticipation.player_tag.in_(player_tags))
+    result = await session.execute(query)
+    return {row.player_tag: int(row.week_count) for row in result.all()}
+
+
 async def get_rolling_summary(
     weeks: list[tuple[int, int]],
     player_tags: set[str] | None = None,

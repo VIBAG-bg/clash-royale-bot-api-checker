@@ -47,11 +47,14 @@ INACTIVE_DAYS_THRESHOLD: int = int(
 PROTECTED_PLAYER_TAGS: set[str] = {"#LJJUQCJC"}
 
 # Kick shortlist configuration
-NEW_MEMBER_GRACE_DAYS: int = int(
-    get_env_var("NEW_MEMBER_GRACE_DAYS", default="7", required=False)
+NEW_MEMBER_WEEKS_PLAYED: int = int(
+    get_env_var("NEW_MEMBER_WEEKS_PLAYED", default="2", required=False)
 )
 REVIVED_DECKS_THRESHOLD: int = int(
     get_env_var("REVIVED_DECKS_THRESHOLD", default="8", required=False)
+)
+KICK_SHORTLIST_LIMIT: int = int(
+    get_env_var("KICK_SHORTLIST_LIMIT", default="3", required=False)
 )
 
 # Clash Royale API base URL

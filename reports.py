@@ -1,20 +1,18 @@
 """Report builders for weekly and rolling war summaries."""
 
-from datetime import datetime, timezone
 from html import escape
 from typing import Iterable
 
 from config import (
-    NEW_MEMBER_GRACE_DAYS,
+    KICK_SHORTLIST_LIMIT,
+    NEW_MEMBER_WEEKS_PLAYED,
     PROTECTED_PLAYER_TAGS,
     REVIVED_DECKS_THRESHOLD,
 )
 from db import (
-    get_current_member_snapshot,
     get_current_member_tags,
-    get_member_first_seen_dates,
+    get_participation_week_counts,
     get_rolling_leaderboard,
-    get_rolling_summary,
     get_session,
     get_week_decks_map,
     get_week_leaderboard,
@@ -144,76 +142,85 @@ async def build_kick_shortlist_report(
         HEADER_LINE,
         "🚪 KICK SHORTLIST — based on last 8 weeks",
         HEADER_LINE,
-        "Rules: current members only • exclude new (<{0}d) • exclude revived (>={1} decks last week)".format(
-            NEW_MEMBER_GRACE_DAYS,
-            REVIVED_DECKS_THRESHOLD,
-        ),
+        "Rules: top-10 inactive (8w) • exclude protected • exclude weeks<=%s • revived>=%s in warnings"
+        % (NEW_MEMBER_WEEKS_PLAYED, REVIVED_DECKS_THRESHOLD),
     ]
     if not weeks or not last_week:
         lines.append("No clear kick candidates.")
         return "\n".join(lines)
 
     async with get_session() as session:
-        members = await get_current_member_snapshot(clan_tag, session=session)
-        if not members:
+        inactive, _active = await get_rolling_leaderboard(
+            weeks=weeks,
+            clan_tag=clan_tag,
+            session=session,
+        )
+        if not inactive:
             lines.append("No clear kick candidates.")
             return "\n".join(lines)
 
-        member_tags = set(members.keys())
-        first_seen = await get_member_first_seen_dates(
-            clan_tag, player_tags=member_tags, session=session
+        inactive = _filter_protected(inactive)
+        inactive_tags = {row.get("player_tag") for row in inactive if row.get("player_tag")}
+        if not inactive_tags:
+            lines.append("No clear kick candidates.")
+            return "\n".join(lines)
+
+        history_counts = await get_participation_week_counts(
+            player_tags=inactive_tags, session=session
         )
-        rolling = await get_rolling_summary(weeks, player_tags=member_tags, session=session)
         last_week_decks = await get_week_decks_map(
             last_week[0],
             last_week[1],
-            player_tags=member_tags,
+            player_tags=inactive_tags,
             session=session,
         )
 
-    rolling_by_tag = {row["player_tag"]: row for row in rolling}
-    today = datetime.now(timezone.utc).date()
     candidates: list[dict[str, object]] = []
-    for tag in member_tags:
-        first_seen_date = first_seen.get(tag)
-        if first_seen_date is None:
+    warnings: list[dict[str, object]] = []
+    for row in inactive:
+        tag = row.get("player_tag")
+        if not tag:
             continue
-        if (today - first_seen_date).days < NEW_MEMBER_GRACE_DAYS:
+        weeks_played = int(history_counts.get(tag, 0))
+        if weeks_played <= NEW_MEMBER_WEEKS_PLAYED:
             continue
         last_decks = int(last_week_decks.get(tag, 0))
+        entry = {
+            "player_tag": tag,
+            "player_name": row.get("player_name") or "Unknown",
+            "decks_used": int(row.get("decks_used", 0)),
+            "fame": int(row.get("fame", 0)),
+            "last_week_decks": last_decks,
+        }
         if last_decks >= REVIVED_DECKS_THRESHOLD:
-            continue
-        rolling_row = rolling_by_tag.get(tag)
-        decks_sum = int(rolling_row["decks_used"]) if rolling_row else 0
-        fame_sum = int(rolling_row["fame"]) if rolling_row else 0
-        name = members.get(tag) or (rolling_row.get("player_name") if rolling_row else None) or "Unknown"
-        candidates.append(
-            {
-                "player_tag": tag,
-                "player_name": name,
-                "decks_used": decks_sum,
-                "fame": fame_sum,
-                "last_week_decks": last_decks,
-            }
-        )
+            warnings.append(entry)
+        else:
+            candidates.append(entry)
 
-    candidates = _filter_protected(candidates)
-    candidates.sort(
-        key=lambda row: (
-            int(row.get("decks_used", 0)),
-            int(row.get("fame", 0)),
-            int(row.get("last_week_decks", 0)),
-        )
-    )
-    shortlist = candidates[:5]
-    if not shortlist:
+    shortlist = candidates[: max(KICK_SHORTLIST_LIMIT, 0)]
+    if shortlist:
+        lines.append("Kick candidates:")
+        for index, row in enumerate(shortlist, 1):
+            name = _format_name(row.get("player_name"))
+            lines.append(
+                f"{index}) {name} — 8w decks: {row.get('decks_used', 0)} | "
+                f"8w fame: {row.get('fame', 0)} | last week: {row.get('last_week_decks', 0)}"
+            )
+    else:
         lines.append("No clear kick candidates.")
-        return "\n".join(lines)
 
-    for index, row in enumerate(shortlist, 1):
-        name = _format_name(row.get("player_name"))
-        lines.append(
-            f"{index}) {name} — 8w decks: {row.get('decks_used', 0)} | "
-            f"8w fame: {row.get('fame', 0)} | last week: {row.get('last_week_decks', 0)}"
+    if warnings:
+        lines.extend(
+            [
+                "",
+                "Warnings: inactive overall, but revived last week — keep for now",
+            ]
         )
+        for index, row in enumerate(warnings, 1):
+            name = _format_name(row.get("player_name"))
+            lines.append(
+                f"{index}) {name} — 8w decks: {row.get('decks_used', 0)} | "
+                f"8w fame: {row.get('fame', 0)} | last week: {row.get('last_week_decks', 0)}"
+            )
+
     return "\n".join(lines)
