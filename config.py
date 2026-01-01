@@ -13,16 +13,23 @@ def get_env_var(
     """Get environment variable with optional default value."""
     value = os.getenv(name, default)
     if required and value is None:
+        return None
+    return value
+
+
+def require_env_value(name: str, value: str | None) -> str:
+    """Ensure required env var is present at runtime."""
+    if not value:
         raise ValueError(f"Missing required environment variable: {name}")
     return value
 
 
 # Telegram Bot configuration
-TELEGRAM_BOT_TOKEN: str = get_env_var("TELEGRAM_BOT_TOKEN")
+TELEGRAM_BOT_TOKEN: str | None = get_env_var("TELEGRAM_BOT_TOKEN")
 
 # Clash Royale API configuration
-CR_API_TOKEN: str = get_env_var("CR_API_TOKEN")
-CLAN_TAG: str = get_env_var("CLAN_TAG")
+CR_API_TOKEN: str | None = get_env_var("CR_API_TOKEN")
+CLAN_TAG: str | None = get_env_var("CLAN_TAG")
 
 # PostgreSQL configuration (Heroku provides DATABASE_URL)
 DATABASE_URL: str | None = get_env_var("DATABASE_URL", required=False)
@@ -59,3 +66,13 @@ KICK_SHORTLIST_LIMIT: int = int(
 
 # Clash Royale API base URL
 CR_API_BASE_URL: str = os.getenv("CR_API_BASE_URL", "https://api.clashroyale.com/v1")
+
+# Telegram bot username for deep-linking (optional)
+BOT_USERNAME: str | None = get_env_var("BOT_USERNAME", required=False)
+
+# Admin user ids for /admin_link_name permissions
+ADMIN_USER_IDS: set[int] = {
+    int(value)
+    for value in (get_env_var("ADMIN_USER_IDS", default="", required=False) or "").split(",")
+    if value.strip().isdigit()
+}

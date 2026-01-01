@@ -10,7 +10,13 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
 from bot import router
-from config import TELEGRAM_BOT_TOKEN, CLAN_TAG, FETCH_INTERVAL_SECONDS
+from config import (
+    CLAN_TAG,
+    CR_API_TOKEN,
+    FETCH_INTERVAL_SECONDS,
+    TELEGRAM_BOT_TOKEN,
+    require_env_value,
+)
 from cr_api import get_api_client, close_api_client, ClashRoyaleAPIError
 from db import (
     connect_db,
@@ -44,6 +50,13 @@ FETCH_LOCK = asyncio.Lock()
 ACTIVE_WEEK_KEY = "active_week"
 LAST_REPORTED_WEEK_KEY = "last_reported_week"
 BOT: Bot | None = None
+
+
+def _ensure_required_config() -> str:
+    token = require_env_value("TELEGRAM_BOT_TOKEN", TELEGRAM_BOT_TOKEN)
+    require_env_value("CR_API_TOKEN", CR_API_TOKEN)
+    require_env_value("CLAN_TAG", CLAN_TAG)
+    return token
 
 
 def _coerce_non_negative_int(value: object) -> int | None:
@@ -449,9 +462,10 @@ async def lifespan(dispatcher: Dispatcher):
 
 async def main() -> None:
     """Main function to run the bot."""
+    token = _ensure_required_config()
     # Create bot instance
     bot = Bot(
-        token=TELEGRAM_BOT_TOKEN,
+        token=token,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
     global BOT

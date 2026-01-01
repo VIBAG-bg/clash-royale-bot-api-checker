@@ -205,6 +205,29 @@ class AppState(Base):
     )
 
 
+class UserLink(Base):
+    __tablename__ = "user_links"
+
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    player_tag: Mapped[str] = mapped_column(String(32), nullable=False)
+    player_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    linked_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, nullable=False
+    )
+    source: Mapped[str] = mapped_column(String(16), nullable=False)
+
+
+class UserLinkRequest(Base):
+    __tablename__ = "user_link_requests"
+
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    origin_chat_id: Mapped[int | None] = mapped_column(BigInteger)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, nullable=False
+    )
+
+
 APP_STATE_COLOSSEUM_KEY = "colosseum_index_by_season"
 
 
@@ -837,6 +860,36 @@ async def get_current_member_snapshot(
     return {row.player_tag: row.player_name for row in result.all()}
 
 
+async def get_player_name_for_tag(
+    player_tag: str,
+    clan_tag: str,
+    session: AsyncSession | None = None,
+) -> str | None:
+    if session is None:
+        async with _get_session() as session:
+            return await get_player_name_for_tag(
+                player_tag, clan_tag, session=session
+            )
+    latest_date = await get_latest_membership_date(clan_tag, session=session)
+    if latest_date is not None:
+        result = await session.execute(
+            select(ClanMemberDaily.player_name).where(
+                ClanMemberDaily.clan_tag == clan_tag,
+                ClanMemberDaily.snapshot_date == latest_date,
+                ClanMemberDaily.player_tag == player_tag,
+            )
+        )
+        name = result.scalar_one_or_none()
+        if name:
+            return name
+    result = await session.execute(
+        select(func.max(PlayerParticipation.player_name)).where(
+            PlayerParticipation.player_tag == player_tag
+        )
+    )
+    return result.scalar_one_or_none()
+
+
 async def get_member_first_seen_dates(
     clan_tag: str,
     player_tags: set[str] | None = None,
@@ -1118,6 +1171,247 @@ async def delete_app_state(key: str, session: AsyncSession | None = None) -> Non
         await session.execute(delete(AppState).where(AppState.key == key))
 
 
+async def get_user_link(
+    telegram_user_id: int, session: AsyncSession | None = None
+) -> dict[str, Any] | None:
+    if session is None:
+        async with _get_session() as session:
+            return await get_user_link(telegram_user_id, session=session)
+    result = await session.execute(
+        select(UserLink).where(UserLink.telegram_user_id == telegram_user_id)
+    )
+    link = result.scalar_one_or_none()
+    if not link:
+        return None
+    return {
+        "telegram_user_id": link.telegram_user_id,
+        "player_tag": link.player_tag,
+        "player_name": link.player_name,
+        "linked_at": link.linked_at,
+        "source": link.source,
+    }
+
+
+async def upsert_user_link(
+    telegram_user_id: int,
+    player_tag: str,
+    player_name: str,
+    source: str,
+    session: AsyncSession | None = None,
+) -> None:
+    now = _utc_now()
+    stmt = pg_insert(UserLink.__table__).values(
+        telegram_user_id=telegram_user_id,
+        player_tag=player_tag,
+        player_name=player_name,
+        linked_at=now,
+        source=source,
+    )
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["telegram_user_id"],
+        set_={
+            "player_tag": stmt.excluded.player_tag,
+            "player_name": stmt.excluded.player_name,
+            "linked_at": now,
+            "source": stmt.excluded.source,
+        },
+    )
+    if session is None:
+        async with _get_session() as session:
+            try:
+                await session.execute(stmt)
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+    else:
+        await session.execute(stmt)
+
+
+async def get_user_link_request(
+    telegram_user_id: int, session: AsyncSession | None = None
+) -> dict[str, Any] | None:
+    if session is None:
+        async with _get_session() as session:
+            return await get_user_link_request(telegram_user_id, session=session)
+    result = await session.execute(
+        select(UserLinkRequest).where(
+            UserLinkRequest.telegram_user_id == telegram_user_id
+        )
+    )
+    request = result.scalar_one_or_none()
+    if not request:
+        return None
+    return {
+        "telegram_user_id": request.telegram_user_id,
+        "status": request.status,
+        "origin_chat_id": request.origin_chat_id,
+        "created_at": request.created_at,
+    }
+
+
+async def upsert_user_link_request(
+    telegram_user_id: int,
+    status: str,
+    origin_chat_id: int | None,
+    session: AsyncSession | None = None,
+) -> None:
+    now = _utc_now()
+    stmt = pg_insert(UserLinkRequest.__table__).values(
+        telegram_user_id=telegram_user_id,
+        status=status,
+        origin_chat_id=origin_chat_id,
+        created_at=now,
+    )
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["telegram_user_id"],
+        set_={
+            "status": stmt.excluded.status,
+            "origin_chat_id": stmt.excluded.origin_chat_id,
+            "created_at": now,
+        },
+    )
+    if session is None:
+        async with _get_session() as session:
+            try:
+                await session.execute(stmt)
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+    else:
+        await session.execute(stmt)
+
+
+async def delete_user_link_request(
+    telegram_user_id: int, session: AsyncSession | None = None
+) -> None:
+    if session is None:
+        async with _get_session() as session:
+            try:
+                await session.execute(
+                    delete(UserLinkRequest).where(
+                        UserLinkRequest.telegram_user_id == telegram_user_id
+                    )
+                )
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+    else:
+        await session.execute(
+            delete(UserLinkRequest).where(
+                UserLinkRequest.telegram_user_id == telegram_user_id
+            )
+        )
+
+
+async def delete_user_link(
+    telegram_user_id: int, session: AsyncSession | None = None
+) -> None:
+    if session is None:
+        async with _get_session() as session:
+            try:
+                await session.execute(
+                    delete(UserLink).where(
+                        UserLink.telegram_user_id == telegram_user_id
+                    )
+                )
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+    else:
+        await session.execute(
+            delete(UserLink).where(UserLink.telegram_user_id == telegram_user_id)
+        )
+
+
+async def search_player_candidates(
+    clan_tag: str,
+    nickname: str,
+    session: AsyncSession | None = None,
+) -> list[dict[str, Any]]:
+    if session is None:
+        async with _get_session() as session:
+            return await search_player_candidates(clan_tag, nickname, session=session)
+    nickname = nickname.strip()
+    if not nickname:
+        return []
+    current_members = await get_current_member_tags(clan_tag, session=session)
+    latest_date = await get_latest_membership_date(clan_tag, session=session)
+
+    def _format_rows(rows: list[Any], in_clan: bool) -> list[dict[str, Any]]:
+        return [
+            {
+                "player_tag": row.player_tag,
+                "player_name": row.player_name,
+                "in_clan": in_clan,
+            }
+            for row in rows
+        ]
+
+    if latest_date is not None:
+        exact_query = select(
+            ClanMemberDaily.player_tag, ClanMemberDaily.player_name
+        ).where(
+            ClanMemberDaily.clan_tag == clan_tag,
+            ClanMemberDaily.snapshot_date == latest_date,
+            func.lower(ClanMemberDaily.player_name) == nickname.lower(),
+        )
+        exact_rows = (await session.execute(exact_query)).all()
+        if exact_rows:
+            return _format_rows(exact_rows, True)
+
+        contains_query = select(
+            ClanMemberDaily.player_tag, ClanMemberDaily.player_name
+        ).where(
+            ClanMemberDaily.clan_tag == clan_tag,
+            ClanMemberDaily.snapshot_date == latest_date,
+            ClanMemberDaily.player_name.ilike(f"%{nickname}%"),
+        )
+        contains_rows = (await session.execute(contains_query)).all()
+        if contains_rows:
+            return _format_rows(contains_rows, True)
+
+    exact_hist_query = (
+        select(
+            PlayerParticipation.player_tag,
+            func.max(PlayerParticipation.player_name).label("player_name"),
+        )
+        .where(func.lower(PlayerParticipation.player_name) == nickname.lower())
+        .group_by(PlayerParticipation.player_tag)
+    )
+    exact_hist = (await session.execute(exact_hist_query)).all()
+    if exact_hist:
+        return [
+            {
+                "player_tag": row.player_tag,
+                "player_name": row.player_name,
+                "in_clan": row.player_tag in current_members,
+            }
+            for row in exact_hist
+        ]
+
+    contains_hist_query = (
+        select(
+            PlayerParticipation.player_tag,
+            func.max(PlayerParticipation.player_name).label("player_name"),
+        )
+        .where(PlayerParticipation.player_name.ilike(f"%{nickname}%"))
+        .group_by(PlayerParticipation.player_tag)
+    )
+    contains_hist = (await session.execute(contains_hist_query)).all()
+    return [
+        {
+            "player_tag": row.player_tag,
+            "player_name": row.player_name,
+            "in_clan": row.player_tag in current_members,
+        }
+        for row in contains_hist
+    ]
+
+
 def _coerce_int(value: Any) -> int | None:
     try:
         return int(value)
@@ -1248,6 +1542,21 @@ async def get_latest_river_race_state(clan_tag: str) -> dict[str, Any] | None:
         return _river_race_state_to_dict(state) if state else None
 
 
+async def get_river_race_state_for_week(
+    clan_tag: str, season_id: int, section_index: int
+) -> dict[str, Any] | None:
+    async with _get_session() as session:
+        result = await session.execute(
+            select(RiverRaceState).where(
+                RiverRaceState.clan_tag == clan_tag,
+                RiverRaceState.season_id == season_id,
+                RiverRaceState.section_index == section_index,
+            )
+        )
+        state = result.scalar_one_or_none()
+        return _river_race_state_to_dict(state) if state else None
+
+
 async def get_latest_war_race_state(clan_tag: str) -> dict[str, Any] | None:
     """Get the latest non-training River Race state for a clan."""
     async with _get_session() as session:
@@ -1265,3 +1574,22 @@ async def get_latest_war_race_state(clan_tag: str) -> dict[str, Any] | None:
         )
         state = result.scalar_one_or_none()
         return _river_race_state_to_dict(state) if state else None
+
+
+async def get_last_weeks_from_db(
+    clan_tag: str, limit: int = 8
+) -> list[tuple[int, int]]:
+    async with _get_session() as session:
+        result = await session.execute(
+            select(RiverRaceState.season_id, RiverRaceState.section_index)
+            .where(
+                RiverRaceState.clan_tag == clan_tag,
+                RiverRaceState.period_type != "training",
+            )
+            .order_by(
+                RiverRaceState.season_id.desc(),
+                RiverRaceState.section_index.desc(),
+            )
+            .limit(limit)
+        )
+        return [(int(row.season_id), int(row.section_index)) for row in result.all()]
