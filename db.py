@@ -535,18 +535,24 @@ async def save_player_participation(
 
 
 async def get_inactive_players(
-    season_id: int, section_index: int, min_decks: int = 4
+    season_id: int,
+    section_index: int,
+    min_decks: int = 4,
+    player_tags: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Get players who haven't used enough decks in the current River Race week."""
     async with _get_session() as session:
+        if player_tags is not None and not player_tags:
+            return []
+        query = select(PlayerParticipation).where(
+            PlayerParticipation.season_id == season_id,
+            PlayerParticipation.section_index == section_index,
+            PlayerParticipation.decks_used < min_decks,
+        )
+        if player_tags:
+            query = query.where(PlayerParticipation.player_tag.in_(player_tags))
         result = await session.execute(
-            select(PlayerParticipation)
-            .where(
-                PlayerParticipation.season_id == season_id,
-                PlayerParticipation.section_index == section_index,
-                PlayerParticipation.decks_used < min_decks,
-            )
-            .order_by(PlayerParticipation.decks_used.asc())
+            query.order_by(PlayerParticipation.decks_used.asc())
         )
         players = result.scalars().all()
         return [_player_participation_to_dict(player) for player in players]

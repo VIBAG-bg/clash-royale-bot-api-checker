@@ -10,7 +10,12 @@ from aiogram.types import Message
 
 from config import CLAN_TAG
 from cr_api import get_api_client, ClashRoyaleAPIError
-from db import get_inactive_players, get_latest_war_race_state, upsert_clan_chat
+from db import (
+    get_current_member_tags,
+    get_inactive_players,
+    get_latest_war_race_state,
+    upsert_clan_chat,
+)
 from reports import build_rolling_report, build_weekly_report
 from riverrace_import import get_last_completed_week, get_last_completed_weeks
 
@@ -138,11 +143,20 @@ async def cmd_inactive(message: Message) -> None:
         section_index = state["section_index"]
         is_colosseum = state.get("is_colosseum", False)
         
+        current_members = await get_current_member_tags(CLAN_TAG)
+        if not current_members:
+            await message.answer(
+                "No clan membership snapshot available yet.\n"
+                "Please wait for the next update cycle."
+            )
+            return
+
         # Get inactive players (those with less than 4 decks used)
         inactive_players = await get_inactive_players(
             season_id=season_id,
             section_index=section_index,
-            min_decks=4
+            min_decks=4,
+            player_tags=current_members,
         )
         
         week_type = "Colosseum" if is_colosseum else "River Race"
