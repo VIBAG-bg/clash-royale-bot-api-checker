@@ -167,7 +167,9 @@ async def send_modlog(bot: Bot, text: str) -> None:
             disable_web_page_preview=True,
         )
     except Exception as e:
-        logger.warning("Failed to send modlog: %s", e, exc_info=True)
+        logger.exception(
+            "Failed to send modlog (chat_id=%s): %s", MODLOG_CHAT_ID, e
+        )
 
 
 def _build_captcha_keyboard(
@@ -1631,6 +1633,30 @@ async def cmd_captcha_unverify(message: Message) -> None:
         return
 
     await message.answer("Verified flag removed.", parse_mode=None)
+
+
+@router.message(Command("modlog_test"))
+async def cmd_modlog_test(message: Message) -> None:
+    if message.from_user is None or not _is_debug_admin(message.from_user.id):
+        await message.answer("Not allowed.", parse_mode=None)
+        return
+    if MODLOG_CHAT_ID <= 0:
+        await message.answer("MODLOG_CHAT_ID is not set.", parse_mode=None)
+        return
+    try:
+        await message.bot.send_message(
+            MODLOG_CHAT_ID,
+            "MODLOG TEST ok",
+            parse_mode=None,
+            disable_web_page_preview=True,
+        )
+    except Exception as e:
+        await message.answer(
+            f"failed: {type(e).__name__}: {e}", parse_mode=None
+        )
+        return
+
+    await message.answer("sent ok", parse_mode=None)
 
 
 @router.message(Command("donations"))
