@@ -2257,8 +2257,11 @@ async def get_or_create_pending_challenge(
         updated_at=now,
         expires_at=expires_at,
     )
-    result = await session.execute(stmt.returning(CaptchaChallenge))
-    challenge = result.scalar_one()
+    result = await session.execute(stmt.returning(CaptchaChallenge.id))
+    challenge_id = result.scalar_one()
+    challenge = await session.get(CaptchaChallenge, challenge_id)
+    if not challenge:
+        return None, None
     return _challenge_to_dict(challenge), question
 
 
