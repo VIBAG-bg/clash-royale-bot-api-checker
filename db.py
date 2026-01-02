@@ -267,6 +267,37 @@ class ClanChat(Base):
     )
 
 
+class DailyReminderPost(Base):
+    __tablename__ = "daily_reminder_posts"
+    __table_args__ = (
+        UniqueConstraint(
+            "chat_id",
+            "reminder_date",
+            "season_id",
+            "section_index",
+            "period",
+            "day_number",
+            name="uq_daily_reminder_posts_unique",
+        ),
+        Index(
+            "ix_daily_reminder_posts_date_chat",
+            "reminder_date",
+            "chat_id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    reminder_date: Mapped[date] = mapped_column(Date, nullable=False)
+    season_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    section_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    period: Mapped[str] = mapped_column(String(32), nullable=False)
+    day_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, nullable=False
+    )
+
+
 class AppState(Base):
     __tablename__ = "app_state"
 
@@ -1059,6 +1090,43 @@ async def get_enabled_clan_chats(
         )
     )
     return [row[0] for row in result.all()]
+
+
+async def try_mark_reminder_posted(
+    *,
+    chat_id: int,
+    reminder_date: date,
+    season_id: int,
+    section_index: int,
+    period: str,
+    day_number: int,
+    session: AsyncSession | None = None,
+) -> bool:
+    now = _utc_now()
+    stmt = pg_insert(DailyReminderPost.__table__).values(
+        chat_id=chat_id,
+        reminder_date=reminder_date,
+        season_id=season_id,
+        section_index=section_index,
+        period=period,
+        day_number=day_number,
+        created_at=now,
+    )
+    stmt = stmt.on_conflict_do_nothing(
+        constraint="uq_daily_reminder_posts_unique"
+    ).returning(DailyReminderPost.id)
+    if session is None:
+        async with _get_session() as session:
+            try:
+                result = await session.execute(stmt)
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+    else:
+        result = await session.execute(stmt)
+    inserted_id = result.scalar_one_or_none()
+    return inserted_id is not None
 
 
 async def get_latest_membership_date(

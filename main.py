@@ -35,6 +35,7 @@ from db import (
     get_first_snapshot_date_for_week,
     get_river_race_state_for_week,
     get_session,
+    try_mark_reminder_posted,
     set_colosseum_index_for_season,
     set_app_state,
     save_player_participation,
@@ -725,8 +726,35 @@ async def maybe_post_daily_war_reminder(bot: Bot) -> None:
                 logger.warning("Reminder skipped: no template for day %s", day_number)
                 return
 
+            reminder_date = datetime.now(timezone.utc).date()
             sent_count = 0
             for chat_id in chat_ids:
+                try:
+                    should_send = await try_mark_reminder_posted(
+                        chat_id=chat_id,
+                        reminder_date=reminder_date,
+                        season_id=resolved_season_id,
+                        section_index=resolved_section_index,
+                        period=period_type_lower,
+                        day_number=day_number,
+                    )
+                except Exception as e:
+                    logger.error(
+                        "Failed to mark reminder posted for %s: %s", chat_id, e
+                    )
+                    should_send = False
+                if not should_send:
+                    logger.info(
+                        "Reminder already posted, skipping (chat=%s date=%s season=%s section=%s period=%s day=%s source=%s)",
+                        chat_id,
+                        reminder_date.isoformat(),
+                        resolved_season_id,
+                        resolved_section_index,
+                        period_type_lower,
+                        day_number,
+                        resolved_by,
+                    )
+                    continue
                 try:
                     if day_number in (1, 4):
                         try:
