@@ -735,9 +735,9 @@ async def cmd_help(message: Message) -> None:
 
     lines = [
         HEADER_LINE,
-        "?? Black Poison Bot - Help",
+        "🤖 Black Poison Bot - Help",
         HEADER_LINE,
-        "?? GENERAL COMMANDS",
+        "📌 GENERAL COMMANDS",
         DIVIDER_LINE,
         *general_lines,
     ]
@@ -745,11 +745,11 @@ async def cmd_help(message: Message) -> None:
         lines.extend(
             [
                 "",
-                "?? ADMIN COMMANDS",
+                "🛡 ADMIN COMMANDS",
                 DIVIDER_LINE,
                 *admin_lines,
                 "",
-                "?? MODERATION COMMANDS",
+                "🧰 MODERATION COMMANDS",
                 DIVIDER_LINE,
                 *moderation_lines,
             ]
@@ -757,7 +757,7 @@ async def cmd_help(message: Message) -> None:
     lines.extend(
         [
             HEADER_LINE,
-            "?? Tip: Use /my_activity in DM to link your account.",
+            "ℹ️ Tip: Use /my_activity in DM to link your account.",
             HEADER_LINE,
         ]
     )
