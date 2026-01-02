@@ -97,6 +97,7 @@ moderation_router = Router(name="moderation_router")
 
 HEADER_LINE = "══════════════════════════════"
 DIVIDER_LINE = "---------------------------"
+APP_NOTIFY_COOLDOWN_HOURS = 6
 
 
 def _format_help_commands(commands: list[dict[str, object]]) -> list[str]:
@@ -125,6 +126,10 @@ def _normalize_tag(tag: str) -> str:
 
 def _apply_state_key(user_id: int) -> str:
     return f"apply_state:{user_id}"
+
+
+def _app_notify_state_key(app_id: int) -> str:
+    return f"app_notify:{app_id}"
 
 
 def _is_debug_admin(user_id: int) -> bool:
@@ -918,6 +923,100 @@ async def cmd_app_reject(message: Message) -> None:
         message.bot,
         f"Application {app_id} rejected by admin {message.from_user.id}.",
     )
+
+
+@router.message(Command("app_notify"))
+async def cmd_app_notify(message: Message) -> None:
+    if message.from_user is None or not _is_debug_admin(message.from_user.id):
+        await message.answer("Not allowed.", parse_mode=None)
+        return
+    if not message.text:
+        await message.answer("Usage: /app_notify <id>", parse_mode=None)
+        return
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        await message.answer("Usage: /app_notify <id>", parse_mode=None)
+        return
+    try:
+        app_id = int(parts[1])
+    except ValueError:
+        await message.answer("Invalid application id.", parse_mode=None)
+        return
+
+    app = await get_application_by_id(app_id)
+    if not app:
+        await message.answer("Application not found.", parse_mode=None)
+        return
+    if app.get("status") != "pending":
+        await message.answer("Application is not pending.", parse_mode=None)
+        return
+
+    clan_tag = _require_clan_tag()
+    if not clan_tag:
+        await message.answer("CLAN_TAG is not configured.", parse_mode=None)
+        return
+    clan_tag = _normalize_tag(clan_tag)
+
+    state_key = _app_notify_state_key(app_id)
+    state = await get_app_state(state_key)
+    if state and state.get("notified_at"):
+        try:
+            notified_at = datetime.fromisoformat(state["notified_at"])
+        except (TypeError, ValueError):
+            notified_at = None
+        if notified_at:
+            if notified_at.tzinfo is None:
+                notified_at = notified_at.replace(tzinfo=timezone.utc)
+            now = datetime.now(timezone.utc)
+            if now - notified_at < timedelta(hours=APP_NOTIFY_COOLDOWN_HOURS):
+                remaining = timedelta(hours=APP_NOTIFY_COOLDOWN_HOURS) - (
+                    now - notified_at
+                )
+                hours = int(remaining.total_seconds() // 3600)
+                minutes = int((remaining.total_seconds() % 3600) // 60)
+                await message.answer(
+                    f"Already notified recently. Try again in {hours}h {minutes}m.",
+                    parse_mode=None,
+                )
+                return
+
+    text = (
+        "Hi! A slot has opened in Black Poison.\n"
+        f"You can join now using clan tag: {clan_tag}\n"
+        "Please join as soon as possible."
+    )
+    try:
+        await message.bot.send_message(
+            app["telegram_user_id"],
+            text,
+            parse_mode=None,
+        )
+    except Exception as e:
+        logger.warning("Failed to notify applicant %s: %s", app_id, e)
+        await message.answer(
+            "⚠️ Failed to notify user (DM unavailable).",
+            parse_mode=None,
+        )
+        return
+
+    now = datetime.now(timezone.utc)
+    notify_count = 1
+    if state and isinstance(state.get("notify_count"), int):
+        notify_count = int(state.get("notify_count")) + 1
+    await set_app_state(
+        state_key,
+        {
+            "notified_at": now.isoformat(),
+            "notify_count": notify_count,
+        },
+    )
+    logger.info(
+        "app_notify: admin=%s app_id=%s user_id=%s",
+        message.from_user.id,
+        app_id,
+        app["telegram_user_id"],
+    )
+    await message.answer("✅ Applicant notified successfully.", parse_mode=None)
 
 
 @moderation_router.chat_member()
