@@ -158,7 +158,7 @@ def _build_user_mention(user: object) -> str:
 
 
 async def send_modlog(bot: Bot, text: str) -> None:
-    if MODLOG_CHAT_ID <= 0:
+    if MODLOG_CHAT_ID == 0:
         return
     try:
         await bot.send_message(
@@ -1641,7 +1641,7 @@ async def cmd_modlog_test(message: Message) -> None:
     if message.from_user is None or not _is_debug_admin(message.from_user.id):
         await message.answer("Not allowed.", parse_mode=None)
         return
-    if MODLOG_CHAT_ID <= 0:
+    if MODLOG_CHAT_ID == 0:
         await message.answer("MODLOG_CHAT_ID is not set.", parse_mode=None)
         return
     try:
