@@ -13,14 +13,20 @@ from aiogram.types import (
     Message,
 )
 
-from config import ADMIN_USER_IDS, BOT_USERNAME, CLAN_TAG
+from config import (
+    ADMIN_USER_IDS,
+    BOT_USERNAME,
+    CLAN_TAG,
+    INACTIVE_LAST_SEEN_LIMIT,
+    LAST_SEEN_RED_DAYS,
+    LAST_SEEN_YELLOW_DAYS,
+)
 from cr_api import ClashRoyaleAPIError, get_api_client
 from db import (
     delete_user_link,
     delete_user_link_request,
     get_current_member_tags,
-    get_inactive_players,
-    get_latest_war_race_state,
+    get_top_absent_members,
     get_player_name_for_tag,
     get_user_link,
     get_user_link_request,
@@ -354,19 +360,6 @@ async def cmd_inactive(message: Message) -> None:
         await message.answer("CLAN_TAG is not configured.", parse_mode=None)
         return
     try:
-        state = await get_latest_war_race_state(clan_tag)
-        if state is None:
-            await message.answer(
-                "No River Race data available yet.\n"
-                "The bot needs to fetch data first. Please wait for the next update cycle.",
-                parse_mode=None,
-            )
-            return
-
-        season_id = state["season_id"]
-        section_index = state["section_index"]
-        is_colosseum = state.get("is_colosseum", False)
-
         current_members = await get_current_member_tags(clan_tag)
         if not current_members:
             await message.answer(
@@ -376,43 +369,38 @@ async def cmd_inactive(message: Message) -> None:
             )
             return
 
-        inactive_players = await get_inactive_players(
-            season_id=season_id,
-            section_index=section_index,
-            min_decks=4,
-            player_tags=current_members,
+        absent_members = await get_top_absent_members(
+            clan_tag, INACTIVE_LAST_SEEN_LIMIT
         )
-
-        week_type = "Colosseum" if is_colosseum else "River Race"
-
-        if not inactive_players:
+        if not absent_members:
             await message.answer(
-                f"All players are active in the current {week_type}!\n\n"
-                f"Season: {season_id}\n"
-                f"Week: {section_index + 1}",
+                "No member activity data available yet.\n"
+                "Please wait for the next update cycle.",
                 parse_mode=None,
             )
             return
 
-        response_lines = [
-            f"Players with low participation in {week_type}:\n",
-            f"Season: {season_id} | Week: {section_index + 1}\n",
-        ]
-
-        for i, player in enumerate(inactive_players, 1):
-            player_name = player.get("player_name", "Unknown")
-            decks_used = player.get("decks_used", 0)
-            fame = player.get("fame", 0)
-
+        response_lines = ["😴 INACTIVITY — last seen in-game", ""]
+        for index, member in enumerate(absent_members, 1):
+            name = member.get("player_name") or "Unknown"
+            days_absent = member.get("days_absent")
+            if days_absent is None:
+                days_text = "n/a"
+                flag = ""
+            else:
+                days_text = f"{days_absent}d ago"
+                if days_absent >= LAST_SEEN_RED_DAYS:
+                    flag = "🔴"
+                elif days_absent >= LAST_SEEN_YELLOW_DAYS:
+                    flag = "🟡"
+                else:
+                    flag = ""
+            prefix = f"{flag} " if flag else ""
             response_lines.append(
-                f"{i}. {player_name}\n"
-                f"   Decks: {decks_used} | Fame: {fame}"
+                f"{index}) {prefix}{name} — last seen {days_text}"
             )
 
-        response_lines.append(f"\nTotal: {len(inactive_players)} player(s)")
-
         await message.answer("\n".join(response_lines), parse_mode=None)
-
     except Exception as e:
         logger.error("Error in /inactive command: %s", e, exc_info=True)
         await message.answer(

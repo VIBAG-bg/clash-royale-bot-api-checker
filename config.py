@@ -74,6 +74,23 @@ DONATION_REVIVE_WTD_THRESHOLD: int = int(
 DONATION_REVIVE_8W_THRESHOLD: int = int(
     get_env_var("DONATION_REVIVE_8W_THRESHOLD", default="120", required=False)
 )
+DONATION_BOX_THRESHOLD: int = int(
+    get_env_var("DONATION_BOX_THRESHOLD", default="50", required=False)
+)
+
+# Last seen inactivity flags
+LAST_SEEN_YELLOW_DAYS: int = int(
+    get_env_var("LAST_SEEN_YELLOW_DAYS", default="7", required=False)
+)
+LAST_SEEN_RED_DAYS: int = int(
+    get_env_var("LAST_SEEN_RED_DAYS", default="14", required=False)
+)
+INACTIVE_LAST_SEEN_LIMIT: int = int(
+    get_env_var("INACTIVE_LAST_SEEN_LIMIT", default="15", required=False)
+)
+LAST_SEEN_FLAG_LIMIT: int = int(
+    get_env_var("LAST_SEEN_FLAG_LIMIT", default="5", required=False)
+)
 
 # Clash Royale API base URL
 CR_API_BASE_URL: str = os.getenv("CR_API_BASE_URL", "https://api.clashroyale.com/v1")

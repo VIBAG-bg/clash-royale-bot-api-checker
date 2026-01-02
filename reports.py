@@ -10,7 +10,11 @@ from sqlalchemy import func, select, tuple_
 from config import (
     DONATION_REVIVE_WTD_THRESHOLD,
     DONATION_WEEKS_WINDOW,
+    DONATION_BOX_THRESHOLD,
     KICK_SHORTLIST_LIMIT,
+    LAST_SEEN_FLAG_LIMIT,
+    LAST_SEEN_RED_DAYS,
+    LAST_SEEN_YELLOW_DAYS,
     NEW_MEMBER_WEEKS_PLAYED,
     PROTECTED_PLAYER_TAGS,
     REVIVED_DECKS_THRESHOLD,
@@ -19,11 +23,13 @@ from db import (
     PlayerParticipation,
     get_app_state,
     get_current_member_tags,
+    get_current_members_snapshot,
     get_clan_wtd_donation_average,
     get_current_wtd_donations,
     get_current_members_with_wtd_donations,
     get_donation_weekly_sums_for_window,
     get_last_weeks_from_db,
+    get_last_seen_map,
     get_latest_river_race_state,
     get_participation_week_counts,
     get_river_race_state_for_week,
@@ -200,6 +206,37 @@ def _compare_simple(value: int, avg: int) -> str:
     if value < avg:
         return "❌ Below"
     return "➖ Equal"
+
+
+def _days_absent(last_seen: datetime | None, now: datetime) -> int | None:
+    if last_seen is None:
+        return None
+    if last_seen.tzinfo is None:
+        last_seen = last_seen.replace(tzinfo=timezone.utc)
+    delta = now - last_seen
+    if delta.total_seconds() < 0:
+        return 0
+    return delta.days
+
+
+def _absence_flag(days_absent: int | None) -> str:
+    if days_absent is None:
+        return ""
+    if days_absent >= LAST_SEEN_RED_DAYS:
+        return "🔴"
+    if days_absent >= LAST_SEEN_YELLOW_DAYS:
+        return "🟡"
+    return ""
+
+
+def _absence_label(days_absent: int | None) -> str:
+    if days_absent is None:
+        return "⚠️ No data"
+    if days_absent >= LAST_SEEN_RED_DAYS:
+        return "🔴 RED"
+    if days_absent >= LAST_SEEN_YELLOW_DAYS:
+        return "🟡 YELLOW"
+    return "✅ OK"
 
 
 async def _resolve_active_week_key(
@@ -450,6 +487,8 @@ async def build_kick_shortlist_report(
         )
 
     donations_wtd = await _collect_wtd_donations(clan_tag, inactive_tags)
+    last_seen_map = await get_last_seen_map(clan_tag)
+    now_utc = datetime.now(timezone.utc)
 
     candidates: list[dict[str, object]] = []
     warnings: list[dict[str, object]] = []
@@ -465,6 +504,8 @@ async def build_kick_shortlist_report(
         normalized_tag = _normalize_tag(tag)
         if normalized_tag in donations_wtd:
             wtd_donations = donations_wtd[normalized_tag].get("donations")
+        last_seen = last_seen_map.get(normalized_tag)
+        days_absent = _days_absent(last_seen, now_utc)
         if weeks_played <= NEW_MEMBER_WEEKS_PLAYED:
             if last_decks < REVIVED_DECKS_THRESHOLD:
                 new_members.append(
@@ -484,6 +525,7 @@ async def build_kick_shortlist_report(
             "fame": int(row.get("fame", 0)),
             "last_week_decks": last_decks,
             "donations_wtd": wtd_donations,
+            "days_absent": days_absent,
         }
         if last_decks >= REVIVED_DECKS_THRESHOLD:
             warnings.append(entry)
@@ -503,7 +545,20 @@ async def build_kick_shortlist_report(
     if shortlist:
         lines.append("Kick candidates:")
         for index, row in enumerate(shortlist, 1):
-            name = _format_name(row.get("player_name"))
+            days_absent = row.get("days_absent")
+            wtd_donations = row.get("donations_wtd")
+            flags: list[str] = []
+            absence_flag = _absence_flag(days_absent)
+            if absence_flag:
+                flags.append(absence_flag)
+            if (
+                wtd_donations is not None
+                and wtd_donations >= DONATION_BOX_THRESHOLD
+            ):
+                flags.append("📦")
+            prefix = f"{' '.join(flags)} " if flags else ""
+            display_name = f"{prefix}{row.get('player_name')}"
+            name = _format_name(display_name)
             donation_suffix = _format_donation_suffix(
                 row.get("player_tag"),
                 donations_wtd,
@@ -539,7 +594,7 @@ async def build_kick_shortlist_report(
         lines.extend(
             [
                 "",
-                "Warnings: inactive overall, but donating — consider keeping",
+                "Warnings: inactive overall, but donating - consider keeping",
             ]
         )
         for index, row in enumerate(donation_warnings, 1):
@@ -553,6 +608,46 @@ async def build_kick_shortlist_report(
                 f"8w fame: {row.get('fame', 0)} | last week: {row.get('last_week_decks', 0)}"
                 f"{donation_suffix}"
             )
+
+    if LAST_SEEN_FLAG_LIMIT > 0:
+        snapshot_rows = await get_current_members_snapshot(clan_tag)
+        flagged_rows: list[dict[str, object]] = []
+        for row in snapshot_rows:
+            days_absent = _days_absent(row.get("last_seen"), now_utc)
+            flag = _absence_flag(days_absent)
+            if not flag:
+                continue
+            flagged_rows.append(
+                {
+                    "player_tag": row.get("player_tag"),
+                    "player_name": row.get("player_name") or "Unknown",
+                    "days_absent": days_absent,
+                    "flag": flag,
+                }
+            )
+        flagged_rows = _filter_protected(flagged_rows)
+        red_rows = [
+            row for row in flagged_rows if row.get("flag") == "🔴"
+        ]
+        yellow_rows = [
+            row for row in flagged_rows if row.get("flag") == "🟡"
+        ]
+        red_rows.sort(
+            key=lambda row: int(row.get("days_absent") or 0), reverse=True
+        )
+        yellow_rows.sort(
+            key=lambda row: int(row.get("days_absent") or 0), reverse=True
+        )
+        combined = (red_rows + yellow_rows)[:LAST_SEEN_FLAG_LIMIT]
+        if combined:
+            lines.extend(["", "🕒 Last seen flags (current members)"])
+            for index, row in enumerate(combined, 1):
+                name = row.get("player_name") or "Unknown"
+                days_absent = row.get("days_absent")
+                days_text = f"{days_absent}d ago" if days_absent is not None else "n/a"
+                lines.append(
+                    f"{index}) {row.get('flag')} {name} — last seen {days_text}"
+                )
 
     if new_members:
         lines.extend(
@@ -905,6 +1000,19 @@ async def build_my_activity_report(
         player_tags={_normalize_tag(player_tag)},
         window_weeks=DONATION_WEEKS_WINDOW,
     )
+    last_seen_map = await get_last_seen_map(clan_tag)
+    last_seen = last_seen_map.get(_normalize_tag(player_tag))
+    now_utc = datetime.now(timezone.utc)
+    days_absent = _days_absent(last_seen, now_utc)
+    if isinstance(last_seen, datetime):
+        last_seen_ts = last_seen.astimezone(timezone.utc).strftime(
+            "%Y-%m-%d %H:%M UTC"
+        )
+        last_seen_line = (
+            f"👀 Last seen: {last_seen_ts} ({days_absent}d ago) {_absence_label(days_absent)}"
+        )
+    else:
+        last_seen_line = "👀 Last seen: n/a"
     tag_key = _normalize_tag(player_tag)
     wtd_entry = donations_wtd_map.get(tag_key, {})
     wtd_donations = wtd_entry.get("donations")
@@ -964,6 +1072,7 @@ async def build_my_activity_report(
         f"📅 Current week: S{season_id} • W{section_index} • {colosseum_label}",
         f"🃏 Decks used: {current_decks} / 16",
         f"🏆 Fame: {current_fame}",
+        last_seen_line,
         "",
         f"📈 Rank (decks): {rank_decks} / {member_count}",
         f"📈 Rank (fame):  {rank_fame}  / {member_count}",

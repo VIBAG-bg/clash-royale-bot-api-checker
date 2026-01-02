@@ -39,6 +39,23 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _parse_last_seen(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+    if not value:
+        return None
+    if isinstance(value, str):
+        for fmt in ("%Y%m%dT%H%M%S.%fZ", "%Y%m%dT%H%M%SZ"):
+            try:
+                parsed = datetime.strptime(value, fmt)
+            except ValueError:
+                continue
+            return parsed.replace(tzinfo=timezone.utc)
+    return None
+
+
 def get_donation_week_start_date(dt_utc: datetime) -> date:
     if dt_utc.tzinfo is None:
         dt_utc = dt_utc.replace(tzinfo=timezone.utc)
@@ -182,7 +199,7 @@ class ClanMemberDaily(Base):
     clan_rank: Mapped[int | None] = mapped_column(Integer)
     previous_clan_rank: Mapped[int | None] = mapped_column(Integer)
     exp_level: Mapped[int | None] = mapped_column(Integer)
-    last_seen: Mapped[str | None] = mapped_column(String(64))
+    last_seen: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utc_now, nullable=False
     )
@@ -481,7 +498,7 @@ async def _upsert_clan_member_daily(
     clan_rank: int | None,
     previous_clan_rank: int | None,
     exp_level: int | None,
-    last_seen: str | None,
+    last_seen: datetime | None,
 ) -> None:
     stmt = pg_insert(ClanMemberDaily.__table__).values(
         snapshot_date=snapshot_date,
@@ -802,7 +819,7 @@ async def save_clan_member_daily(
     clan_rank: int | None = None,
     previous_clan_rank: int | None = None,
     exp_level: int | None = None,
-    last_seen: str | None = None,
+    last_seen: datetime | None = None,
     session: AsyncSession | None = None,
 ) -> None:
     """Save or update daily snapshot of a clan member."""
@@ -824,7 +841,7 @@ async def save_clan_member_daily(
                     clan_rank,
                     previous_clan_rank,
                     exp_level,
-                    last_seen,
+                    _parse_last_seen(last_seen),
                 )
                 await session.commit()
             except Exception:
@@ -845,7 +862,7 @@ async def save_clan_member_daily(
             clan_rank,
             previous_clan_rank,
             exp_level,
-            last_seen,
+            _parse_last_seen(last_seen),
         )
 
 
@@ -876,6 +893,7 @@ async def upsert_clan_member_daily(
         clan_rank = member.get("clanRank")
         previous_clan_rank = member.get("previousClanRank")
         exp_level = member.get("expLevel")
+        last_seen = _parse_last_seen(member.get("lastSeen"))
         await _upsert_clan_member_daily(
             session,
             now,
@@ -890,7 +908,7 @@ async def upsert_clan_member_daily(
             int(clan_rank) if clan_rank is not None else None,
             int(previous_clan_rank) if previous_clan_rank is not None else None,
             int(exp_level) if exp_level is not None else None,
-            member.get("lastSeen"),
+            last_seen,
         )
 
 
@@ -1047,6 +1065,87 @@ async def get_current_member_snapshot(
         )
     )
     return {row.player_tag: row.player_name for row in result.all()}
+
+
+async def get_latest_member_snapshot_date(
+    clan_tag: str, session: AsyncSession | None = None
+) -> date | None:
+    if session is None:
+        async with _get_session() as session:
+            return await get_latest_member_snapshot_date(clan_tag, session=session)
+    return await get_latest_membership_date(clan_tag, session=session)
+
+
+async def get_current_members_snapshot(
+    clan_tag: str, session: AsyncSession | None = None
+) -> list[dict[str, object]]:
+    if session is None:
+        async with _get_session() as session:
+            return await get_current_members_snapshot(clan_tag, session=session)
+    latest_date = await get_latest_membership_date(clan_tag, session=session)
+    if latest_date is None:
+        return []
+    result = await session.execute(
+        select(
+            ClanMemberDaily.player_tag,
+            ClanMemberDaily.player_name,
+            ClanMemberDaily.last_seen,
+            ClanMemberDaily.donations,
+        ).where(
+            ClanMemberDaily.clan_tag == clan_tag,
+            ClanMemberDaily.snapshot_date == latest_date,
+        )
+    )
+    return [
+        {
+            "player_tag": row.player_tag,
+            "player_name": row.player_name,
+            "last_seen": row.last_seen,
+            "donations": int(row.donations) if row.donations is not None else None,
+        }
+        for row in result.all()
+    ]
+
+
+async def get_last_seen_map(
+    clan_tag: str, session: AsyncSession | None = None
+) -> dict[str, datetime | None]:
+    if session is None:
+        async with _get_session() as session:
+            return await get_last_seen_map(clan_tag, session=session)
+    snapshot = await get_current_members_snapshot(clan_tag, session=session)
+    return {row["player_tag"]: row.get("last_seen") for row in snapshot}
+
+
+async def get_top_absent_members(
+    clan_tag: str, limit: int, session: AsyncSession | None = None
+) -> list[dict[str, object]]:
+    if limit <= 0:
+        return []
+    if session is None:
+        async with _get_session() as session:
+            return await get_top_absent_members(clan_tag, limit, session=session)
+    rows = await get_current_members_snapshot(clan_tag, session=session)
+    if not rows:
+        return []
+    now = _utc_now()
+    for row in rows:
+        last_seen = row.get("last_seen")
+        if isinstance(last_seen, datetime):
+            if last_seen.tzinfo is None:
+                last_seen = last_seen.replace(tzinfo=timezone.utc)
+            delta = now - last_seen
+            days_absent = max(0, delta.days)
+        else:
+            days_absent = None
+        row["days_absent"] = days_absent
+    rows.sort(
+        key=lambda row: (
+            row.get("days_absent") is None,
+            -(row.get("days_absent") or 0),
+        )
+    )
+    return rows[:limit]
 
 
 async def get_current_wtd_donations(
