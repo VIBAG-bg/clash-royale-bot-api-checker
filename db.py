@@ -2265,6 +2265,46 @@ async def get_or_create_pending_challenge(
     return _challenge_to_dict(challenge), question
 
 
+async def create_fresh_captcha_challenge(
+    chat_id: int,
+    user_id: int,
+    expire_minutes: int,
+    session: AsyncSession | None = None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    if session is None:
+        async with _get_session() as session:
+            try:
+                result = await create_fresh_captcha_challenge(
+                    chat_id, user_id, expire_minutes, session=session
+                )
+                await session.commit()
+                return result
+            except Exception:
+                await session.rollback()
+                raise
+    now = _utc_now()
+    question = await get_random_captcha_question(session=session)
+    if not question:
+        return None, None
+    expires_at = now + timedelta(minutes=max(expire_minutes, 1))
+    stmt = pg_insert(CaptchaChallenge.__table__).values(
+        chat_id=chat_id,
+        user_id=user_id,
+        question_id=question["id"],
+        attempts=0,
+        status="pending",
+        created_at=now,
+        updated_at=now,
+        expires_at=expires_at,
+    )
+    result = await session.execute(stmt.returning(CaptchaChallenge.id))
+    challenge_id = result.scalar_one()
+    challenge = await session.get(CaptchaChallenge, challenge_id)
+    if not challenge:
+        return None, None
+    return _challenge_to_dict(challenge), question
+
+
 async def get_challenge_by_id(
     challenge_id: int, session: AsyncSession | None = None
 ) -> dict[str, Any] | None:

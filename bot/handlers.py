@@ -31,6 +31,7 @@ from config import (
 )
 from cr_api import ClashRoyaleAPIError, get_api_client
 from db import (
+    create_fresh_captcha_challenge,
     delete_verified_user,
     delete_user_link,
     delete_user_link_request,
@@ -849,18 +850,35 @@ async def handle_captcha_callback(query: CallbackQuery) -> None:
 
     attempts = await increment_challenge_attempts(challenge_id)
     if attempts >= CAPTCHA_MAX_ATTEMPTS:
+        now = datetime.now(timezone.utc)
         await mark_challenge_failed(
             challenge_id,
-            datetime.now(timezone.utc)
-            + timedelta(minutes=max(CAPTCHA_EXPIRE_MINUTES, 1)),
+            now + timedelta(seconds=30),
         )
         if query.message:
             await query.message.answer(
-                "Too many attempts, try again later.", parse_mode=None
+                "Неправильно. Другая капча 👇", parse_mode=None
             )
-        await query.answer("Too many attempts.", show_alert=False)
+        new_challenge, new_question = await create_fresh_captcha_challenge(
+            challenge["chat_id"],
+            challenge["user_id"],
+            CAPTCHA_EXPIRE_MINUTES,
+        )
+        if new_challenge and new_question:
+            message_id = await _send_captcha_message(
+                query.bot,
+                challenge["chat_id"],
+                challenge_id=new_challenge["id"],
+                question=new_question,
+            )
+            if message_id:
+                await update_challenge_message_id(
+                    new_challenge["id"], message_id
+                )
+                await touch_last_reminded_at(new_challenge["id"], now)
+        await query.answer("Неправильно.", show_alert=False)
         logger.info(
-            "Captcha failed for user %s in chat %s",
+            "Captcha failed for user %s in chat %s (new challenge created)",
             challenge["user_id"],
             challenge["chat_id"],
         )
