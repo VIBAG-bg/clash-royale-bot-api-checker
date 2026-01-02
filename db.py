@@ -1089,6 +1089,7 @@ async def get_current_members_snapshot(
         select(
             ClanMemberDaily.player_tag,
             ClanMemberDaily.player_name,
+            ClanMemberDaily.role,
             ClanMemberDaily.last_seen,
             ClanMemberDaily.donations,
         ).where(
@@ -1100,6 +1101,7 @@ async def get_current_members_snapshot(
         {
             "player_tag": row.player_tag,
             "player_name": row.player_name,
+            "role": row.role,
             "last_seen": row.last_seen,
             "donations": int(row.donations) if row.donations is not None else None,
         }

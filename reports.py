@@ -465,12 +465,16 @@ async def build_promotion_candidates_report(clan_tag: str) -> str:
 
     member_rows = await get_current_members_snapshot(clan_tag)
     members: dict[str, str] = {}
+    roles: dict[str, str] = {}
     for row in member_rows:
         tag = _normalize_tag(row.get("player_tag"))
         if not tag or tag in PROTECTED_TAGS_NORMALIZED:
             continue
         name = row.get("player_name") or "Unknown"
         members[tag] = name
+        role_value = row.get("role")
+        role_text = str(role_value).strip().lower() if role_value else ""
+        roles[tag] = role_text
 
     war_stats = await get_war_stats_for_weeks(clan_tag, weeks)
     alltime_weeks = await get_alltime_weeks_played(clan_tag)
@@ -507,6 +511,7 @@ async def build_promotion_candidates_report(clan_tag: str) -> str:
             {
                 "player_tag": tag,
                 "player_name": name,
+                "role": roles.get(tag, ""),
                 "weeks_played": weeks_played,
                 "active_weeks": active_weeks,
                 "avg_decks": avg_decks,
@@ -527,6 +532,9 @@ async def build_promotion_candidates_report(clan_tag: str) -> str:
 
     elder_candidates: list[dict[str, object]] = []
     for row in stats_rows:
+        role = str(row.get("role") or "").lower()
+        if role in ("elder", "coleader", "leader"):
+            continue
         if row["weeks_played"] < PROMOTE_MIN_WEEKS_PLAYED_ELDER:
             continue
         if row["active_weeks"] < PROMOTE_MIN_ACTIVE_WEEKS_ELDER:
@@ -576,6 +584,9 @@ async def build_promotion_candidates_report(clan_tag: str) -> str:
     co_candidates: list[dict[str, object]] = []
     if donations_available:
         for row in stats_rows:
+            role = str(row.get("role") or "").lower()
+            if role != "elder":
+                continue
             if row["weeks_played"] < PROMOTE_MIN_WEEKS_PLAYED_COLEADER:
                 continue
             if row["active_weeks"] < PROMOTE_MIN_ACTIVE_WEEKS_COLEADER:
