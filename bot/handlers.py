@@ -74,6 +74,7 @@ from reports import (
 from riverrace_import import get_last_completed_week, get_last_completed_weeks
 
 logger = logging.getLogger(__name__)
+logger.info("MODLOG_CHAT_ID loaded as %r", MODLOG_CHAT_ID)
 
 # Create router for handlers
 router = Router(name="main_handlers")
