@@ -457,6 +457,7 @@ async def _send_debug_reminder(
     war_type: str,
     day: int,
     banner_url: str,
+    banner_url_day4: str,
     templates: dict[int, str],
 ) -> None:
     caption = templates.get(day)
@@ -467,11 +468,11 @@ async def _send_debug_reminder(
         f"Debug: sending {war_type} Day {day} to this chat only.",
         parse_mode=None,
     )
-    if day == 1:
+    if day in (1, 4):
         try:
             await message.bot.send_photo(
                 message.chat.id,
-                photo=banner_url,
+                photo=banner_url_day4 if day == 4 else banner_url,
                 caption=caption,
                 parse_mode=None,
             )
@@ -738,7 +739,8 @@ async def cmd_riverside(message: Message) -> None:
         message,
         war_type="Riverside",
         day=day,
-        banner_url="https://i.ibb.co/Cs4Sjpzw/image.png",
+        banner_url="https://i.ibb.co/VyGjscj/image.png",
+        banner_url_day4="https://i.ibb.co/0jvgVSgq/image-1.jpg",
         templates=templates,
     )
 
@@ -760,7 +762,8 @@ async def cmd_coliseum(message: Message) -> None:
         message,
         war_type="Coliseum",
         day=day,
-        banner_url="https://i.ibb.co/VyGjscj/image.png",
+        banner_url="https://i.ibb.co/Cs4Sjpzw/image.png",
+        banner_url_day4="https://i.ibb.co/R4YLyPzR/image.jpg",
         templates=templates,
     )
 

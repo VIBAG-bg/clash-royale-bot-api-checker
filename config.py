@@ -105,18 +105,34 @@ REMINDER_TIME_UTC: str = (
 REMINDER_WAR_BANNER_URL: str = (
     get_env_var(
         "REMINDER_WAR_BANNER_URL",
+        default="https://i.ibb.co/Cs4Sjpzw/image.png",
+        required=False,
+    )
+    or "https://i.ibb.co/Cs4Sjpzw/image.png"
+)
+REMINDER_WAR_BANNER_URL_DAY4: str = (
+    get_env_var(
+        "REMINDER_WAR_BANNER_URL_DAY4",
+        default="https://i.ibb.co/0jvgVSgq/image-1.jpg",
+        required=False,
+    )
+    or "https://i.ibb.co/0jvgVSgq/image-1.jpg"
+)
+REMINDER_COLOSSEUM_BANNER_URL: str = (
+    get_env_var(
+        "REMINDER_COLOSSEUM_BANNER_URL",
         default="https://i.ibb.co/VyGjscj/image.png",
         required=False,
     )
     or "https://i.ibb.co/VyGjscj/image.png"
 )
-REMINDER_COLOSSEUM_BANNER_URL: str = (
+REMINDER_COLOSSEUM_BANNER_URL_DAY4: str = (
     get_env_var(
-        "REMINDER_COLOSSEUM_BANNER_URL",
-        default="https://i.ibb.co/Cs4Sjpzw/image.png",
+        "REMINDER_COLOSSEUM_BANNER_URL_DAY4",
+        default="https://i.ibb.co/R4YLyPzR/image.jpg",
         required=False,
     )
-    or "https://i.ibb.co/Cs4Sjpzw/image.png"
+    or "https://i.ibb.co/R4YLyPzR/image.jpg"
 )
 
 # Promotion recommendations

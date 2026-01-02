@@ -16,9 +16,11 @@ from config import (
     CR_API_TOKEN,
     FETCH_INTERVAL_SECONDS,
     REMINDER_COLOSSEUM_BANNER_URL,
+    REMINDER_COLOSSEUM_BANNER_URL_DAY4,
     REMINDER_ENABLED,
     REMINDER_TIME_UTC,
     REMINDER_WAR_BANNER_URL,
+    REMINDER_WAR_BANNER_URL_DAY4,
     TELEGRAM_BOT_TOKEN,
     require_env_value,
 )
@@ -562,7 +564,11 @@ async def maybe_post_daily_war_reminder(bot: Bot) -> None:
                     3: "🏛 Coliseum – Day 3\n🔥 Stay active.\n❗ Participation is mandatory.",
                     4: "🚨 FINAL DAY – COLISEUM\n⚔️ Finish your attacks today.\n📊 Inactive players will be reviewed after war.",
                 }
-                banner_url = REMINDER_COLOSSEUM_BANNER_URL
+                banner_url = (
+                    REMINDER_COLOSSEUM_BANNER_URL_DAY4
+                    if day_number == 4
+                    else REMINDER_COLOSSEUM_BANNER_URL
+                )
             else:
                 messages = {
                     1: "🏁 Clan War has begun!\nDay 1 is live.\n⚔️ Use your attacks and bring fame to the clan.",
@@ -570,7 +576,11 @@ async def maybe_post_daily_war_reminder(bot: Bot) -> None:
                     3: "🔥 Clan War – Day 3\nWe’re close to the finish.\n⚔️ Every attack matters.",
                     4: "🚨 Final Day of Clan War!\n⚔️ Finish your attacks today.\n📊 Results and activity report after war ends.",
                 }
-                banner_url = REMINDER_WAR_BANNER_URL
+                banner_url = (
+                    REMINDER_WAR_BANNER_URL_DAY4
+                    if day_number == 4
+                    else REMINDER_WAR_BANNER_URL
+                )
 
             message = messages.get(day_number)
             if not message:
@@ -580,7 +590,7 @@ async def maybe_post_daily_war_reminder(bot: Bot) -> None:
             sent_count = 0
             for chat_id in chat_ids:
                 try:
-                    if day_number == 1:
+                    if day_number in (1, 4):
                         try:
                             await bot.send_photo(
                                 chat_id,
