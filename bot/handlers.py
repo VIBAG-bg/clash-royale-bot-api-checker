@@ -59,17 +59,10 @@ DIVIDER_LINE = "---------------------------"
 def _format_help_commands(commands: list[dict[str, object]]) -> list[str]:
     lines: list[str] = []
     for index, cmd in enumerate(commands, 1):
-        lines.append(f"{index}) {cmd['name']}")
-        lines.append(f"   What: {cmd['what']}")
-        lines.append(f"   Where: {cmd['where']}")
-        lines.append(f"   Who: {cmd['who']}")
-        lines.append("   Usage:")
-        for usage in cmd["usage"]:
-            lines.append(f"   - {usage}")
-        lines.append(f"   Args: {cmd['args']}")
-        lines.append(f"   Notes: {cmd['notes']}")
-        lines.append("")
-    return lines[:-1] if lines else lines
+        usage = cmd["usage"][0] if cmd["usage"] else cmd["name"]
+        lines.append(f"{index}) {cmd['name']} — {cmd['what']}")
+        lines.append(f"   Usage: {usage}")
+    return lines
 
 
 def _require_clan_tag() -> str | None:
@@ -411,8 +404,7 @@ async def cmd_help(message: Message) -> None:
         HEADER_LINE,
         "🤖 Black Poison Bot — Help",
         HEADER_LINE,
-        "📌 This bot tracks Clan Wars + activity and helps manage kick lists fairly.",
-        "Data is based on our database snapshots (not live game UI).",
+        "📌 Quick command list (plain text).",
         "",
         "🧩 GENERAL COMMANDS (everyone)",
         DIVIDER_LINE,
@@ -430,7 +422,7 @@ async def cmd_help(message: Message) -> None:
     lines.extend(
         [
             HEADER_LINE,
-            "ℹ️ Tip: If you want your own stats, use /my_activity in DM. If not linked, the bot will guide you.",
+            "ℹ️ Tip: Use /my_activity in DM to link your account.",
             HEADER_LINE,
         ]
     )
