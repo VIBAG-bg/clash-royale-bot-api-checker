@@ -160,3 +160,10 @@ ADMIN_USER_IDS: set[int] = {
     for value in (get_env_var("ADMIN_USER_IDS", default="", required=False) or "").split(",")
     if value.strip().isdigit()
 }
+
+# Admin ids for debug-only commands
+ADMIN_TELEGRAM_IDS: set[int] = {
+    int(value)
+    for value in (get_env_var("ADMIN_TELEGRAM_IDS", default="", required=False) or "").split(",")
+    if value.strip().isdigit()
+}

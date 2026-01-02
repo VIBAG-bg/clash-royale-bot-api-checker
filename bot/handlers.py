@@ -14,6 +14,7 @@ from aiogram.types import (
 )
 
 from config import (
+    ADMIN_TELEGRAM_IDS,
     ADMIN_USER_IDS,
     BOT_USERNAME,
     CLAN_TAG,
@@ -78,6 +79,27 @@ def _normalize_tag(tag: str) -> str:
     if not raw.startswith("#"):
         raw = f"#{raw}"
     return raw.upper()
+
+
+def _is_debug_admin(user_id: int) -> bool:
+    return user_id in ADMIN_TELEGRAM_IDS
+
+
+def _parse_debug_day(text: str | None) -> int:
+    if not text:
+        return 1
+    parts = text.split()
+    if len(parts) < 2:
+        return 1
+    try:
+        day = int(parts[1])
+    except ValueError:
+        return 1
+    if day < 1:
+        return 1
+    if day > 4:
+        return 4
+    return day
 
 
 async def _get_bot_username(message: Message) -> str | None:
@@ -429,6 +451,59 @@ async def cmd_help(message: Message) -> None:
     await message.answer("\n".join(lines), parse_mode=None)
 
 
+async def _send_debug_reminder(
+    message: Message,
+    *,
+    war_type: str,
+    day: int,
+    banner_url: str,
+    templates: dict[int, str],
+) -> None:
+    caption = templates.get(day)
+    if not caption:
+        await message.answer("Unable to build reminder message.", parse_mode=None)
+        return
+    await message.answer(
+        f"Debug: sending {war_type} Day {day} to this chat only.",
+        parse_mode=None,
+    )
+    if day == 1:
+        try:
+            await message.bot.send_photo(
+                message.chat.id,
+                photo=banner_url,
+                caption=caption,
+                parse_mode=None,
+            )
+            logger.info(
+                "Debug reminder photo sent: user=%s chat=%s type=%s day=%s",
+                message.from_user.id if message.from_user else None,
+                message.chat.id,
+                war_type,
+                day,
+            )
+        except Exception as e:
+            logger.warning(
+                "Debug reminder photo failed: user=%s chat=%s type=%s day=%s error=%s",
+                message.from_user.id if message.from_user else None,
+                message.chat.id,
+                war_type,
+                day,
+                e,
+                exc_info=True,
+            )
+            await message.answer(caption, parse_mode=None)
+    else:
+        await message.answer(caption, parse_mode=None)
+        logger.info(
+            "Debug reminder sent: user=%s chat=%s type=%s day=%s",
+            message.from_user.id if message.from_user else None,
+            message.chat.id,
+            war_type,
+            day,
+        )
+
+
 @router.message(Command("ping"))
 async def cmd_ping(message: Message) -> None:
     """Handle /ping command - Check bot responsiveness and API status."""
@@ -644,6 +719,50 @@ async def cmd_info(message: Message) -> None:
         return
     report = await build_clan_info_report(clan_tag)
     await message.answer(report, parse_mode=None)
+
+
+@router.message(Command("riverside"))
+async def cmd_riverside(message: Message) -> None:
+    """Debug: send Clan War reminder to this chat only."""
+    if message.from_user is None or not _is_debug_admin(message.from_user.id):
+        await message.answer("Not allowed.", parse_mode=None)
+        return
+    day = _parse_debug_day(message.text)
+    templates = {
+        1: "🏁 Clan War has begun!\nDay 1 is live.\n⚔️ Use your attacks and bring fame to the clan.",
+        2: "⏳ Clan War – Day 2\nNew war day is open.\n💪 Don’t forget to play your battles.",
+        3: "🔥 Clan War – Day 3\nWe’re close to the finish.\n⚔️ Every attack matters.",
+        4: "🚨 Final Day of Clan War!\n⚔️ Finish your attacks today.\n📊 Results and activity report after war ends.",
+    }
+    await _send_debug_reminder(
+        message,
+        war_type="Riverside",
+        day=day,
+        banner_url="https://i.ibb.co/Cs4Sjpzw/image.png",
+        templates=templates,
+    )
+
+
+@router.message(Command("coliseum"))
+async def cmd_coliseum(message: Message) -> None:
+    """Debug: send Colosseum reminder to this chat only."""
+    if message.from_user is None or not _is_debug_admin(message.from_user.id):
+        await message.answer("Not allowed.", parse_mode=None)
+        return
+    day = _parse_debug_day(message.text)
+    templates = {
+        1: "🏛 COLISEUM WAR HAS STARTED\nDay 1 is live.\n❗ Participation is mandatory.\n⚔️ Play your attacks.",
+        2: "🏛 Coliseum – Day 2\n⚔️ All attacks matter.\n❗ Participation is mandatory.",
+        3: "🏛 Coliseum – Day 3\n🔥 Stay active.\n❗ Participation is mandatory.",
+        4: "🚨 FINAL DAY – COLISEUM\n⚔️ Finish your attacks today.\n📊 Inactive players will be reviewed after war.",
+    }
+    await _send_debug_reminder(
+        message,
+        war_type="Coliseum",
+        day=day,
+        banner_url="https://i.ibb.co/VyGjscj/image.png",
+        templates=templates,
+    )
 
 
 @router.message(Command("donations"))
