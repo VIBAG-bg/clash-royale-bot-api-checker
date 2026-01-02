@@ -590,31 +590,67 @@ async def cmd_help(message: Message) -> None:
 
 @moderation_router.chat_member()
 async def handle_member_join(event: ChatMemberUpdated) -> None:
+    user = event.new_chat_member.user
+    old_status = event.old_chat_member.status
+    new_status = event.new_chat_member.status
+    old_is_member = getattr(event.old_chat_member, "is_member", None)
+    new_is_member = getattr(event.new_chat_member, "is_member", None)
+    logger.info(
+        "CAPTCHA chat_member update: chat_id=%s user_id=%s old=%s new=%s old_is_member=%s new_is_member=%s",
+        event.chat.id,
+        user.id,
+        old_status,
+        new_status,
+        old_is_member,
+        new_is_member,
+    )
     if not ENABLE_CAPTCHA:
+        logger.info("CAPTCHA skip: reason=disabled chat_id=%s", event.chat.id)
         return
     if event.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        logger.info("CAPTCHA skip: reason=chat_type chat_id=%s", event.chat.id)
         return
-    user = event.new_chat_member.user
     if user.is_bot:
+        logger.info(
+            "CAPTCHA skip: reason=user_is_bot chat_id=%s user_id=%s",
+            event.chat.id,
+            user.id,
+        )
         return
     if event.new_chat_member.status in (
         ChatMemberStatus.ADMINISTRATOR,
         ChatMemberStatus.CREATOR,
     ):
+        logger.info(
+            "CAPTCHA skip: reason=user_is_admin chat_id=%s user_id=%s",
+            event.chat.id,
+            user.id,
+        )
         return
-    if event.old_chat_member.status not in (
-        ChatMemberStatus.LEFT,
-        ChatMemberStatus.KICKED,
-    ):
-        return
-    if event.new_chat_member.status not in (
-        ChatMemberStatus.MEMBER,
-        ChatMemberStatus.RESTRICTED,
-    ):
+    is_join = (
+        old_status in (ChatMemberStatus.LEFT, ChatMemberStatus.KICKED)
+        and new_status in (ChatMemberStatus.MEMBER, ChatMemberStatus.RESTRICTED)
+    ) or (
+        old_status == ChatMemberStatus.RESTRICTED
+        and new_status == ChatMemberStatus.RESTRICTED
+        and old_is_member is False
+        and new_is_member is True
+    )
+    if not is_join:
+        logger.info(
+            "CAPTCHA skip: reason=not_join chat_id=%s user_id=%s",
+            event.chat.id,
+            user.id,
+        )
         return
 
     try:
         if await is_user_verified(event.chat.id, user.id):
+            logger.info(
+                "CAPTCHA skip: reason=verified chat_id=%s user_id=%s",
+                event.chat.id,
+                user.id,
+            )
             return
     except Exception as e:
         logger.error("Failed to check verification: %s", e, exc_info=True)
@@ -656,11 +692,21 @@ async def handle_member_join(event: ChatMemberUpdated) -> None:
     if not question:
         question = await get_captcha_question(challenge["question_id"])
     if not question:
+        logger.info(
+            "CAPTCHA skip: reason=missing_question chat_id=%s user_id=%s",
+            event.chat.id,
+            user.id,
+        )
         return
     now = datetime.now(timezone.utc)
     last_reminded_at = challenge.get("last_reminded_at")
     if challenge.get("message_id") and isinstance(last_reminded_at, datetime):
         if (now - last_reminded_at).total_seconds() < CAPTCHA_REMIND_COOLDOWN_SECONDS:
+            logger.info(
+                "CAPTCHA skip: reason=cooldown chat_id=%s user_id=%s",
+                event.chat.id,
+                user.id,
+            )
             return
 
     message_id = await _send_captcha_message(
@@ -1136,6 +1182,103 @@ async def cmd_coliseum(message: Message) -> None:
         banner_url="https://i.ibb.co/Cs4Sjpzw/image.png",
         banner_url_day4="https://i.ibb.co/R4YLyPzR/image.jpg",
         templates=templates,
+    )
+
+
+@router.message(Command("captcha_send"))
+async def cmd_captcha_send(message: Message) -> None:
+    if message.from_user is None or not _is_debug_admin(message.from_user.id):
+        await message.answer("Not allowed.", parse_mode=None)
+        return
+    if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await message.answer("Reply to a user's message in a group.", parse_mode=None)
+        return
+    if message.reply_to_message is None or message.reply_to_message.from_user is None:
+        await message.answer("Reply to a user's message.", parse_mode=None)
+        return
+
+    target = message.reply_to_message.from_user
+    if target.is_bot:
+        await message.answer("Cannot send captcha to a bot.", parse_mode=None)
+        return
+    if _is_debug_admin(target.id):
+        await message.answer("Cannot send captcha to an admin.", parse_mode=None)
+        return
+
+    try:
+        member = await message.bot.get_chat_member(message.chat.id, target.id)
+        if member.status in (
+            ChatMemberStatus.ADMINISTRATOR,
+            ChatMemberStatus.CREATOR,
+        ):
+            await message.answer(
+                "Cannot send captcha to a chat admin.", parse_mode=None
+            )
+            return
+    except Exception:
+        pass
+
+    chat_id = message.chat.id
+    try:
+        if await is_user_verified(chat_id, target.id):
+            await message.answer(
+                "User is already verified. Use /captcha_unverify first.",
+                parse_mode=None,
+            )
+            return
+    except Exception as e:
+        logger.error("Failed to check verification: %s", e, exc_info=True)
+
+    try:
+        await message.bot.restrict_chat_member(
+            chat_id,
+            target.id,
+            permissions=ChatPermissions(
+                can_send_messages=False,
+                can_send_media_messages=False,
+                can_send_other_messages=False,
+                can_add_web_page_previews=False,
+            ),
+        )
+    except Exception as e:
+        logger.warning("Failed to restrict user: %s", e, exc_info=True)
+
+    try:
+        challenge, question = await get_or_create_pending_challenge(
+            chat_id, target.id, CAPTCHA_EXPIRE_MINUTES
+        )
+    except Exception as e:
+        logger.error("Failed to create captcha challenge: %s", e, exc_info=True)
+        await message.answer("Unable to create a captcha.", parse_mode=None)
+        return
+
+    if not challenge:
+        await message.answer("Unable to create a captcha.", parse_mode=None)
+        return
+    if not question:
+        question = await get_captcha_question(challenge["question_id"])
+    if not question:
+        await message.answer("Captcha question unavailable.", parse_mode=None)
+        return
+
+    message_id = await _send_captcha_message(
+        message.bot,
+        chat_id,
+        challenge_id=challenge["id"],
+        question=question,
+    )
+    if message_id:
+        await update_challenge_message_id(challenge["id"], message_id)
+        await touch_last_reminded_at(challenge["id"], datetime.now(timezone.utc))
+        await message.answer(
+            f"Captcha sent to {_format_user_label(target)} "
+            f"(challenge_id={challenge['id']}, msg_id={message_id}).",
+            parse_mode=None,
+        )
+        return
+
+    await message.answer(
+        "Captcha created, but failed to send message.", parse_mode=None
     )
 
 
