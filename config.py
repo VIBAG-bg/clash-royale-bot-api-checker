@@ -135,6 +135,21 @@ REMINDER_COLOSSEUM_BANNER_URL_DAY4: str = (
     or "https://i.ibb.co/R4YLyPzR/image.jpg"
 )
 
+# Captcha moderation
+ENABLE_CAPTCHA: bool = get_env_bool("ENABLE_CAPTCHA", default="true")
+CAPTCHA_MAX_ATTEMPTS: int = int(
+    get_env_var("CAPTCHA_MAX_ATTEMPTS", default="3", required=False)
+)
+CAPTCHA_EXPIRE_MINUTES: int = int(
+    get_env_var("CAPTCHA_EXPIRE_MINUTES", default="15", required=False)
+)
+CAPTCHA_REMIND_COOLDOWN_SECONDS: int = int(
+    get_env_var("CAPTCHA_REMIND_COOLDOWN_SECONDS", default="20", required=False)
+)
+WELCOME_RULES_MESSAGE_LINK: str = (
+    get_env_var("WELCOME_RULES_MESSAGE_LINK", default="", required=False) or ""
+)
+
 # Promotion recommendations
 PROMOTE_ELDER_LIMIT: int = int(
     get_env_var("PROMOTE_ELDER_LIMIT", default="2", required=False)

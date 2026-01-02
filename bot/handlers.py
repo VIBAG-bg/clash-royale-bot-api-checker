@@ -1,13 +1,15 @@
 ﻿"""Telegram bot command handlers using aiogram v3."""
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.enums import ChatMemberStatus, ChatType
 from aiogram.filters import Command
 from aiogram.types import (
     CallbackQuery,
+    ChatMemberUpdated,
+    ChatPermissions,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
@@ -17,21 +19,42 @@ from config import (
     ADMIN_TELEGRAM_IDS,
     ADMIN_USER_IDS,
     BOT_USERNAME,
+    CAPTCHA_EXPIRE_MINUTES,
+    CAPTCHA_MAX_ATTEMPTS,
+    CAPTCHA_REMIND_COOLDOWN_SECONDS,
     CLAN_TAG,
+    ENABLE_CAPTCHA,
     INACTIVE_LAST_SEEN_LIMIT,
     LAST_SEEN_RED_DAYS,
     LAST_SEEN_YELLOW_DAYS,
+    WELCOME_RULES_MESSAGE_LINK,
 )
 from cr_api import ClashRoyaleAPIError, get_api_client
 from db import (
+    delete_verified_user,
     delete_user_link,
     delete_user_link_request,
+    expire_active_challenges,
+    get_captcha_question,
     get_current_member_tags,
+    get_latest_challenge,
+    get_or_create_pending_challenge,
+    get_pending_challenge,
     get_top_absent_members,
+    increment_challenge_attempts,
+    is_user_verified,
+    mark_challenge_expired,
+    mark_challenge_failed,
+    mark_challenge_passed,
+    mark_pending_challenges_passed,
     get_player_name_for_tag,
+    get_challenge_by_id,
     get_user_link,
     get_user_link_request,
     search_player_candidates,
+    set_user_verified,
+    touch_last_reminded_at,
+    update_challenge_message_id,
     upsert_clan_chat,
     upsert_user_link,
     upsert_user_link_request,
@@ -52,6 +75,7 @@ logger = logging.getLogger(__name__)
 
 # Create router for handlers
 router = Router(name="main_handlers")
+moderation_router = Router(name="moderation_router")
 
 HEADER_LINE = "══════════════════════════════"
 DIVIDER_LINE = "---------------------------"
@@ -100,6 +124,119 @@ def _parse_debug_day(text: str | None) -> int:
     if day > 4:
         return 4
     return day
+
+
+def _format_dt(value: datetime | None) -> str:
+    if not isinstance(value, datetime):
+        return "n/a"
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def _format_user_label(user: object) -> str:
+    if not hasattr(user, "full_name"):
+        return "Unknown"
+    label = user.full_name
+    username = getattr(user, "username", None)
+    if username:
+        label = f"{label} (@{username})"
+    return label
+
+
+def _build_captcha_keyboard(
+    challenge_id: int, question: dict[str, object]
+) -> InlineKeyboardMarkup:
+    options = [
+        question.get("option_a"),
+        question.get("option_b"),
+        question.get("option_c"),
+        question.get("option_d"),
+    ]
+    buttons = [
+        [
+            InlineKeyboardButton(
+                text=str(options[0]),
+                callback_data=f"cap:{challenge_id}:0",
+            ),
+            InlineKeyboardButton(
+                text=str(options[1]),
+                callback_data=f"cap:{challenge_id}:1",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text=str(options[2]),
+                callback_data=f"cap:{challenge_id}:2",
+            ),
+            InlineKeyboardButton(
+                text=str(options[3]),
+                callback_data=f"cap:{challenge_id}:3",
+            ),
+        ],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+async def _send_captcha_message(
+    bot: Bot,
+    chat_id: int,
+    *,
+    challenge_id: int,
+    question: dict[str, object],
+) -> int | None:
+    text = (
+        "🛡 Please verify to chat.\n"
+        f"{question.get('question_text')}\n"
+        "Choose the correct answer:"
+    )
+    keyboard = _build_captcha_keyboard(challenge_id, question)
+    try:
+        sent = await bot.send_message(
+            chat_id,
+            text,
+            reply_markup=keyboard,
+            parse_mode=None,
+        )
+        return sent.message_id
+    except Exception as e:
+        logger.warning("Failed to send captcha message: %s", e, exc_info=True)
+        return None
+
+
+async def _send_welcome_message(
+    bot: Bot,
+    chat_id: int,
+    user_display: str,
+) -> None:
+    buttons: list[list[InlineKeyboardButton]] = []
+    if WELCOME_RULES_MESSAGE_LINK:
+        buttons.append(
+            [InlineKeyboardButton(text="📌 Rules", url=WELCOME_RULES_MESSAGE_LINK)]
+        )
+    if BOT_USERNAME:
+        username = BOT_USERNAME.lstrip("@")
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text="🔗 Link account",
+                    url=f"https://t.me/{username}?start=link",
+                ),
+                InlineKeyboardButton(
+                    text="📝 Apply",
+                    url=f"https://t.me/{username}?start=apply",
+                ),
+            ]
+        )
+    keyboard = (
+        InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None
+    )
+    await bot.send_message(
+        chat_id,
+        f"Welcome, {user_display}! You can now chat.",
+        reply_markup=keyboard,
+        parse_mode=None,
+    )
 
 
 async def _get_bot_username(message: Message) -> str | None:
@@ -451,6 +588,233 @@ async def cmd_help(message: Message) -> None:
     await message.answer("\n".join(lines), parse_mode=None)
 
 
+@moderation_router.chat_member()
+async def handle_member_join(event: ChatMemberUpdated) -> None:
+    if not ENABLE_CAPTCHA:
+        return
+    if event.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        return
+    user = event.new_chat_member.user
+    if user.is_bot:
+        return
+    if event.new_chat_member.status in (
+        ChatMemberStatus.ADMINISTRATOR,
+        ChatMemberStatus.CREATOR,
+    ):
+        return
+    if event.old_chat_member.status not in (
+        ChatMemberStatus.LEFT,
+        ChatMemberStatus.KICKED,
+    ):
+        return
+    if event.new_chat_member.status != ChatMemberStatus.MEMBER:
+        return
+
+    try:
+        if await is_user_verified(event.chat.id, user.id):
+            return
+    except Exception as e:
+        logger.error("Failed to check verification: %s", e, exc_info=True)
+        return
+
+    try:
+        await event.bot.restrict_chat_member(
+            event.chat.id,
+            user.id,
+            permissions=ChatPermissions(
+                can_send_messages=False,
+                can_send_media_messages=False,
+                can_send_other_messages=False,
+                can_add_web_page_previews=False,
+            ),
+        )
+        logger.info("Restricted new member %s in chat %s", user.id, event.chat.id)
+    except Exception as e:
+        logger.error("Failed to restrict member %s: %s", user.id, e, exc_info=True)
+        return
+
+    try:
+        challenge, question = await get_or_create_pending_challenge(
+            event.chat.id, user.id, CAPTCHA_EXPIRE_MINUTES
+        )
+    except Exception as e:
+        logger.error("Failed to create challenge: %s", e, exc_info=True)
+        return
+
+    if not challenge:
+        return
+    if challenge.get("status") == "failed":
+        await event.bot.send_message(
+            event.chat.id,
+            "Too many attempts, try again later.",
+            parse_mode=None,
+        )
+        return
+    if not question:
+        question = await get_captcha_question(challenge["question_id"])
+    if not question:
+        return
+    if challenge.get("message_id"):
+        return
+
+    message_id = await _send_captcha_message(
+        event.bot,
+        event.chat.id,
+        challenge_id=challenge["id"],
+        question=question,
+    )
+    if message_id:
+        await update_challenge_message_id(challenge["id"], message_id)
+        logger.info(
+            "Captcha sent to user %s in chat %s", user.id, event.chat.id
+        )
+
+
+@moderation_router.message(
+    F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP})
+)
+async def handle_pending_user_message(message: Message) -> None:
+    if not ENABLE_CAPTCHA:
+        return
+    if message.from_user is None or message.from_user.is_bot:
+        return
+    challenge = await get_pending_challenge(message.chat.id, message.from_user.id)
+    if not challenge:
+        return
+    try:
+        await message.delete()
+        logger.info(
+            "Deleted message from pending user %s in chat %s",
+            message.from_user.id,
+            message.chat.id,
+        )
+    except Exception as e:
+        logger.warning("Failed to delete message: %s", e, exc_info=True)
+
+    now = datetime.now(timezone.utc)
+    last_reminded_at = challenge.get("last_reminded_at")
+    if isinstance(last_reminded_at, datetime):
+        if (now - last_reminded_at).total_seconds() < CAPTCHA_REMIND_COOLDOWN_SECONDS:
+            return
+
+    reminder_text = (
+        f"{message.from_user.full_name}, please solve the captcha to chat."
+    )
+    await message.bot.send_message(
+        message.chat.id, reminder_text, parse_mode=None
+    )
+    await touch_last_reminded_at(challenge["id"], now)
+
+    if not challenge.get("message_id"):
+        question = await get_captcha_question(challenge["question_id"])
+        if question:
+            message_id = await _send_captcha_message(
+                message.bot,
+                message.chat.id,
+                challenge_id=challenge["id"],
+                question=question,
+            )
+            if message_id:
+                await update_challenge_message_id(challenge["id"], message_id)
+
+
+@moderation_router.callback_query(F.data.startswith("cap:"))
+async def handle_captcha_callback(query: CallbackQuery) -> None:
+    data = query.data or ""
+    parts = data.split(":")
+    if len(parts) != 3:
+        await query.answer("Invalid captcha.", show_alert=False)
+        return
+    try:
+        challenge_id = int(parts[1])
+        choice = int(parts[2])
+    except ValueError:
+        await query.answer("Invalid captcha.", show_alert=False)
+        return
+
+    challenge = await get_challenge_by_id(challenge_id)
+    if not challenge:
+        await query.answer("Captcha not found.", show_alert=False)
+        return
+    if query.from_user is None:
+        await query.answer("Not allowed.", show_alert=False)
+        return
+    if challenge["user_id"] != query.from_user.id:
+        await query.answer("Not for you.", show_alert=False)
+        return
+
+    now = datetime.now(timezone.utc)
+    expires_at = challenge.get("expires_at")
+    if isinstance(expires_at, datetime) and expires_at < now:
+        await mark_challenge_expired(challenge_id)
+        await query.answer("Captcha expired. Please try again.", show_alert=False)
+        return
+
+    if challenge["status"] != "pending":
+        await query.answer("Captcha not active.", show_alert=False)
+        return
+
+    question = await get_captcha_question(challenge["question_id"])
+    if not question:
+        await query.answer("Captcha missing.", show_alert=False)
+        return
+
+    if int(choice) == int(question["correct_option"]):
+        await mark_challenge_passed(challenge_id)
+        await set_user_verified(challenge["chat_id"], challenge["user_id"])
+        try:
+            await query.bot.restrict_chat_member(
+                challenge["chat_id"],
+                challenge["user_id"],
+                permissions=ChatPermissions(
+                    can_send_messages=True,
+                    can_send_media_messages=True,
+                    can_send_other_messages=True,
+                    can_add_web_page_previews=True,
+                ),
+            )
+        except Exception as e:
+            logger.error("Failed to unrestrict member: %s", e, exc_info=True)
+
+        if query.message:
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+        await _send_welcome_message(
+            query.bot,
+            challenge["chat_id"],
+            query.from_user.full_name,
+        )
+        await query.answer("✅ Verified", show_alert=False)
+        logger.info(
+            "Captcha passed for user %s in chat %s",
+            challenge["user_id"],
+            challenge["chat_id"],
+        )
+        return
+
+    attempts = await increment_challenge_attempts(challenge_id)
+    if attempts >= CAPTCHA_MAX_ATTEMPTS:
+        await mark_challenge_failed(
+            challenge_id,
+            datetime.now(timezone.utc)
+            + timedelta(minutes=max(CAPTCHA_EXPIRE_MINUTES, 1)),
+        )
+        if query.message:
+            await query.message.answer(
+                "Too many attempts, try again later.", parse_mode=None
+            )
+        await query.answer("Too many attempts.", show_alert=False)
+        logger.info(
+            "Captcha failed for user %s in chat %s",
+            challenge["user_id"],
+            challenge["chat_id"],
+        )
+        return
+
+    await query.answer("Wrong answer. Try again.", show_alert=False)
+
 async def _send_debug_reminder(
     message: Message,
     *,
@@ -766,6 +1130,207 @@ async def cmd_coliseum(message: Message) -> None:
         banner_url_day4="https://i.ibb.co/R4YLyPzR/image.jpg",
         templates=templates,
     )
+
+
+@router.message(Command("captcha_status"))
+async def cmd_captcha_status(message: Message) -> None:
+    if message.from_user is None or not _is_debug_admin(message.from_user.id):
+        await message.answer("Not allowed.", parse_mode=None)
+        return
+    if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await message.answer("Reply to a user's message in a group.", parse_mode=None)
+        return
+    if message.reply_to_message is None or message.reply_to_message.from_user is None:
+        await message.answer("Reply to a user's message.", parse_mode=None)
+        return
+    target = message.reply_to_message.from_user
+    chat_id = message.chat.id
+
+    try:
+        is_verified = await is_user_verified(chat_id, target.id)
+        challenge = await get_pending_challenge(chat_id, target.id)
+        if not challenge:
+            challenge = await get_latest_challenge(chat_id, target.id)
+        question_text = None
+        if challenge:
+            question = await get_captcha_question(challenge["question_id"])
+            if question:
+                question_text = question.get("question_text") or ""
+        if question_text:
+            if len(question_text) > 120:
+                question_text = f"{question_text[:117]}..."
+        else:
+            question_text = "n/a"
+    except Exception as e:
+        logger.error("Failed to fetch captcha status: %s", e, exc_info=True)
+        await message.answer("Unable to fetch captcha status right now.", parse_mode=None)
+        return
+
+    lines = [
+        "Captcha status",
+        f"Chat: {chat_id}",
+        f"User: {_format_user_label(target)} | id={target.id}",
+        f"Verified: {'yes' if is_verified else 'no'}",
+    ]
+    if not challenge:
+        lines.append("Challenge: none")
+        await message.answer("\n".join(lines), parse_mode=None)
+        return
+
+    lines.extend(
+        [
+            (
+                "Challenge: "
+                f"id={challenge.get('id')} "
+                f"status={challenge.get('status')} "
+                f"attempts={challenge.get('attempts')} "
+                f"created_at={_format_dt(challenge.get('created_at'))}"
+            ),
+            (
+                "Details: "
+                f"expires_at={_format_dt(challenge.get('expires_at'))} "
+                f"message_id={challenge.get('message_id') or 'n/a'} "
+                f"last_reminded_at={_format_dt(challenge.get('last_reminded_at'))} "
+                f"question_id={challenge.get('question_id')}"
+            ),
+            f"Question: {question_text}",
+        ]
+    )
+    await message.answer("\n".join(lines), parse_mode=None)
+
+
+@router.message(Command("captcha_reset"))
+async def cmd_captcha_reset(message: Message) -> None:
+    if message.from_user is None or not _is_debug_admin(message.from_user.id):
+        await message.answer("Not allowed.", parse_mode=None)
+        return
+    if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await message.answer("Reply to a user's message in a group.", parse_mode=None)
+        return
+    if message.reply_to_message is None or message.reply_to_message.from_user is None:
+        await message.answer("Reply to a user's message.", parse_mode=None)
+        return
+    target = message.reply_to_message.from_user
+    chat_id = message.chat.id
+
+    try:
+        await expire_active_challenges(chat_id, target.id)
+        await delete_verified_user(chat_id, target.id)
+    except Exception as e:
+        logger.error("Failed to reset captcha state: %s", e, exc_info=True)
+
+    try:
+        await message.bot.restrict_chat_member(
+            chat_id,
+            target.id,
+            permissions=ChatPermissions(
+                can_send_messages=False,
+                can_send_media_messages=False,
+                can_send_other_messages=False,
+                can_add_web_page_previews=False,
+            ),
+        )
+    except Exception as e:
+        logger.warning("Failed to restrict user: %s", e, exc_info=True)
+
+    try:
+        challenge, question = await get_or_create_pending_challenge(
+            chat_id, target.id, CAPTCHA_EXPIRE_MINUTES
+        )
+    except Exception as e:
+        logger.error("Failed to create captcha challenge: %s", e, exc_info=True)
+        await message.answer("Unable to create a new captcha.", parse_mode=None)
+        return
+
+    if not challenge:
+        await message.answer("Unable to create a new captcha.", parse_mode=None)
+        return
+
+    if not question:
+        question = await get_captcha_question(challenge["question_id"])
+    message_id = None
+    if question:
+        message_id = await _send_captcha_message(
+            message.bot,
+            chat_id,
+            challenge_id=challenge["id"],
+            question=question,
+        )
+    if message_id:
+        await update_challenge_message_id(challenge["id"], message_id)
+        await message.answer(
+            "Captcha reset done. New captcha sent.", parse_mode=None
+        )
+        return
+
+    await message.answer(
+        "Captcha reset done, but failed to send captcha.", parse_mode=None
+    )
+
+
+@router.message(Command("captcha_verify"))
+async def cmd_captcha_verify(message: Message) -> None:
+    if message.from_user is None or not _is_debug_admin(message.from_user.id):
+        await message.answer("Not allowed.", parse_mode=None)
+        return
+    if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await message.answer("Reply to a user's message in a group.", parse_mode=None)
+        return
+    if message.reply_to_message is None or message.reply_to_message.from_user is None:
+        await message.answer("Reply to a user's message.", parse_mode=None)
+        return
+    target = message.reply_to_message.from_user
+    chat_id = message.chat.id
+
+    try:
+        await set_user_verified(chat_id, target.id)
+        await mark_pending_challenges_passed(chat_id, target.id)
+    except Exception as e:
+        logger.error("Failed to mark user verified: %s", e, exc_info=True)
+        await message.answer("Unable to verify user right now.", parse_mode=None)
+        return
+
+    try:
+        await message.bot.restrict_chat_member(
+            chat_id,
+            target.id,
+            permissions=ChatPermissions(
+                can_send_messages=True,
+                can_send_media_messages=True,
+                can_send_other_messages=True,
+                can_add_web_page_previews=True,
+            ),
+        )
+    except Exception as e:
+        logger.warning("Failed to unrestrict user: %s", e, exc_info=True)
+
+    await message.answer("User verified by admin.", parse_mode=None)
+
+
+@router.message(Command("captcha_unverify"))
+async def cmd_captcha_unverify(message: Message) -> None:
+    if message.from_user is None or not _is_debug_admin(message.from_user.id):
+        await message.answer("Not allowed.", parse_mode=None)
+        return
+    if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await message.answer("Reply to a user's message in a group.", parse_mode=None)
+        return
+    if message.reply_to_message is None or message.reply_to_message.from_user is None:
+        await message.answer("Reply to a user's message.", parse_mode=None)
+        return
+    target = message.reply_to_message.from_user
+    chat_id = message.chat.id
+
+    try:
+        await delete_verified_user(chat_id, target.id)
+    except Exception as e:
+        logger.error("Failed to remove verified flag: %s", e, exc_info=True)
+        await message.answer(
+            "Unable to remove verified flag right now.", parse_mode=None
+        )
+        return
+
+    await message.answer("Verified flag removed.", parse_mode=None)
 
 
 @router.message(Command("donations"))

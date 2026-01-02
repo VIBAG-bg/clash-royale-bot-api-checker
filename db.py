@@ -13,7 +13,10 @@ from sqlalchemy import (
     DateTime,
     Index,
     Integer,
+    ForeignKey,
+    SmallInteger,
     String,
+    Text,
     UniqueConstraint,
     case,
     delete,
@@ -293,6 +296,61 @@ class UserLinkRequest(Base):
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     origin_chat_id: Mapped[int | None] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, nullable=False
+    )
+
+
+class CaptchaQuestion(Base):
+    __tablename__ = "captcha_questions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    question_text: Mapped[str] = mapped_column(Text, nullable=False)
+    option_a: Mapped[str] = mapped_column(Text, nullable=False)
+    option_b: Mapped[str] = mapped_column(Text, nullable=False)
+    option_c: Mapped[str] = mapped_column(Text, nullable=False)
+    option_d: Mapped[str] = mapped_column(Text, nullable=False)
+    correct_option: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, nullable=False
+    )
+
+
+class CaptchaChallenge(Base):
+    __tablename__ = "captcha_challenges"
+    __table_args__ = (
+        Index("ix_captcha_challenges_chat_user", "chat_id", "user_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    question_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("captcha_questions.id"), nullable=False
+    )
+    message_id: Mapped[int | None] = mapped_column(BigInteger)
+    attempts: Mapped[int] = mapped_column(SmallInteger, default=0, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), default="pending", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, onupdate=_utc_now, nullable=False
+    )
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_reminded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class VerifiedUser(Base):
+    __tablename__ = "verified_users"
+    __table_args__ = (
+        UniqueConstraint("chat_id", "user_id", name="uq_verified_users_chat_user"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    verified_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utc_now, nullable=False
     )
 
@@ -2021,6 +2079,425 @@ async def delete_user_link(
         await session.execute(
             delete(UserLink).where(UserLink.telegram_user_id == telegram_user_id)
         )
+
+
+def _question_to_dict(question: CaptchaQuestion) -> dict[str, Any]:
+    return {
+        "id": question.id,
+        "question_text": question.question_text,
+        "option_a": question.option_a,
+        "option_b": question.option_b,
+        "option_c": question.option_c,
+        "option_d": question.option_d,
+        "correct_option": question.correct_option,
+        "is_active": question.is_active,
+        "created_at": question.created_at,
+    }
+
+
+def _challenge_to_dict(challenge: CaptchaChallenge) -> dict[str, Any]:
+    return {
+        "id": challenge.id,
+        "chat_id": challenge.chat_id,
+        "user_id": challenge.user_id,
+        "question_id": challenge.question_id,
+        "message_id": challenge.message_id,
+        "attempts": challenge.attempts,
+        "status": challenge.status,
+        "created_at": challenge.created_at,
+        "updated_at": challenge.updated_at,
+        "expires_at": challenge.expires_at,
+        "last_reminded_at": challenge.last_reminded_at,
+    }
+
+
+async def is_user_verified(
+    chat_id: int, user_id: int, session: AsyncSession | None = None
+) -> bool:
+    if session is None:
+        async with _get_session() as session:
+            return await is_user_verified(chat_id, user_id, session=session)
+    result = await session.execute(
+        select(VerifiedUser).where(
+            VerifiedUser.chat_id == chat_id, VerifiedUser.user_id == user_id
+        )
+    )
+    return result.scalar_one_or_none() is not None
+
+
+async def set_user_verified(
+    chat_id: int, user_id: int, session: AsyncSession | None = None
+) -> None:
+    now = _utc_now()
+    stmt = pg_insert(VerifiedUser.__table__).values(
+        chat_id=chat_id, user_id=user_id, verified_at=now
+    )
+    stmt = stmt.on_conflict_do_nothing(
+        index_elements=["chat_id", "user_id"]
+    )
+    if session is None:
+        async with _get_session() as session:
+            try:
+                await session.execute(stmt)
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+    else:
+        await session.execute(stmt)
+
+
+async def get_captcha_question(
+    question_id: int, session: AsyncSession | None = None
+) -> dict[str, Any] | None:
+    if session is None:
+        async with _get_session() as session:
+            return await get_captcha_question(question_id, session=session)
+    result = await session.execute(
+        select(CaptchaQuestion).where(CaptchaQuestion.id == question_id)
+    )
+    question = result.scalar_one_or_none()
+    if not question:
+        return None
+    return _question_to_dict(question)
+
+
+async def get_random_captcha_question(
+    session: AsyncSession | None = None,
+) -> dict[str, Any] | None:
+    if session is None:
+        async with _get_session() as session:
+            return await get_random_captcha_question(session=session)
+    result = await session.execute(
+        select(CaptchaQuestion)
+        .where(CaptchaQuestion.is_active.is_(True))
+        .order_by(func.random())
+        .limit(1)
+    )
+    question = result.scalar_one_or_none()
+    if not question:
+        return None
+    return _question_to_dict(question)
+
+
+async def get_pending_challenge(
+    chat_id: int, user_id: int, session: AsyncSession | None = None
+) -> dict[str, Any] | None:
+    if session is None:
+        async with _get_session() as session:
+            return await get_pending_challenge(chat_id, user_id, session=session)
+    now = _utc_now()
+    result = await session.execute(
+        select(CaptchaChallenge)
+        .where(
+            CaptchaChallenge.chat_id == chat_id,
+            CaptchaChallenge.user_id == user_id,
+            CaptchaChallenge.status == "pending",
+        )
+        .order_by(CaptchaChallenge.created_at.desc())
+        .limit(1)
+    )
+    challenge = result.scalar_one_or_none()
+    if not challenge:
+        return None
+    if challenge.expires_at and challenge.expires_at < now:
+        await mark_challenge_expired(challenge.id, session=session)
+        return None
+    return _challenge_to_dict(challenge)
+
+
+async def get_or_create_pending_challenge(
+    chat_id: int,
+    user_id: int,
+    expire_minutes: int,
+    session: AsyncSession | None = None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    if session is None:
+        async with _get_session() as session:
+            try:
+                result = await get_or_create_pending_challenge(
+                    chat_id, user_id, expire_minutes, session=session
+                )
+                await session.commit()
+                return result
+            except Exception:
+                await session.rollback()
+                raise
+    now = _utc_now()
+    pending = await get_pending_challenge(chat_id, user_id, session=session)
+    if pending:
+        question = await get_captcha_question(pending["question_id"], session=session)
+        return pending, question
+
+    result = await session.execute(
+        select(CaptchaChallenge)
+        .where(
+            CaptchaChallenge.chat_id == chat_id,
+            CaptchaChallenge.user_id == user_id,
+            CaptchaChallenge.status == "failed",
+        )
+        .order_by(CaptchaChallenge.updated_at.desc())
+        .limit(1)
+    )
+    failed = result.scalar_one_or_none()
+    if failed and failed.expires_at and failed.expires_at > now:
+        return _challenge_to_dict(failed), None
+
+    question = await get_random_captcha_question(session=session)
+    if not question:
+        return None, None
+    expires_at = now + timedelta(minutes=max(expire_minutes, 1))
+    stmt = pg_insert(CaptchaChallenge.__table__).values(
+        chat_id=chat_id,
+        user_id=user_id,
+        question_id=question["id"],
+        attempts=0,
+        status="pending",
+        created_at=now,
+        updated_at=now,
+        expires_at=expires_at,
+    )
+    result = await session.execute(stmt.returning(CaptchaChallenge))
+    challenge = result.scalar_one()
+    return _challenge_to_dict(challenge), question
+
+
+async def get_challenge_by_id(
+    challenge_id: int, session: AsyncSession | None = None
+) -> dict[str, Any] | None:
+    if session is None:
+        async with _get_session() as session:
+            return await get_challenge_by_id(challenge_id, session=session)
+    result = await session.execute(
+        select(CaptchaChallenge).where(CaptchaChallenge.id == challenge_id)
+    )
+    challenge = result.scalar_one_or_none()
+    if not challenge:
+        return None
+    return _challenge_to_dict(challenge)
+
+
+async def get_latest_challenge(
+    chat_id: int, user_id: int, session: AsyncSession | None = None
+) -> dict[str, Any] | None:
+    if session is None:
+        async with _get_session() as session:
+            return await get_latest_challenge(chat_id, user_id, session=session)
+    result = await session.execute(
+        select(CaptchaChallenge)
+        .where(
+            CaptchaChallenge.chat_id == chat_id,
+            CaptchaChallenge.user_id == user_id,
+        )
+        .order_by(CaptchaChallenge.created_at.desc())
+        .limit(1)
+    )
+    challenge = result.scalar_one_or_none()
+    if not challenge:
+        return None
+    return _challenge_to_dict(challenge)
+
+
+async def update_challenge_message_id(
+    challenge_id: int, message_id: int, session: AsyncSession | None = None
+) -> None:
+    now = _utc_now()
+    stmt = (
+        update(CaptchaChallenge)
+        .where(CaptchaChallenge.id == challenge_id)
+        .values(message_id=message_id, updated_at=now)
+    )
+    if session is None:
+        async with _get_session() as session:
+            try:
+                await session.execute(stmt)
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+    else:
+        await session.execute(stmt)
+
+
+async def expire_active_challenges(
+    chat_id: int, user_id: int, session: AsyncSession | None = None
+) -> int:
+    now = _utc_now()
+    stmt = (
+        update(CaptchaChallenge)
+        .where(
+            CaptchaChallenge.chat_id == chat_id,
+            CaptchaChallenge.user_id == user_id,
+            CaptchaChallenge.status.in_(["pending", "failed"]),
+        )
+        .values(status="expired", updated_at=now, expires_at=now)
+    )
+    if session is None:
+        async with _get_session() as session:
+            try:
+                result = await session.execute(stmt)
+                await session.commit()
+                return int(result.rowcount or 0)
+            except Exception:
+                await session.rollback()
+                raise
+    result = await session.execute(stmt)
+    return int(result.rowcount or 0)
+
+
+async def mark_pending_challenges_passed(
+    chat_id: int, user_id: int, session: AsyncSession | None = None
+) -> int:
+    now = _utc_now()
+    stmt = (
+        update(CaptchaChallenge)
+        .where(
+            CaptchaChallenge.chat_id == chat_id,
+            CaptchaChallenge.user_id == user_id,
+            CaptchaChallenge.status == "pending",
+        )
+        .values(status="passed", updated_at=now, expires_at=None)
+    )
+    if session is None:
+        async with _get_session() as session:
+            try:
+                result = await session.execute(stmt)
+                await session.commit()
+                return int(result.rowcount or 0)
+            except Exception:
+                await session.rollback()
+                raise
+    result = await session.execute(stmt)
+    return int(result.rowcount or 0)
+
+
+async def increment_challenge_attempts(
+    challenge_id: int, session: AsyncSession | None = None
+) -> int:
+    now = _utc_now()
+    stmt = (
+        update(CaptchaChallenge)
+        .where(CaptchaChallenge.id == challenge_id)
+        .values(attempts=CaptchaChallenge.attempts + 1, updated_at=now)
+        .returning(CaptchaChallenge.attempts)
+    )
+    if session is None:
+        async with _get_session() as session:
+            try:
+                result = await session.execute(stmt)
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+    else:
+        result = await session.execute(stmt)
+    return int(result.scalar_one())
+
+
+async def mark_challenge_passed(
+    challenge_id: int, session: AsyncSession | None = None
+) -> None:
+    now = _utc_now()
+    stmt = (
+        update(CaptchaChallenge)
+        .where(CaptchaChallenge.id == challenge_id)
+        .values(status="passed", updated_at=now, expires_at=None)
+    )
+    if session is None:
+        async with _get_session() as session:
+            try:
+                await session.execute(stmt)
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+    else:
+        await session.execute(stmt)
+
+
+async def delete_verified_user(
+    chat_id: int, user_id: int, session: AsyncSession | None = None
+) -> int:
+    stmt = delete(VerifiedUser).where(
+        VerifiedUser.chat_id == chat_id, VerifiedUser.user_id == user_id
+    )
+    if session is None:
+        async with _get_session() as session:
+            try:
+                result = await session.execute(stmt)
+                await session.commit()
+                return int(result.rowcount or 0)
+            except Exception:
+                await session.rollback()
+                raise
+    result = await session.execute(stmt)
+    return int(result.rowcount or 0)
+
+
+async def mark_challenge_failed(
+    challenge_id: int,
+    expires_at: datetime,
+    session: AsyncSession | None = None,
+) -> None:
+    now = _utc_now()
+    stmt = (
+        update(CaptchaChallenge)
+        .where(CaptchaChallenge.id == challenge_id)
+        .values(status="failed", updated_at=now, expires_at=expires_at)
+    )
+    if session is None:
+        async with _get_session() as session:
+            try:
+                await session.execute(stmt)
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+    else:
+        await session.execute(stmt)
+
+
+async def mark_challenge_expired(
+    challenge_id: int, session: AsyncSession | None = None
+) -> None:
+    now = _utc_now()
+    stmt = (
+        update(CaptchaChallenge)
+        .where(CaptchaChallenge.id == challenge_id)
+        .values(status="expired", updated_at=now)
+    )
+    if session is None:
+        async with _get_session() as session:
+            try:
+                await session.execute(stmt)
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+    else:
+        await session.execute(stmt)
+
+
+async def touch_last_reminded_at(
+    challenge_id: int,
+    now: datetime,
+    session: AsyncSession | None = None,
+) -> None:
+    stmt = (
+        update(CaptchaChallenge)
+        .where(CaptchaChallenge.id == challenge_id)
+        .values(last_reminded_at=now, updated_at=now)
+    )
+    if session is None:
+        async with _get_session() as session:
+            try:
+                await session.execute(stmt)
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+    else:
+        await session.execute(stmt)
 
 
 async def search_player_candidates(

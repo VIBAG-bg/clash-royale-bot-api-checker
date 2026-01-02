@@ -10,7 +10,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
-from bot import router
+from bot import router, moderation_router
 from config import (
     CLAN_TAG,
     CR_API_TOKEN,
@@ -800,6 +800,7 @@ async def main() -> None:
     
     # Register router with handlers
     dp.include_router(router)
+    dp.include_router(moderation_router)
     
     # Run bot with lifespan management
     async with lifespan(dp):

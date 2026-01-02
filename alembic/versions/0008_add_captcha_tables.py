@@ -1,0 +1,428 @@
+﻿"""Add captcha moderation tables and seed questions.
+
+Revision ID: 0008_add_captcha_tables
+Revises: 0007_add_last_seen_timestamp
+Create Date: 2026-01-03 00:00:00
+"""
+
+from alembic import op
+import sqlalchemy as sa
+from datetime import datetime, timezone
+
+
+# revision identifiers, used by Alembic.
+revision = "0008_add_captcha_tables"
+down_revision = "0007_add_last_seen_timestamp"
+branch_labels = None
+depends_on = None
+
+
+def upgrade() -> None:
+    op.create_table(
+        "captcha_questions",
+        sa.Column("id", sa.Integer(), primary_key=True),
+        sa.Column("question_text", sa.Text(), nullable=False),
+        sa.Column("option_a", sa.Text(), nullable=False),
+        sa.Column("option_b", sa.Text(), nullable=False),
+        sa.Column("option_c", sa.Text(), nullable=False),
+        sa.Column("option_d", sa.Text(), nullable=False),
+        sa.Column("correct_option", sa.SmallInteger(), nullable=False),
+        sa.Column(
+            "is_active",
+            sa.Boolean(),
+            nullable=False,
+            server_default=sa.text("true"),
+        ),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.text("now()"),
+        ),
+    )
+
+    op.create_table(
+        "captcha_challenges",
+        sa.Column("id", sa.Integer(), primary_key=True),
+        sa.Column("chat_id", sa.BigInteger(), nullable=False),
+        sa.Column("user_id", sa.BigInteger(), nullable=False),
+        sa.Column(
+            "question_id",
+            sa.Integer(),
+            sa.ForeignKey("captcha_questions.id"),
+            nullable=False,
+        ),
+        sa.Column("message_id", sa.BigInteger(), nullable=True),
+        sa.Column(
+            "attempts",
+            sa.SmallInteger(),
+            nullable=False,
+            server_default=sa.text("0"),
+        ),
+        sa.Column(
+            "status",
+            sa.String(length=16),
+            nullable=False,
+            server_default=sa.text("'pending'"),
+        ),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.text("now()"),
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.text("now()"),
+        ),
+        sa.Column("expires_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("last_reminded_at", sa.DateTime(timezone=True), nullable=True),
+    )
+    op.create_index(
+        "ix_captcha_challenges_chat_user",
+        "captcha_challenges",
+        ["chat_id", "user_id"],
+    )
+
+    op.create_table(
+        "verified_users",
+        sa.Column("id", sa.Integer(), primary_key=True),
+        sa.Column("chat_id", sa.BigInteger(), nullable=False),
+        sa.Column("user_id", sa.BigInteger(), nullable=False),
+        sa.Column(
+            "verified_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.text("now()"),
+        ),
+        sa.UniqueConstraint(
+            "chat_id", "user_id", name="uq_verified_users_chat_user"
+        ),
+    )
+
+    captcha_questions = sa.table(
+        "captcha_questions",
+        sa.column("question_text", sa.Text),
+        sa.column("option_a", sa.Text),
+        sa.column("option_b", sa.Text),
+        sa.column("option_c", sa.Text),
+        sa.column("option_d", sa.Text),
+        sa.column("correct_option", sa.SmallInteger),
+        sa.column("is_active", sa.Boolean),
+        sa.column("created_at", sa.DateTime(timezone=True)),
+    )
+    now = datetime.now(timezone.utc)
+    op.bulk_insert(
+        captcha_questions,
+        [
+            {
+                "question_text": "Сколько карт в колоде?",
+                "option_a": "6",
+                "option_b": "8",
+                "option_c": "10",
+                "option_d": "12",
+                "correct_option": 1,
+                "is_active": True,
+                "created_at": now,
+            },
+            {
+                "question_text": "Сколько максимум эликсира можно накопить?",
+                "option_a": "8",
+                "option_b": "9",
+                "option_c": "10",
+                "option_d": "12",
+                "correct_option": 2,
+                "is_active": True,
+                "created_at": now,
+            },
+            {
+                "question_text": "Сколько корон нужно, чтобы выиграть матч досрочно?",
+                "option_a": "1",
+                "option_b": "2",
+                "option_c": "3",
+                "option_d": "4",
+                "correct_option": 2,
+                "is_active": True,
+                "created_at": now,
+            },
+            {
+                "question_text": "Сколько башен у игрока в начале боя?",
+                "option_a": "2",
+                "option_b": "3",
+                "option_c": "4",
+                "option_d": "5",
+                "correct_option": 1,
+                "is_active": True,
+                "created_at": now,
+            },
+            {
+                "question_text": "Кто сидит в большой центральной башне?",
+                "option_a": "Принцесса",
+                "option_b": "Король",
+                "option_c": "Гоблин",
+                "option_d": "Маг",
+                "correct_option": 1,
+                "is_active": True,
+                "created_at": now,
+            },
+            {
+                "question_text": "Сколько принцесс-башен по бокам?",
+                "option_a": "1",
+                "option_b": "2",
+                "option_c": "3",
+                "option_d": "0",
+                "correct_option": 1,
+                "is_active": True,
+                "created_at": now,
+            },
+            {
+                "question_text": "Что делает «Разряд» (Zap)?",
+                "option_a": "Лечит",
+                "option_b": "Оглушает и бьет",
+                "option_c": "Строит башню",
+                "option_d": "Крадет эликсир",
+                "correct_option": 1,
+                "is_active": True,
+                "created_at": now,
+            },
+            {
+                "question_text": "Какой спелл замораживает войска?",
+                "option_a": "Яд",
+                "option_b": "Молния",
+                "option_c": "Заморозка",
+                "option_d": "Стрелы",
+                "correct_option": 2,
+                "is_active": True,
+                "created_at": now,
+            },
+            {
+                "question_text": "Какая карта летает?",
+                "option_a": "Рыцарь",
+                "option_b": "Миньоны",
+                "option_c": "Валькирия",
+                "option_d": "Мини П.Е.К.К.А",
+                "correct_option": 1,
+                "is_active": True,
+                "created_at": now,
+            },
+            {
+                "question_text": "Кого призывает «Скелетная армия»?",
+                "option_a": "Гоблинов",
+                "option_b": "Скелетов",
+                "option_c": "Всадников",
+                "option_d": "Драконов",
+                "correct_option": 1,
+                "is_active": True,
+                "created_at": now,
+            },
+            {
+                "question_text": "Что делает «Хог Райдер» (Всадник на кабане) чаще всего?",
+                "option_a": "Идет на здания",
+                "option_b": "Летает",
+                "option_c": "Лечит союзников",
+                "option_d": "Стреляет из лука",
+                "correct_option": 0,
+                "is_active": True,
+                "created_at": now,
+            },
+            {
+                "question_text": "Сколько эликсира стоит «Бревно»?",
+                "option_a": "1",
+                "option_b": "2",
+                "option_c": "3",
+                "option_d": "4",
+                "correct_option": 1,
+                "is_active": True,
+                "created_at": now,
+            },
+            {
+                "question_text": "«Гигант» по умолчанию бьет...",
+                "option_a": "Только воздух",
+                "option_b": "Только здания",
+                "option_c": "Только войска",
+                "option_d": "Своих",
+                "correct_option": 1,
+                "is_active": True,
+                "created_at": now,
+            },
+            {
+                "question_text": "Какая карта кидает бочки с гоблинами?",
+                "option_a": "Бочка с гоблинами",
+                "option_b": "Разряд",
+                "option_c": "Стрелы",
+                "option_d": "Зеркало",
+                "correct_option": 0,
+                "is_active": True,
+                "created_at": now,
+            },
+            {
+                "question_text": "«Огненный шар» (Fireball) это...",
+                "option_a": "Заклинание",
+                "option_b": "Строение",
+                "option_c": "Чемпион",
+                "option_d": "Эмоция",
+                "correct_option": 0,
+                "is_active": True,
+                "created_at": now,
+            },
+            {
+                "question_text": "Что обычно делает «Яд»?",
+                "option_a": "Бьет по области со временем",
+                "option_b": "Замораживает",
+                "option_c": "Оглушает",
+                "option_d": "Строит башню",
+                "correct_option": 0,
+                "is_active": True,
+                "created_at": now,
+            },
+            {
+                "question_text": "Сколько эликсира стоит карта «3 скелетика»?",
+                "option_a": "1",
+                "option_b": "2",
+                "option_c": "3",
+                "option_d": "4",
+                "correct_option": 0,
+                "is_active": True,
+                "created_at": now,
+            },
+            {
+                "question_text": "Какая карта часто называется «танком»?",
+                "option_a": "Гигант",
+                "option_b": "Стрелы",
+                "option_c": "Ледяной дух",
+                "option_d": "Скелеты",
+                "correct_option": 0,
+                "is_active": True,
+                "created_at": now,
+            },
+            {
+                "question_text": "Кто с моста ломает лицо?",
+                "option_a": "Бандитка",
+                "option_b": "Коллектор",
+                "option_c": "Ледяной маг",
+                "option_d": "П.Е.К.К.А",
+                "correct_option": 0,
+                "is_active": True,
+                "created_at": now,
+            },
+            {
+                "question_text": "Что делает «Зеркало»?",
+                "option_a": "Дублирует последнюю карту",
+                "option_b": "Дает эликсир",
+                "option_c": "Лечит башни",
+                "option_d": "Снимает бан",
+                "correct_option": 0,
+                "is_active": True,
+                "created_at": now,
+            },
+            {
+                "question_text": "Карта «Стрелы» лучше всего против...",
+                "option_a": "Мелких отрядов",
+                "option_b": "Башен",
+                "option_c": "Только воздуха",
+                "option_d": "Только танков",
+                "correct_option": 0,
+                "is_active": True,
+                "created_at": now,
+            },
+            {
+                "question_text": "Кто кидает бомбы и летает?",
+                "option_a": "Бомбёр",
+                "option_b": "Шар",
+                "option_c": "Рыцарь",
+                "option_d": "Ведьма",
+                "correct_option": 1,
+                "is_active": True,
+                "created_at": now,
+            },
+            {
+                "question_text": "Что суперселл должны пофиксить?",
+                "option_a": "Шахтера",
+                "option_b": "Мушкетера",
+                "option_c": "Бревно",
+                "option_d": "Ничего из списка",
+                "correct_option": 0,
+                "is_active": True,
+                "created_at": now,
+            },
+            {
+                "question_text": "Сколько игроков в обычном бою 1v1?",
+                "option_a": "1",
+                "option_b": "2",
+                "option_c": "3",
+                "option_d": "4",
+                "correct_option": 1,
+                "is_active": True,
+                "created_at": now,
+            },
+            {
+                "question_text": "Какая карта считается строением?",
+                "option_a": "Пушка",
+                "option_b": "Миньоны",
+                "option_c": "Валькирия",
+                "option_d": "Лучницы",
+                "correct_option": 0,
+                "is_active": True,
+                "created_at": now,
+            },
+            {
+                "question_text": "«Молния» (Lightning) бьет...",
+                "option_a": "Одну цель",
+                "option_b": "Три цели",
+                "option_c": "Пять целей",
+                "option_d": "Только башни",
+                "correct_option": 1,
+                "is_active": True,
+                "created_at": now,
+            },
+            {
+                "question_text": "Что делает «Клон»?",
+                "option_a": "Копирует отряд с 1 HP",
+                "option_b": "Удваивает эликсир",
+                "option_c": "Лечит",
+                "option_d": "Строит мост",
+                "correct_option": 0,
+                "is_active": True,
+                "created_at": now,
+            },
+            {
+                "question_text": "Сколько секунд длится «Заморозка» по ощущениям врага?",
+                "option_a": "1",
+                "option_b": "2",
+                "option_c": "Вечность",
+                "option_d": "0",
+                "correct_option": 2,
+                "is_active": True,
+                "created_at": now,
+            },
+            {
+                "question_text": "Кого чаще всего зовут «Мега»?",
+                "option_a": "Мега рыцарь",
+                "option_b": "Мега миньон",
+                "option_c": "Мега громила",
+                "option_d": "Ничего из перечисленного",
+                "correct_option": 0,
+                "is_active": True,
+                "created_at": now,
+            },
+            {
+                "question_text": "Кто любит подкрадываться незаметно и тихо?",
+                "option_a": "Sneaky Голем",
+                "option_b": "Хог Райдер",
+                "option_c": "Электрогиг",
+                "option_d": "Бревно",
+                "correct_option": 0,
+                "is_active": True,
+                "created_at": now,
+            },
+        ],
+    )
+
+
+def downgrade() -> None:
+    op.drop_table("verified_users")
+    op.drop_index("ix_captcha_challenges_chat_user", table_name="captcha_challenges")
+    op.drop_table("captcha_challenges")
+    op.drop_table("captcha_questions")
