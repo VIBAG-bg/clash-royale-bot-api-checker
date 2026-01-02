@@ -4,6 +4,7 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from datetime import timedelta
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -14,6 +15,10 @@ from config import (
     CLAN_TAG,
     CR_API_TOKEN,
     FETCH_INTERVAL_SECONDS,
+    REMINDER_COLOSSEUM_BANNER_URL,
+    REMINDER_ENABLED,
+    REMINDER_TIME_UTC,
+    REMINDER_WAR_BANNER_URL,
     TELEGRAM_BOT_TOKEN,
     require_env_value,
 )
@@ -51,9 +56,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 FETCH_LOCK = asyncio.Lock()
+REMINDER_LOCK = asyncio.Lock()
 ACTIVE_WEEK_KEY = "active_week"
 LAST_REPORTED_WEEK_KEY = "last_reported_week"
 LAST_PROMOTE_SEASON_KEY = "last_promote_season"
+LAST_WAR_REMINDER_KEY = "last_war_reminder"
+WAR_DAY_START_KEY = "war_day_start"
 BOT: Bot | None = None
 
 
@@ -81,6 +89,80 @@ def _parse_season_id(value: object) -> int | None:
 
 def _parse_section_index(value: object) -> int | None:
     return _coerce_non_negative_int(value)
+
+
+def _parse_reminder_time(value: str) -> tuple[int, int] | None:
+    if not value:
+        return None
+    parts = value.split(":")
+    if len(parts) != 2:
+        return None
+    try:
+        hour = int(parts[0])
+        minute = int(parts[1])
+    except ValueError:
+        return None
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+        return None
+    return hour, minute
+
+
+async def _store_war_day_start(
+    season_id: int,
+    section_index: int,
+    period_type: str,
+    day_number: int,
+    session,
+) -> None:
+    start_date = datetime.now(timezone.utc).date() - timedelta(days=day_number - 1)
+    await set_app_state(
+        WAR_DAY_START_KEY,
+        {
+            "season_id": season_id,
+            "section_index": section_index,
+            "period_type": period_type,
+            "start_date": start_date.isoformat(),
+        },
+        session=session,
+    )
+
+
+async def _resolve_war_day_number(
+    *,
+    period_index: object,
+    season_id: int,
+    section_index: int,
+    period_type: str,
+    session,
+) -> int | None:
+    parsed_index = _coerce_non_negative_int(period_index)
+    if parsed_index is not None:
+        day_number = parsed_index + 1
+        if 1 <= day_number <= 4:
+            await _store_war_day_start(
+                season_id, section_index, period_type, day_number, session
+            )
+            return day_number
+        return None
+
+    state = await get_app_state(WAR_DAY_START_KEY, session=session)
+    if not isinstance(state, dict):
+        return None
+    try:
+        if int(state.get("season_id", 0)) != season_id:
+            return None
+        if int(state.get("section_index", -1)) != section_index:
+            return None
+        if str(state.get("period_type", "")).lower() != period_type:
+            return None
+        start_date = datetime.fromisoformat(state.get("start_date")).date()
+    except Exception:
+        return None
+    delta_days = (datetime.now(timezone.utc).date() - start_date).days
+    day_number = delta_days + 1
+    if 1 <= day_number <= 4:
+        return day_number
+    return None
 
 
 def _parse_active_week_state(
@@ -412,6 +494,135 @@ async def maybe_post_weekly_report(bot: Bot) -> None:
     )
 
 
+async def maybe_post_daily_war_reminder(bot: Bot) -> None:
+    if not REMINDER_ENABLED:
+        return
+    async with REMINDER_LOCK:
+        api_client = await get_api_client()
+        river_race = await api_client.get_current_river_race(CLAN_TAG)
+        period_type = river_race.get("periodType", "unknown") or "unknown"
+        period_type_lower = str(period_type).lower()
+        if period_type_lower not in ("warday", "colosseum"):
+            logger.info(
+                "Reminder skipped: period type %s", period_type_lower
+            )
+            return
+
+        season_id = _parse_season_id(river_race.get("seasonId"))
+        section_index = _parse_section_index(river_race.get("sectionIndex"))
+
+        async with get_session() as session:
+            resolved_season_id, resolved_section_index, source = (
+                await _resolve_active_week(
+                    current_season_id=season_id,
+                    current_section_index=section_index,
+                    session=session,
+                )
+            )
+            if resolved_season_id is None or resolved_section_index is None:
+                logger.warning(
+                    "Reminder skipped: unable to resolve week (source=%s)", source
+                )
+                return
+            day_number = await _resolve_war_day_number(
+                period_index=river_race.get("periodIndex"),
+                season_id=resolved_season_id,
+                section_index=resolved_section_index,
+                period_type=period_type_lower,
+                session=session,
+            )
+            if day_number is None:
+                logger.warning("Reminder skipped: unknown day number")
+                return
+
+            last_state = await get_app_state(LAST_WAR_REMINDER_KEY, session=session)
+            if isinstance(last_state, dict):
+                try:
+                    if (
+                        int(last_state.get("season_id", 0)) == resolved_season_id
+                        and int(last_state.get("section_index", -1))
+                        == resolved_section_index
+                        and str(last_state.get("period_type", "")).lower()
+                        == period_type_lower
+                        and int(last_state.get("day_number", 0)) == day_number
+                    ):
+                        return
+                except Exception:
+                    pass
+
+            chat_ids = await get_enabled_clan_chats(CLAN_TAG)
+            if not chat_ids:
+                logger.info("No enabled clan chats for daily reminders")
+                return
+
+            if period_type_lower == "colosseum":
+                messages = {
+                    1: "🏛 COLISEUM WAR HAS STARTED\nDay 1 is live.\n❗ Participation is mandatory.\n⚔️ Play your attacks.",
+                    2: "🏛 Coliseum – Day 2\n⚔️ All attacks matter.\n❗ Participation is mandatory.",
+                    3: "🏛 Coliseum – Day 3\n🔥 Stay active.\n❗ Participation is mandatory.",
+                    4: "🚨 FINAL DAY – COLISEUM\n⚔️ Finish your attacks today.\n📊 Inactive players will be reviewed after war.",
+                }
+                banner_url = REMINDER_COLOSSEUM_BANNER_URL
+            else:
+                messages = {
+                    1: "🏁 Clan War has begun!\nDay 1 is live.\n⚔️ Use your attacks and bring fame to the clan.",
+                    2: "⏳ Clan War – Day 2\nNew war day is open.\n💪 Don’t forget to play your battles.",
+                    3: "🔥 Clan War – Day 3\nWe’re close to the finish.\n⚔️ Every attack matters.",
+                    4: "🚨 Final Day of Clan War!\n⚔️ Finish your attacks today.\n📊 Results and activity report after war ends.",
+                }
+                banner_url = REMINDER_WAR_BANNER_URL
+
+            message = messages.get(day_number)
+            if not message:
+                logger.warning("Reminder skipped: no template for day %s", day_number)
+                return
+
+            sent_count = 0
+            for chat_id in chat_ids:
+                try:
+                    if day_number == 1:
+                        try:
+                            await bot.send_photo(
+                                chat_id,
+                                photo=banner_url,
+                                caption=message,
+                                parse_mode=None,
+                            )
+                        except Exception:
+                            await bot.send_message(
+                                chat_id, message, parse_mode=None
+                            )
+                    else:
+                        await bot.send_message(chat_id, message, parse_mode=None)
+                    sent_count += 1
+                except Exception as e:
+                    logger.error(
+                        "Failed to send reminder to %s: %s", chat_id, e
+                    )
+
+            await set_app_state(
+                LAST_WAR_REMINDER_KEY,
+                {
+                    "clan_tag": CLAN_TAG,
+                    "season_id": resolved_season_id,
+                    "section_index": resolved_section_index,
+                    "period_type": period_type_lower,
+                    "day_number": day_number,
+                    "sent_at": datetime.now(timezone.utc).isoformat(),
+                },
+                session=session,
+            )
+
+            logger.info(
+                "Posted daily reminder day %s (%s) for season %s section %s to %s chat(s)",
+                day_number,
+                period_type_lower,
+                resolved_season_id,
+                resolved_section_index,
+                sent_count,
+            )
+
+
 async def maybe_post_promotion_candidates(bot: Bot) -> None:
     week = await get_last_completed_week(CLAN_TAG)
     if not week:
@@ -485,6 +696,35 @@ async def background_fetch_task() -> None:
         await asyncio.sleep(FETCH_INTERVAL_SECONDS)
 
 
+async def daily_reminder_task(bot: Bot) -> None:
+    reminder_time = _parse_reminder_time(REMINDER_TIME_UTC)
+    if reminder_time is None:
+        logger.warning("Invalid REMINDER_TIME_UTC: %s", REMINDER_TIME_UTC)
+        return
+    hour, minute = reminder_time
+    logger.info("Daily reminder scheduler started at %02d:%02d UTC", hour, minute)
+
+    while True:
+        try:
+            now = datetime.now(timezone.utc)
+            target = datetime(
+                now.year, now.month, now.day, hour, minute, tzinfo=timezone.utc
+            )
+            if now < target:
+                await asyncio.sleep((target - now).total_seconds())
+            await maybe_post_daily_war_reminder(bot)
+            next_target = target + timedelta(days=1)
+            sleep_for = (next_target - datetime.now(timezone.utc)).total_seconds()
+            if sleep_for > 0:
+                await asyncio.sleep(sleep_for)
+        except asyncio.CancelledError:
+            logger.info("Daily reminder task cancelled")
+            break
+        except Exception as e:
+            logger.error("Error in daily reminder task: %s", e, exc_info=True)
+            await asyncio.sleep(60)
+
+
 @asynccontextmanager
 async def lifespan(dispatcher: Dispatcher):
     """
@@ -504,6 +744,9 @@ async def lifespan(dispatcher: Dispatcher):
     
     # Start background task
     fetch_task = asyncio.create_task(background_fetch_task())
+    reminder_task = None
+    if REMINDER_ENABLED:
+        reminder_task = asyncio.create_task(daily_reminder_task(BOT))
     logger.info("Background fetch task started")
     
     yield
@@ -513,10 +756,17 @@ async def lifespan(dispatcher: Dispatcher):
     
     # Cancel background task
     fetch_task.cancel()
+    if reminder_task is not None:
+        reminder_task.cancel()
     try:
         await fetch_task
     except asyncio.CancelledError:
         pass
+    if reminder_task is not None:
+        try:
+            await reminder_task
+        except asyncio.CancelledError:
+            pass
     
     # Close connections
     await close_api_client()

@@ -17,6 +17,11 @@ def get_env_var(
     return value
 
 
+def get_env_bool(name: str, default: str = "false") -> bool:
+    value = get_env_var(name, default=default, required=False) or ""
+    return value.strip().lower() in ("1", "true", "yes", "y", "on")
+
+
 def require_env_value(name: str, value: str | None) -> str:
     """Ensure required env var is present at runtime."""
     if not value:
@@ -90,6 +95,28 @@ INACTIVE_LAST_SEEN_LIMIT: int = int(
 )
 LAST_SEEN_FLAG_LIMIT: int = int(
     get_env_var("LAST_SEEN_FLAG_LIMIT", default="5", required=False)
+)
+
+# Daily war reminders
+REMINDER_ENABLED: bool = get_env_bool("REMINDER_ENABLED", default="true")
+REMINDER_TIME_UTC: str = (
+    get_env_var("REMINDER_TIME_UTC", default="09:05", required=False) or "09:05"
+)
+REMINDER_WAR_BANNER_URL: str = (
+    get_env_var(
+        "REMINDER_WAR_BANNER_URL",
+        default="https://i.ibb.co/VyGjscj/image.png",
+        required=False,
+    )
+    or "https://i.ibb.co/VyGjscj/image.png"
+)
+REMINDER_COLOSSEUM_BANNER_URL: str = (
+    get_env_var(
+        "REMINDER_COLOSSEUM_BANNER_URL",
+        default="https://i.ibb.co/Cs4Sjpzw/image.png",
+        required=False,
+    )
+    or "https://i.ibb.co/Cs4Sjpzw/image.png"
 )
 
 # Promotion recommendations
