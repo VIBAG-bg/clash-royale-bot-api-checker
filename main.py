@@ -25,6 +25,7 @@ from db import (
     get_colosseum_index_for_season,
     get_app_state,
     get_enabled_clan_chats,
+    get_river_race_state_for_week,
     get_session,
     set_colosseum_index_for_season,
     set_app_state,
@@ -36,6 +37,7 @@ from db import (
 )
 from reports import (
     build_kick_shortlist_report,
+    build_promotion_candidates_report,
     build_rolling_report,
     build_weekly_report,
 )
@@ -51,6 +53,7 @@ logger = logging.getLogger(__name__)
 FETCH_LOCK = asyncio.Lock()
 ACTIVE_WEEK_KEY = "active_week"
 LAST_REPORTED_WEEK_KEY = "last_reported_week"
+LAST_PROMOTE_SEASON_KEY = "last_promote_season"
 BOT: Bot | None = None
 
 
@@ -409,6 +412,55 @@ async def maybe_post_weekly_report(bot: Bot) -> None:
     )
 
 
+async def maybe_post_promotion_candidates(bot: Bot) -> None:
+    week = await get_last_completed_week(CLAN_TAG)
+    if not week:
+        return
+    season_id, section_index = week
+    state = await get_river_race_state_for_week(CLAN_TAG, season_id, section_index)
+    is_colosseum = bool(state.get("is_colosseum")) if state else False
+    if not is_colosseum:
+        colosseum_index = await get_colosseum_index_for_season(season_id)
+        if colosseum_index is None or colosseum_index != section_index:
+            return
+
+    last_state = await get_app_state(LAST_PROMOTE_SEASON_KEY)
+    last_season_id = 0
+    if last_state:
+        try:
+            last_season_id = int(last_state.get("season_id", 0))
+        except (TypeError, ValueError):
+            last_season_id = 0
+    if last_season_id == season_id:
+        return
+
+    chat_ids = await get_enabled_clan_chats(CLAN_TAG)
+    if not chat_ids:
+        return
+
+    report = await build_promotion_candidates_report(CLAN_TAG)
+    sent_count = 0
+    for chat_id in chat_ids:
+        try:
+            await bot.send_message(chat_id, report, parse_mode=None)
+            sent_count += 1
+        except Exception as e:
+            logger.error("Failed to send promotion report to %s: %s", chat_id, e)
+
+    await set_app_state(
+        LAST_PROMOTE_SEASON_KEY,
+        {
+            "season_id": season_id,
+            "set_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+    logger.info(
+        "Posted promotion recommendations for season %s to %s chat(s)",
+        season_id,
+        sent_count,
+    )
+
+
 async def background_fetch_task() -> None:
     """Background task that periodically fetches River Race stats."""
     logger.info(
@@ -422,6 +474,7 @@ async def background_fetch_task() -> None:
                 logger.warning("Bot instance not available for weekly reports")
             else:
                 await maybe_post_weekly_report(BOT)
+                await maybe_post_promotion_candidates(BOT)
         except asyncio.CancelledError:
             logger.info("Background fetch task cancelled")
             break

@@ -15,6 +15,15 @@ from config import (
     LAST_SEEN_FLAG_LIMIT,
     LAST_SEEN_RED_DAYS,
     LAST_SEEN_YELLOW_DAYS,
+    PROMOTE_COLEADER_LIMIT,
+    PROMOTE_ELDER_LIMIT,
+    PROMOTE_MIN_ACTIVE_WEEKS_COLEADER,
+    PROMOTE_MIN_ACTIVE_WEEKS_ELDER,
+    PROMOTE_MIN_ALLTIME_WEEKS_COLEADER,
+    PROMOTE_MIN_AVG_DECKS_COLEADER,
+    PROMOTE_MIN_AVG_DECKS_ELDER,
+    PROMOTE_MIN_WEEKS_PLAYED_COLEADER,
+    PROMOTE_MIN_WEEKS_PLAYED_ELDER,
     NEW_MEMBER_WEEKS_PLAYED,
     PROTECTED_PLAYER_TAGS,
     REVIVED_DECKS_THRESHOLD,
@@ -28,12 +37,14 @@ from db import (
     get_current_wtd_donations,
     get_current_members_with_wtd_donations,
     get_donation_weekly_sums_for_window,
+    get_alltime_weeks_played,
     get_last_weeks_from_db,
     get_last_seen_map,
     get_latest_river_race_state,
     get_participation_week_counts,
     get_river_race_state_for_week,
     get_donations_weekly_sums,
+    get_war_stats_for_weeks,
     get_rolling_leaderboard,
     get_session,
     get_top_donors_window,
@@ -41,6 +52,7 @@ from db import (
     get_week_decks_map,
     get_week_leaderboard,
 )
+from riverrace_import import get_last_completed_weeks
 
 NAME_WIDTH = 20
 HEADER_LINE = "══════════════════════════════"
@@ -437,6 +449,227 @@ async def build_donations_report(clan_tag: str, clan_name: str | None = None) ->
             "• Last N weeks block is disabled (DONATION_WEEKS_WINDOW=0)."
         )
 
+    return "\n".join(lines)
+
+
+def _min_max_norm(value: float, min_value: float, max_value: float) -> float:
+    if max_value <= min_value:
+        return 0.0
+    return (value - min_value) / (max_value - min_value)
+
+
+async def build_promotion_candidates_report(clan_tag: str) -> str:
+    window_weeks = 8
+    weeks = await get_last_completed_weeks(window_weeks, clan_tag)
+    season_id = weeks[0][0] if weeks else 0
+
+    member_rows = await get_current_members_snapshot(clan_tag)
+    members: dict[str, str] = {}
+    for row in member_rows:
+        tag = _normalize_tag(row.get("player_tag"))
+        if not tag or tag in PROTECTED_TAGS_NORMALIZED:
+            continue
+        name = row.get("player_name") or "Unknown"
+        members[tag] = name
+
+    war_stats = await get_war_stats_for_weeks(clan_tag, weeks)
+    alltime_weeks = await get_alltime_weeks_played(clan_tag)
+    donations_rows, donation_coverage = await get_donation_weekly_sums_for_window(
+        clan_tag, window_weeks
+    )
+    donations_map: dict[str, dict[str, int]] = {}
+    for row in donations_rows:
+        tag = _normalize_tag(row.get("player_tag"))
+        if not tag:
+            continue
+        donations_map[tag] = {
+            "donations_sum": int(row.get("donations_sum", 0)),
+            "weeks_present": int(row.get("weeks_present", 0)),
+        }
+
+    donations_available = any(
+        value.get("weeks_present", 0) > 0 for value in donations_map.values()
+    )
+
+    stats_rows: list[dict[str, object]] = []
+    for tag, name in members.items():
+        stats = war_stats.get(tag, {})
+        weeks_played = int(stats.get("weeks_played", 0))
+        active_weeks = int(stats.get("active_weeks", 0))
+        avg_decks = float(stats.get("avg_decks", 0.0))
+        avg_fame = float(stats.get("avg_fame", 0.0))
+        alltime = int(alltime_weeks.get(tag, 0))
+        don_stats = donations_map.get(tag, {})
+        don_sum = int(don_stats.get("donations_sum", 0))
+        don_weeks = int(don_stats.get("weeks_present", 0))
+        don_avg = don_sum / don_weeks if don_weeks > 0 else 0.0
+        stats_rows.append(
+            {
+                "player_tag": tag,
+                "player_name": name,
+                "weeks_played": weeks_played,
+                "active_weeks": active_weeks,
+                "avg_decks": avg_decks,
+                "avg_fame": avg_fame,
+                "alltime_weeks": alltime,
+                "donations_sum": don_sum,
+                "donations_weeks": don_weeks,
+                "donations_avg": don_avg,
+            }
+        )
+
+    fame_values = [row["avg_fame"] for row in stats_rows]
+    decks_values = [row["avg_decks"] for row in stats_rows]
+    don_values = [row["donations_avg"] for row in stats_rows]
+    fame_min, fame_max = (min(fame_values), max(fame_values)) if fame_values else (0.0, 0.0)
+    decks_min, decks_max = (min(decks_values), max(decks_values)) if decks_values else (0.0, 0.0)
+    don_min, don_max = (min(don_values), max(don_values)) if don_values else (0.0, 0.0)
+
+    elder_candidates: list[dict[str, object]] = []
+    for row in stats_rows:
+        if row["weeks_played"] < PROMOTE_MIN_WEEKS_PLAYED_ELDER:
+            continue
+        if row["active_weeks"] < PROMOTE_MIN_ACTIVE_WEEKS_ELDER:
+            continue
+        if row["avg_decks"] < PROMOTE_MIN_AVG_DECKS_ELDER:
+            continue
+        fame_norm = _min_max_norm(row["avg_fame"], fame_min, fame_max)
+        decks_norm = _min_max_norm(row["avg_decks"], decks_min, decks_max)
+        if donations_available:
+            don_norm = _min_max_norm(row["donations_avg"], don_min, don_max)
+        else:
+            don_norm = 0.0
+        score = 0.55 * fame_norm + 0.30 * decks_norm + 0.15 * don_norm
+        row["score"] = score
+        elder_candidates.append(row)
+
+    elder_candidates.sort(
+        key=lambda row: (
+            -float(row.get("score", 0.0)),
+            -int(row.get("active_weeks", 0)),
+            -int(row.get("donations_sum", 0)),
+            str(row.get("player_name") or ""),
+        )
+    )
+    elder_candidates = elder_candidates[: max(PROMOTE_ELDER_LIMIT, 0)]
+
+    top3_fame = {
+        row["player_tag"]
+        for row in sorted(
+            stats_rows,
+            key=lambda row: (-float(row.get("avg_fame", 0.0)), str(row.get("player_name") or "")),
+        )[:3]
+    }
+    top3_don = set()
+    if donations_available:
+        top3_don = {
+            row["player_tag"]
+            for row in sorted(
+                stats_rows,
+                key=lambda row: (
+                    -int(row.get("donations_sum", 0)),
+                    str(row.get("player_name") or ""),
+                ),
+            )[:3]
+        }
+
+    co_candidates: list[dict[str, object]] = []
+    if donations_available:
+        for row in stats_rows:
+            if row["weeks_played"] < PROMOTE_MIN_WEEKS_PLAYED_COLEADER:
+                continue
+            if row["active_weeks"] < PROMOTE_MIN_ACTIVE_WEEKS_COLEADER:
+                continue
+            if row["avg_decks"] < PROMOTE_MIN_AVG_DECKS_COLEADER:
+                continue
+            if row["alltime_weeks"] < PROMOTE_MIN_ALLTIME_WEEKS_COLEADER:
+                continue
+            if row["player_tag"] not in top3_fame:
+                continue
+            if row["player_tag"] not in top3_don:
+                continue
+            co_candidates.append(row)
+
+    co_candidates.sort(
+        key=lambda row: (
+            -float(row.get("avg_fame", 0.0)),
+            -int(row.get("donations_sum", 0)),
+            str(row.get("player_name") or ""),
+        )
+    )
+    co_candidates = co_candidates[: max(PROMOTE_COLEADER_LIMIT, 0)]
+
+    lines = [
+        HEADER_LINE,
+        "🏅 PROMOTION RECOMMENDATIONS",
+        f"Season {season_id} • After COLOSSEUM",
+        HEADER_LINE,
+        "Based on last 8 weeks: war + donations + consistency",
+        "(Recommendation only. Leader decides.)",
+        "",
+        f"🎖 Suggested for Elder ({len(elder_candidates)}):",
+    ]
+
+    if elder_candidates:
+        for index, row in enumerate(elder_candidates, 1):
+            lines.append(
+                f"{index}) {row['player_name']} — {row['player_tag']}"
+            )
+            lines.append(
+                "   • War: %s/8 active weeks | avg %s decks | avg %s fame"
+                % (
+                    row.get("active_weeks", 0),
+                    _format_avg(float(row.get("avg_decks", 0.0))),
+                    _format_avg(float(row.get("avg_fame", 0.0))),
+                )
+            )
+            lines.append(
+                "   • Donations: %s cards | avg %s / week (%s/8)"
+                % (
+                    row.get("donations_sum", 0),
+                    _format_avg(float(row.get("donations_avg", 0.0))),
+                    row.get("donations_weeks", 0),
+                )
+            )
+    else:
+        lines.append("No clear candidates.")
+
+    lines.extend(["", DIVIDER_LINE, "🛡 Suggested for Co-leader (rare):"])
+    if co_candidates:
+        for index, row in enumerate(co_candidates, 1):
+            lines.append(
+                f"{index}) {row['player_name']} — {row['player_tag']}"
+            )
+            lines.append(
+                "   • War: %s/8 active weeks | avg %s decks | avg %s fame"
+                % (
+                    row.get("active_weeks", 0),
+                    _format_avg(float(row.get("avg_decks", 0.0))),
+                    _format_avg(float(row.get("avg_fame", 0.0))),
+                )
+            )
+            lines.append(
+                "   • Donations: %s cards | avg %s / week (%s/8)"
+                % (
+                    row.get("donations_sum", 0),
+                    _format_avg(float(row.get("donations_avg", 0.0))),
+                    row.get("donations_weeks", 0),
+                )
+            )
+    else:
+        lines.append("No clear candidate this month.")
+
+    lines.extend(
+        [
+            "",
+            DIVIDER_LINE,
+            "📝 Notes:",
+            "• Only current clan members are considered.",
+            "• New/low-history members are excluded automatically.",
+            "• Protected tags are excluded.",
+            HEADER_LINE,
+        ]
+    )
     return "\n".join(lines)
 
 

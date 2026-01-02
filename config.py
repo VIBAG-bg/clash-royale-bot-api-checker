@@ -92,6 +92,35 @@ LAST_SEEN_FLAG_LIMIT: int = int(
     get_env_var("LAST_SEEN_FLAG_LIMIT", default="5", required=False)
 )
 
+# Promotion recommendations
+PROMOTE_ELDER_LIMIT: int = int(
+    get_env_var("PROMOTE_ELDER_LIMIT", default="2", required=False)
+)
+PROMOTE_COLEADER_LIMIT: int = int(
+    get_env_var("PROMOTE_COLEADER_LIMIT", default="1", required=False)
+)
+PROMOTE_MIN_WEEKS_PLAYED_ELDER: int = int(
+    get_env_var("PROMOTE_MIN_WEEKS_PLAYED_ELDER", default="6", required=False)
+)
+PROMOTE_MIN_ACTIVE_WEEKS_ELDER: int = int(
+    get_env_var("PROMOTE_MIN_ACTIVE_WEEKS_ELDER", default="6", required=False)
+)
+PROMOTE_MIN_AVG_DECKS_ELDER: int = int(
+    get_env_var("PROMOTE_MIN_AVG_DECKS_ELDER", default="12", required=False)
+)
+PROMOTE_MIN_WEEKS_PLAYED_COLEADER: int = int(
+    get_env_var("PROMOTE_MIN_WEEKS_PLAYED_COLEADER", default="8", required=False)
+)
+PROMOTE_MIN_ACTIVE_WEEKS_COLEADER: int = int(
+    get_env_var("PROMOTE_MIN_ACTIVE_WEEKS_COLEADER", default="8", required=False)
+)
+PROMOTE_MIN_AVG_DECKS_COLEADER: int = int(
+    get_env_var("PROMOTE_MIN_AVG_DECKS_COLEADER", default="14", required=False)
+)
+PROMOTE_MIN_ALLTIME_WEEKS_COLEADER: int = int(
+    get_env_var("PROMOTE_MIN_ALLTIME_WEEKS_COLEADER", default="20", required=False)
+)
+
 # Clash Royale API base URL
 CR_API_BASE_URL: str = os.getenv("CR_API_BASE_URL", "https://api.clashroyale.com/v1")
 

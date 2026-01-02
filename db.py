@@ -1315,6 +1315,82 @@ async def get_donation_weekly_sums_for_window(
     )
 
 
+async def get_war_stats_for_weeks(
+    clan_tag: str,
+    weeks: list[tuple[int, int]],
+    session: AsyncSession | None = None,
+) -> dict[str, dict[str, float | int]]:
+    if not weeks:
+        return {}
+    if session is None:
+        async with _get_session() as session:
+            return await get_war_stats_for_weeks(clan_tag, weeks, session=session)
+    current_members = await get_current_member_tags(clan_tag, session=session)
+    if not current_members:
+        return {}
+    result = await session.execute(
+        select(
+            PlayerParticipation.player_tag,
+            func.count().label("weeks_played"),
+            func.sum(
+                case((PlayerParticipation.decks_used >= 8, 1), else_=0)
+            ).label("active_weeks"),
+            func.avg(PlayerParticipation.decks_used).label("avg_decks"),
+            func.avg(PlayerParticipation.fame).label("avg_fame"),
+        )
+        .where(
+            tuple_(
+                PlayerParticipation.season_id, PlayerParticipation.section_index
+            ).in_(weeks),
+            PlayerParticipation.player_tag.in_(current_members),
+        )
+        .group_by(PlayerParticipation.player_tag)
+    )
+    stats: dict[str, dict[str, float | int]] = {}
+    for row in result.all():
+        stats[row.player_tag] = {
+            "weeks_played": int(row.weeks_played or 0),
+            "active_weeks": int(row.active_weeks or 0),
+            "avg_decks": float(row.avg_decks or 0),
+            "avg_fame": float(row.avg_fame or 0),
+        }
+    return stats
+
+
+async def get_alltime_weeks_played(
+    clan_tag: str, session: AsyncSession | None = None
+) -> dict[str, int]:
+    if session is None:
+        async with _get_session() as session:
+            return await get_alltime_weeks_played(clan_tag, session=session)
+    current_members = await get_current_member_tags(clan_tag, session=session)
+    if not current_members:
+        return {}
+    distinct_weeks = (
+        select(
+            PlayerParticipation.player_tag,
+            PlayerParticipation.season_id,
+            PlayerParticipation.section_index,
+        )
+        .where(PlayerParticipation.player_tag.in_(current_members))
+        .group_by(
+            PlayerParticipation.player_tag,
+            PlayerParticipation.season_id,
+            PlayerParticipation.section_index,
+        )
+        .subquery()
+    )
+    result = await session.execute(
+        select(
+            distinct_weeks.c.player_tag,
+            func.count().label("weeks_played"),
+        ).group_by(distinct_weeks.c.player_tag)
+    )
+    return {
+        row.player_tag: int(row.weeks_played or 0) for row in result.all()
+    }
+
+
 async def get_top_donors_wtd(
     clan_tag: str,
     limit: int = 5,

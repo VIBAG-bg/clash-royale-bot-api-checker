@@ -40,6 +40,7 @@ from reports import (
     build_donations_report,
     build_kick_shortlist_report,
     build_my_activity_report,
+    build_promotion_candidates_report,
     build_rolling_report,
     build_weekly_report,
 )
@@ -336,6 +337,15 @@ async def cmd_help(message: Message) -> None:
             ],
             "args": "Nickname or @username; reply to a user to use their linked account.",
             "notes": "If multiple matches, you will be asked to be more specific.",
+        },
+        {
+            "name": "/promote_candidates",
+            "what": "Promotion recommendations (elder/co-leader).",
+            "where": "Group + DM",
+            "who": "Everyone",
+            "usage": ["/promote_candidates"],
+            "args": "none",
+            "notes": "Based on last 8 weeks and current member snapshot.",
         },
         {
             "name": "/donations",
@@ -650,6 +660,17 @@ async def cmd_donations(message: Message) -> None:
     except Exception as e:
         logger.warning("Failed to fetch clan name: %s", e)
     report = await build_donations_report(clan_tag, clan_name)
+    await message.answer(report, parse_mode=None)
+
+
+@router.message(Command("promote_candidates"))
+async def cmd_promote_candidates(message: Message) -> None:
+    """Show promotion recommendations."""
+    clan_tag = _require_clan_tag()
+    if not clan_tag:
+        await message.answer("CLAN_TAG is not configured.", parse_mode=None)
+        return
+    report = await build_promotion_candidates_report(clan_tag)
     await message.answer(report, parse_mode=None)
 
 
