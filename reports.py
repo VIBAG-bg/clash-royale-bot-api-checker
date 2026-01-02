@@ -1,11 +1,15 @@
 ﻿"""Report builders for weekly and rolling war summaries."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Iterable
 
 from statistics import median
 
 from sqlalchemy import func, select, tuple_
+
+import logging
+
+from cr_api import ClashRoyaleAPIError, get_api_client
 
 from config import (
     DONATION_REVIVE_WTD_THRESHOLD,
@@ -58,6 +62,8 @@ NAME_WIDTH = 20
 HEADER_LINE = "══════════════════════════════"
 DIVIDER_LINE = "──────────────────────────────"
 SEPARATOR_LINE = "---------------------------"
+
+logger = logging.getLogger(__name__)
 
 
 def _normalize_tag(raw_tag: object) -> str:
@@ -199,6 +205,36 @@ def _format_median(values: list[int]) -> str:
     if not values:
         return "n/a"
     return f"{median(values):.1f}"
+
+
+def _parse_last_seen_string(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        return value.astimezone(timezone.utc)
+    if not value or not isinstance(value, str):
+        return None
+    for fmt in ("%Y%m%dT%H%M%S.%fZ", "%Y%m%dT%H%M%SZ"):
+        try:
+            parsed = datetime.strptime(value, fmt)
+        except ValueError:
+            continue
+        return parsed.replace(tzinfo=timezone.utc)
+    return None
+
+
+def _format_relative(delta: timedelta) -> str:
+    total_seconds = int(delta.total_seconds())
+    if total_seconds < 0:
+        total_seconds = 0
+    days = total_seconds // 86400
+    hours = (total_seconds % 86400) // 3600
+    minutes = (total_seconds % 3600) // 60
+    if days > 0:
+        if hours > 0:
+            return f"{days}d {hours}h ago"
+        return f"{days}d ago"
+    if hours > 0:
+        return f"{hours}h ago"
+    return f"{minutes}m ago"
 
 
 def _compare_to_avg(value: float, avg: float) -> str:
@@ -449,6 +485,195 @@ async def build_donations_report(clan_tag: str, clan_name: str | None = None) ->
             "• Last N weeks block is disabled (DONATION_WEEKS_WINDOW=0)."
         )
 
+    return "\n".join(lines)
+
+
+def _normalize_role(role: object) -> str:
+    if not role:
+        return ""
+    return (
+        str(role)
+        .strip()
+        .lower()
+        .replace(" ", "")
+        .replace("-", "")
+        .replace("_", "")
+    )
+
+
+async def build_clan_info_report(clan_tag: str) -> str:
+    try:
+        api_client = await get_api_client()
+        clan = await api_client.get_clan(clan_tag)
+        members = await api_client.get_clan_members(clan_tag)
+    except ClashRoyaleAPIError as e:
+        if e.status_code in (401, 403):
+            return "CR API access denied. Check token/IP allowlist."
+        return "Unable to fetch clan info right now. Please try again later."
+    except Exception as e:
+        logger.warning("Failed to fetch clan info: %s", e)
+        return "Unable to fetch clan info right now. Please try again later."
+
+    location = clan.get("location") or {}
+    location_name = (
+        location.get("localizedName")
+        or location.get("name")
+        or "Unknown"
+    )
+    clan_type = str(clan.get("type") or "").lower()
+    type_map = {
+        "open": "Open",
+        "inviteonly": "Invite Only",
+        "closed": "Closed",
+    }
+    type_label = type_map.get(clan_type, "Unknown")
+
+    members_count = clan.get("members")
+    if members_count is None:
+        members_count = len(members) if isinstance(members, list) else None
+    if members_count is None:
+        members_line = "👥 Members: unknown"
+    else:
+        members_line = f"👥 Members: {members_count}"
+
+    required_trophies = clan.get("requiredTrophies")
+    required_text = (
+        str(required_trophies) if required_trophies is not None else "n/a"
+    )
+
+    clan_score = clan.get("clanScore")
+    war_trophies = clan.get("clanWarTrophies")
+    donations_per_week = clan.get("donationsPerWeek")
+
+    now_utc = datetime.now(timezone.utc)
+    leader = None
+    co_leaders: list[dict[str, object]] = []
+    elders: list[dict[str, object]] = []
+    for member in members:
+        role = _normalize_role(member.get("role"))
+        if role == "leader":
+            leader = member
+        elif role == "coleader":
+            co_leaders.append(member)
+        elif role == "elder":
+            elders.append(member)
+
+    if leader:
+        leader_name = leader.get("name", "Unknown")
+        leader_trophies = leader.get("trophies")
+        leader_trophies_text = (
+            str(leader_trophies) if leader_trophies is not None else "n/a"
+        )
+        last_seen = _parse_last_seen_string(leader.get("lastSeen"))
+        if last_seen:
+            relative = _format_relative(now_utc - last_seen)
+        else:
+            relative = "unknown"
+        leader_line = (
+            f"• 👑 Leader: {leader_name} — {leader_trophies_text} trophies — last seen: {relative}"
+        )
+    else:
+        leader_line = "• 👑 Leader: unknown"
+
+    def _format_role_list(label: str, items: list[dict[str, object]]) -> str:
+        names = [m.get("name", "Unknown") for m in items]
+        total = len(names)
+        if total == 0:
+            return f"• {label} (0): none"
+        shown = names[:10]
+        suffix = "…" if total > 10 else ""
+        return f"• {label} ({total}): {', '.join(shown)}{suffix}"
+
+    co_leader_line = _format_role_list("🟣 Co-leaders", co_leaders)
+    elder_line = _format_role_list("🟡 Elders", elders)
+
+    donors_sorted = sorted(
+        members,
+        key=lambda m: (-int(m.get("donations") or 0), str(m.get("name") or "")),
+    )[:5]
+    trophies_sorted = sorted(
+        members,
+        key=lambda m: (-int(m.get("trophies") or 0), str(m.get("name") or "")),
+    )[:5]
+
+    parsed_seen = []
+    for member in members:
+        seen = _parse_last_seen_string(member.get("lastSeen"))
+        if seen:
+            parsed_seen.append((member.get("name", "Unknown"), seen))
+
+    bucket_green = 0
+    bucket_yellow = 0
+    bucket_red = 0
+    for _name, seen in parsed_seen:
+        delta = now_utc - seen
+        if delta < timedelta(hours=24):
+            bucket_green += 1
+        elif delta < timedelta(days=3):
+            bucket_yellow += 1
+        else:
+            bucket_red += 1
+
+    longest_missing = sorted(
+        parsed_seen, key=lambda item: (now_utc - item[1]), reverse=True
+    )[:5]
+
+    lines = [
+        HEADER_LINE,
+        f"🏰 CLAN INFO — {clan.get('name', 'Unknown')}",
+        HEADER_LINE,
+        f"🏷 Tag: {clan.get('tag', clan_tag)}",
+        f"🌍 Location: {location_name}",
+        f"🔓 Type: {type_label}",
+        members_line,
+        f"🎯 Required trophies: {required_text}",
+        "",
+        f"🏆 Clan trophies: {clan_score}",
+        f"⚔️ War trophies: {war_trophies}",
+        f"🤝 Donations this week (clan): {donations_per_week}",
+        "",
+        DIVIDER_LINE,
+        "👑 Leadership",
+        leader_line,
+        co_leader_line,
+        elder_line,
+        "",
+        DIVIDER_LINE,
+        "🎁 Top donors this week (Top 5)",
+    ]
+
+    for index, member in enumerate(donors_sorted, 1):
+        lines.append(
+            f"{index}) {member.get('name', 'Unknown')} — {member.get('donations', 0)} cards"
+        )
+
+    lines.extend(
+        [
+            "",
+            DIVIDER_LINE,
+            "🏆 Top trophies (Top 5)",
+        ]
+    )
+    for index, member in enumerate(trophies_sorted, 1):
+        lines.append(
+            f"{index}) {member.get('name', 'Unknown')} — {member.get('trophies', 0)}"
+        )
+
+    lines.extend(
+        [
+            "",
+            DIVIDER_LINE,
+            "⏱ Activity snapshot (lastSeen)",
+            f"🟢 <24h: {bucket_green} | 🟡 1–3d: {bucket_yellow} | 🔴 3d+: {bucket_red}",
+            "",
+            "🚨 Longest missing (Top 5)",
+        ]
+    )
+    for index, (name, seen) in enumerate(longest_missing, 1):
+        relative = _format_relative(now_utc - seen)
+        lines.append(f"{index}) {name} — last seen: {relative}")
+
+    lines.append(HEADER_LINE)
     return "\n".join(lines)
 
 

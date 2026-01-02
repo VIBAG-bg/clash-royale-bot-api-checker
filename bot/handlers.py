@@ -36,6 +36,7 @@ from db import (
     upsert_user_link_request,
 )
 from reports import (
+    build_clan_info_report,
     build_current_war_report,
     build_donations_report,
     build_kick_shortlist_report,
@@ -639,6 +640,17 @@ async def cmd_current_war(message: Message) -> None:
         await message.answer("CLAN_TAG is not configured.", parse_mode=None)
         return
     report = await build_current_war_report(clan_tag)
+    await message.answer(report, parse_mode=None)
+
+
+@router.message(Command("info"))
+async def cmd_info(message: Message) -> None:
+    """Show clan info from the official Clash Royale API."""
+    clan_tag = _require_clan_tag()
+    if not clan_tag:
+        await message.answer("CLAN_TAG is not configured.", parse_mode=None)
+        return
+    report = await build_clan_info_report(clan_tag)
     await message.answer(report, parse_mode=None)
 
 
