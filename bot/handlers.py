@@ -607,7 +607,10 @@ async def handle_member_join(event: ChatMemberUpdated) -> None:
         ChatMemberStatus.KICKED,
     ):
         return
-    if event.new_chat_member.status != ChatMemberStatus.MEMBER:
+    if event.new_chat_member.status not in (
+        ChatMemberStatus.MEMBER,
+        ChatMemberStatus.RESTRICTED,
+    ):
         return
 
     try:
