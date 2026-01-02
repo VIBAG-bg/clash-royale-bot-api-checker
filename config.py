@@ -149,6 +149,9 @@ CAPTCHA_REMIND_COOLDOWN_SECONDS: int = int(
 WELCOME_RULES_MESSAGE_LINK: str = (
     get_env_var("WELCOME_RULES_MESSAGE_LINK", default="", required=False) or ""
 )
+MODLOG_CHAT_ID: int = int(
+    get_env_var("MODLOG_CHAT_ID", default="0", required=False) or "0"
+)
 
 # Promotion recommendations
 PROMOTE_ELDER_LIMIT: int = int(

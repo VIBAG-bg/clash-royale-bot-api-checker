@@ -27,6 +27,7 @@ from config import (
     INACTIVE_LAST_SEEN_LIMIT,
     LAST_SEEN_RED_DAYS,
     LAST_SEEN_YELLOW_DAYS,
+    MODLOG_CHAT_ID,
     WELCOME_RULES_MESSAGE_LINK,
 )
 from cr_api import ClashRoyaleAPIError, get_api_client
@@ -153,6 +154,20 @@ def _build_user_mention(user: object) -> str:
     if user_id:
         return f"tg://user?id={user_id}"
     return "user"
+
+
+async def send_modlog(bot: Bot, text: str) -> None:
+    if MODLOG_CHAT_ID <= 0:
+        return
+    try:
+        await bot.send_message(
+            MODLOG_CHAT_ID,
+            text,
+            parse_mode=None,
+            disable_web_page_preview=True,
+        )
+    except Exception as e:
+        logger.warning("Failed to send modlog: %s", e, exc_info=True)
 
 
 def _build_captcha_keyboard(
@@ -684,6 +699,11 @@ async def handle_member_join(event: ChatMemberUpdated) -> None:
         logger.info("Restricted new member %s in chat %s", user.id, event.chat.id)
     except Exception as e:
         logger.error("Failed to restrict member %s: %s", user.id, e, exc_info=True)
+        await send_modlog(
+            event.bot,
+            f"[CAPTCHA] ERROR: restrict failed: chat={event.chat.id} "
+            f"user={user.id} err={e}",
+        )
         return
 
     try:
@@ -701,6 +721,15 @@ async def handle_member_join(event: ChatMemberUpdated) -> None:
             event.chat.id,
             "Too many attempts, try again later.",
             parse_mode=None,
+        )
+        username = f"@{user.username}" if user.username else "n/a"
+        await send_modlog(
+            event.bot,
+            "[CAPTCHA] join gate: "
+            f"chat={event.chat.id} user={user.id} {username} "
+            f"name={user.full_name} status_old={old_status} "
+            f"status_new={new_status} -> restricted, "
+            f"captcha_failed challenge={challenge.get('id')}",
         )
         return
     if not question:
@@ -736,6 +765,25 @@ async def handle_member_join(event: ChatMemberUpdated) -> None:
         logger.info(
             "Captcha sent to user %s in chat %s", user.id, event.chat.id
         )
+        username = f"@{user.username}" if user.username else "n/a"
+        await send_modlog(
+            event.bot,
+            "[CAPTCHA] join gate: "
+            f"chat={event.chat.id} user={user.id} {username} "
+            f"name={user.full_name} status_old={old_status} "
+            f"status_new={new_status} -> restricted, "
+            f"captcha_sent challenge={challenge['id']} msg={message_id}",
+        )
+    else:
+        username = f"@{user.username}" if user.username else "n/a"
+        await send_modlog(
+            event.bot,
+            "[CAPTCHA] join gate: "
+            f"chat={event.chat.id} user={user.id} {username} "
+            f"name={user.full_name} status_old={old_status} "
+            f"status_new={new_status} -> restricted, "
+            f"captcha_sent=no challenge={challenge['id']}",
+        )
 
 
 @moderation_router.message(
@@ -758,6 +806,11 @@ async def handle_pending_user_message(message: Message) -> None:
         )
     except Exception as e:
         logger.warning("Failed to delete message: %s", e, exc_info=True)
+        await send_modlog(
+            message.bot,
+            f"[CAPTCHA] ERROR: delete failed: chat={message.chat.id} "
+            f"user={message.from_user.id} msg_id={message.message_id} err={e}",
+        )
 
     now = datetime.now(timezone.utc)
     last_reminded_at = challenge.get("last_reminded_at")
@@ -772,6 +825,11 @@ async def handle_pending_user_message(message: Message) -> None:
         message.chat.id, reminder_text, parse_mode=None
     )
     await touch_last_reminded_at(challenge["id"], now)
+    await send_modlog(
+        message.bot,
+        f"[CAPTCHA] pending msg deleted: chat={message.chat.id} "
+        f"user={message.from_user.id} msg_id={message.message_id}",
+    )
 
     if not challenge.get("message_id"):
         question = await get_captcha_question(challenge["question_id"])
@@ -844,6 +902,11 @@ async def handle_captcha_callback(query: CallbackQuery) -> None:
             )
         except Exception as e:
             logger.error("Failed to unrestrict member: %s", e, exc_info=True)
+            await send_modlog(
+                query.bot,
+                f"[CAPTCHA] ERROR: unrestrict failed: chat={challenge['chat_id']} "
+                f"user={challenge['user_id']} err={e}",
+            )
 
         if query.message:
             try:
@@ -860,6 +923,11 @@ async def handle_captcha_callback(query: CallbackQuery) -> None:
             "Captcha passed for user %s in chat %s",
             challenge["user_id"],
             challenge["chat_id"],
+        )
+        await send_modlog(
+            query.bot,
+            f"[CAPTCHA] passed: chat={challenge['chat_id']} "
+            f"user={challenge['user_id']} challenge={challenge_id} -> unrestrict ok",
         )
         return
 
@@ -898,9 +966,20 @@ async def handle_captcha_callback(query: CallbackQuery) -> None:
             challenge["user_id"],
             challenge["chat_id"],
         )
+        await send_modlog(
+            query.bot,
+            f"[CAPTCHA] failed: chat={challenge['chat_id']} "
+            f"user={challenge['user_id']} challenge={challenge_id} "
+            f"expires_at={_format_dt(now + timedelta(seconds=30))}",
+        )
         return
 
     await query.answer("Wrong answer. Try again.", show_alert=False)
+    await send_modlog(
+        query.bot,
+        f"[CAPTCHA] wrong: chat={challenge['chat_id']} "
+        f"user={challenge['user_id']} challenge={challenge_id} attempts={attempts}",
+    )
 
 async def _send_debug_reminder(
     message: Message,
@@ -1253,6 +1332,10 @@ async def cmd_captcha_send(message: Message) -> None:
         pass
 
     chat_id = message.chat.id
+    await send_modlog(
+        message.bot,
+        f"[ADMIN] captcha_send by {message.from_user.id} -> target {target.id} chat={chat_id}",
+    )
     try:
         if await is_user_verified(chat_id, target.id):
             await message.answer(
@@ -1276,6 +1359,11 @@ async def cmd_captcha_send(message: Message) -> None:
         )
     except Exception as e:
         logger.warning("Failed to restrict user: %s", e, exc_info=True)
+        await send_modlog(
+            message.bot,
+            f"[CAPTCHA] ERROR: restrict failed: chat={chat_id} "
+            f"user={target.id} err={e}",
+        )
 
     try:
         challenge, question = await get_or_create_pending_challenge(
@@ -1330,6 +1418,10 @@ async def cmd_captcha_status(message: Message) -> None:
         return
     target = message.reply_to_message.from_user
     chat_id = message.chat.id
+    await send_modlog(
+        message.bot,
+        f"[ADMIN] captcha_status by {message.from_user.id} -> target {target.id} chat={chat_id}",
+    )
 
     try:
         is_verified = await is_user_verified(chat_id, target.id)
@@ -1397,6 +1489,10 @@ async def cmd_captcha_reset(message: Message) -> None:
         return
     target = message.reply_to_message.from_user
     chat_id = message.chat.id
+    await send_modlog(
+        message.bot,
+        f"[ADMIN] captcha_reset by {message.from_user.id} -> target {target.id} chat={chat_id}",
+    )
 
     try:
         await expire_active_challenges(chat_id, target.id)
@@ -1417,6 +1513,11 @@ async def cmd_captcha_reset(message: Message) -> None:
         )
     except Exception as e:
         logger.warning("Failed to restrict user: %s", e, exc_info=True)
+        await send_modlog(
+            message.bot,
+            f"[CAPTCHA] ERROR: restrict failed: chat={chat_id} "
+            f"user={target.id} err={e}",
+        )
 
     try:
         challenge, question = await get_or_create_pending_challenge(
@@ -1467,6 +1568,10 @@ async def cmd_captcha_verify(message: Message) -> None:
         return
     target = message.reply_to_message.from_user
     chat_id = message.chat.id
+    await send_modlog(
+        message.bot,
+        f"[ADMIN] captcha_verify by {message.from_user.id} -> target {target.id} chat={chat_id}",
+    )
 
     try:
         await set_user_verified(chat_id, target.id)
@@ -1489,6 +1594,11 @@ async def cmd_captcha_verify(message: Message) -> None:
         )
     except Exception as e:
         logger.warning("Failed to unrestrict user: %s", e, exc_info=True)
+        await send_modlog(
+            message.bot,
+            f"[CAPTCHA] ERROR: unrestrict failed: chat={chat_id} "
+            f"user={target.id} err={e}",
+        )
 
     await message.answer("User verified by admin.", parse_mode=None)
 
@@ -1506,6 +1616,10 @@ async def cmd_captcha_unverify(message: Message) -> None:
         return
     target = message.reply_to_message.from_user
     chat_id = message.chat.id
+    await send_modlog(
+        message.bot,
+        f"[ADMIN] captcha_unverify by {message.from_user.id} -> target {target.id} chat={chat_id}",
+    )
 
     try:
         await delete_verified_user(chat_id, target.id)
