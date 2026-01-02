@@ -654,8 +654,11 @@ async def handle_member_join(event: ChatMemberUpdated) -> None:
         question = await get_captcha_question(challenge["question_id"])
     if not question:
         return
-    if challenge.get("message_id"):
-        return
+    now = datetime.now(timezone.utc)
+    last_reminded_at = challenge.get("last_reminded_at")
+    if challenge.get("message_id") and isinstance(last_reminded_at, datetime):
+        if (now - last_reminded_at).total_seconds() < CAPTCHA_REMIND_COOLDOWN_SECONDS:
+            return
 
     message_id = await _send_captcha_message(
         event.bot,
@@ -665,6 +668,7 @@ async def handle_member_join(event: ChatMemberUpdated) -> None:
     )
     if message_id:
         await update_challenge_message_id(challenge["id"], message_id)
+        await touch_last_reminded_at(challenge["id"], now)
         logger.info(
             "Captcha sent to user %s in chat %s", user.id, event.chat.id
         )
