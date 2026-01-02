@@ -156,6 +156,18 @@ MODLOG_CHAT_ID: int = int(
     get_env_var("MODLOG_CHAT_ID", default="0", required=False) or "0"
 )
 
+# Applications / waitlist
+APPLY_ENABLED: bool = get_env_bool("APPLY_ENABLED", default="true")
+APPLY_COOLDOWN_HOURS: int = int(
+    get_env_var("APPLY_COOLDOWN_HOURS", default="24", required=False)
+)
+APPLY_MAX_PENDING: int = int(
+    get_env_var("APPLY_MAX_PENDING", default="200", required=False)
+)
+APPLY_CHAT_FORWARD_TO: int = int(
+    get_env_var("APPLY_CHAT_FORWARD_TO", default="0", required=False) or "0"
+)
+
 # Promotion recommendations
 PROMOTE_ELDER_LIMIT: int = int(
     get_env_var("PROMOTE_ELDER_LIMIT", default="2", required=False)

@@ -298,6 +298,31 @@ class DailyReminderPost(Base):
     )
 
 
+class ClanApplication(Base):
+    __tablename__ = "clan_applications"
+    __table_args__ = (
+        Index(
+            "ix_clan_applications_status_created",
+            "status",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    telegram_username: Mapped[str | None] = mapped_column(Text)
+    telegram_display_name: Mapped[str | None] = mapped_column(Text)
+    player_name: Mapped[str] = mapped_column(Text, nullable=False)
+    player_tag: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(16), default="pending", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, onupdate=_utc_now, nullable=False
+    )
+
+
 class AppState(Base):
     __tablename__ = "app_state"
 
@@ -2008,6 +2033,194 @@ async def delete_app_state(key: str, session: AsyncSession | None = None) -> Non
                 raise
     else:
         await session.execute(delete(AppState).where(AppState.key == key))
+
+
+def _application_to_dict(app: ClanApplication) -> dict[str, Any]:
+    return {
+        "id": app.id,
+        "telegram_user_id": app.telegram_user_id,
+        "telegram_username": app.telegram_username,
+        "telegram_display_name": app.telegram_display_name,
+        "player_name": app.player_name,
+        "player_tag": app.player_tag,
+        "status": app.status,
+        "created_at": app.created_at,
+        "updated_at": app.updated_at,
+    }
+
+
+async def get_pending_application_for_user(
+    telegram_user_id: int, session: AsyncSession | None = None
+) -> dict[str, Any] | None:
+    if session is None:
+        async with _get_session() as session:
+            return await get_pending_application_for_user(
+                telegram_user_id, session=session
+            )
+    result = await session.execute(
+        select(ClanApplication)
+        .where(
+            ClanApplication.telegram_user_id == telegram_user_id,
+            ClanApplication.status == "pending",
+        )
+        .order_by(ClanApplication.created_at.desc())
+        .limit(1)
+    )
+    app = result.scalar_one_or_none()
+    if not app:
+        return None
+    return _application_to_dict(app)
+
+
+async def get_last_rejected_time_for_user(
+    telegram_user_id: int, session: AsyncSession | None = None
+) -> datetime | None:
+    if session is None:
+        async with _get_session() as session:
+            return await get_last_rejected_time_for_user(
+                telegram_user_id, session=session
+            )
+    result = await session.execute(
+        select(func.max(ClanApplication.updated_at)).where(
+            ClanApplication.telegram_user_id == telegram_user_id,
+            ClanApplication.status == "rejected",
+        )
+    )
+    return result.scalar_one()
+
+
+async def count_pending_applications(
+    session: AsyncSession | None = None,
+) -> int:
+    if session is None:
+        async with _get_session() as session:
+            return await count_pending_applications(session=session)
+    result = await session.execute(
+        select(func.count()).select_from(ClanApplication).where(
+            ClanApplication.status == "pending"
+        )
+    )
+    return int(result.scalar_one() or 0)
+
+
+async def create_application(
+    *,
+    telegram_user_id: int,
+    telegram_username: str | None,
+    telegram_display_name: str | None,
+    player_name: str,
+    player_tag: str | None,
+    session: AsyncSession | None = None,
+) -> dict[str, Any]:
+    now = _utc_now()
+    stmt = pg_insert(ClanApplication.__table__).values(
+        telegram_user_id=telegram_user_id,
+        telegram_username=telegram_username,
+        telegram_display_name=telegram_display_name,
+        player_name=player_name,
+        player_tag=player_tag,
+        status="pending",
+        created_at=now,
+        updated_at=now,
+    ).returning(ClanApplication.id)
+    if session is None:
+        async with _get_session() as session:
+            try:
+                result = await session.execute(stmt)
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+    else:
+        result = await session.execute(stmt)
+    app_id = result.scalar_one()
+    return {
+        "id": app_id,
+        "telegram_user_id": telegram_user_id,
+        "telegram_username": telegram_username,
+        "telegram_display_name": telegram_display_name,
+        "player_name": player_name,
+        "player_tag": player_tag,
+        "status": "pending",
+        "created_at": now,
+        "updated_at": now,
+    }
+
+
+async def update_application_tag(
+    app_id: int,
+    player_tag: str | None,
+    session: AsyncSession | None = None,
+) -> bool:
+    now = _utc_now()
+    stmt = (
+        update(ClanApplication)
+        .where(ClanApplication.id == app_id)
+        .values(player_tag=player_tag, updated_at=now)
+    )
+    if session is None:
+        async with _get_session() as session:
+            try:
+                result = await session.execute(stmt)
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+    else:
+        result = await session.execute(stmt)
+    return bool(result.rowcount)
+
+
+async def list_pending_applications(
+    limit: int = 10, session: AsyncSession | None = None
+) -> list[dict[str, Any]]:
+    if session is None:
+        async with _get_session() as session:
+            return await list_pending_applications(limit=limit, session=session)
+    result = await session.execute(
+        select(ClanApplication)
+        .where(ClanApplication.status == "pending")
+        .order_by(ClanApplication.created_at.desc())
+        .limit(limit)
+    )
+    return [_application_to_dict(app) for app in result.scalars().all()]
+
+
+async def get_application_by_id(
+    app_id: int, session: AsyncSession | None = None
+) -> dict[str, Any] | None:
+    if session is None:
+        async with _get_session() as session:
+            return await get_application_by_id(app_id, session=session)
+    result = await session.execute(
+        select(ClanApplication).where(ClanApplication.id == app_id)
+    )
+    app = result.scalar_one_or_none()
+    if not app:
+        return None
+    return _application_to_dict(app)
+
+
+async def set_application_status(
+    app_id: int, status: str, session: AsyncSession | None = None
+) -> bool:
+    now = _utc_now()
+    stmt = (
+        update(ClanApplication)
+        .where(ClanApplication.id == app_id)
+        .values(status=status, updated_at=now)
+    )
+    if session is None:
+        async with _get_session() as session:
+            try:
+                result = await session.execute(stmt)
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+    else:
+        result = await session.execute(stmt)
+    return bool(result.rowcount)
 
 
 async def get_user_link(

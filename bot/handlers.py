@@ -18,6 +18,10 @@ from aiogram.types import (
 from config import (
     ADMIN_TELEGRAM_IDS,
     ADMIN_USER_IDS,
+    APPLY_CHAT_FORWARD_TO,
+    APPLY_COOLDOWN_HOURS,
+    APPLY_ENABLED,
+    APPLY_MAX_PENDING,
     BOT_USERNAME,
     CAPTCHA_EXPIRE_MINUTES,
     CAPTCHA_MAX_ATTEMPTS,
@@ -32,14 +36,20 @@ from config import (
 )
 from cr_api import ClashRoyaleAPIError, get_api_client
 from db import (
+    count_pending_applications,
     create_fresh_captcha_challenge,
+    create_application,
     delete_verified_user,
     delete_user_link,
     delete_user_link_request,
     expire_active_challenges,
+    get_app_state,
+    get_application_by_id,
     get_captcha_question,
     get_current_member_tags,
+    get_last_rejected_time_for_user,
     get_latest_challenge,
+    get_pending_application_for_user,
     get_or_create_pending_challenge,
     get_pending_challenge,
     get_top_absent_members,
@@ -49,17 +59,22 @@ from db import (
     mark_challenge_failed,
     mark_challenge_passed,
     mark_pending_challenges_passed,
+    list_pending_applications,
     get_player_name_for_tag,
     get_challenge_by_id,
     get_user_link,
     get_user_link_request,
     search_player_candidates,
+    set_application_status,
     set_user_verified,
     touch_last_reminded_at,
+    update_application_tag,
     update_challenge_message_id,
     upsert_clan_chat,
     upsert_user_link,
     upsert_user_link_request,
+    delete_app_state,
+    set_app_state,
 )
 from reports import (
     build_clan_info_report,
@@ -106,6 +121,10 @@ def _normalize_tag(tag: str) -> str:
     if not raw.startswith("#"):
         raw = f"#{raw}"
     return raw.upper()
+
+
+def _apply_state_key(user_id: int) -> str:
+    return f"apply_state:{user_id}"
 
 
 def _is_debug_admin(user_id: int) -> bool:
@@ -155,6 +174,40 @@ def _build_user_mention(user: object) -> str:
     if user_id:
         return f"tg://user?id={user_id}"
     return "user"
+
+
+def _format_application_summary(app: dict[str, object]) -> str:
+    tag = app.get("player_tag") or "n/a"
+    user_display = app.get("telegram_username") or app.get("telegram_display_name") or "user"
+    created_at = _format_dt(app.get("created_at"))
+    return f"{app.get('player_name')} | {tag} | {user_display} | {created_at}"
+
+
+def _parse_optional_tag(value: str) -> tuple[bool, str | None]:
+    raw = value.strip()
+    if not raw:
+        return False, None
+    if raw.lower() in ("skip", "no"):
+        return True, None
+    tag = _normalize_tag(raw)
+    body = tag.lstrip("#")
+    if not body or not body.isalnum():
+        return False, None
+    return True, tag
+
+
+async def _notify_application(bot: Bot, text: str) -> None:
+    if APPLY_CHAT_FORWARD_TO == 0:
+        return
+    try:
+        await bot.send_message(
+            APPLY_CHAT_FORWARD_TO,
+            text,
+            parse_mode=None,
+            disable_web_page_preview=True,
+        )
+    except Exception as e:
+        logger.warning("Failed to notify application chat: %s", e)
 
 
 async def send_modlog(bot: Bot, text: str) -> None:
@@ -401,6 +454,90 @@ async def cmd_start(message: Message) -> None:
         )
         return
 
+    if args == "apply":
+        if message.chat.type != ChatType.PRIVATE:
+            await message.answer("Please open bot in DM to apply.", parse_mode=None)
+            return
+        if not APPLY_ENABLED:
+            await message.answer(
+                "Applications are disabled right now.", parse_mode=None
+            )
+            return
+        if message.from_user is None:
+            await message.answer("Unable to identify your account.", parse_mode=None)
+            return
+        clan_tag = _require_clan_tag()
+        if not clan_tag:
+            await message.answer("CLAN_TAG is not configured.", parse_mode=None)
+            return
+
+        pending_app = await get_pending_application_for_user(message.from_user.id)
+        if pending_app:
+            await message.answer(
+                "You already have a pending application:\n"
+                f"{_format_application_summary(pending_app)}",
+                parse_mode=None,
+            )
+            return
+
+        last_rejected = await get_last_rejected_time_for_user(message.from_user.id)
+        if last_rejected and APPLY_COOLDOWN_HOURS > 0:
+            now = datetime.now(timezone.utc)
+            wait_until = last_rejected + timedelta(hours=APPLY_COOLDOWN_HOURS)
+            if wait_until > now:
+                remaining = wait_until - now
+                hours = int(remaining.total_seconds() // 3600)
+                minutes = int((remaining.total_seconds() % 3600) // 60)
+                await message.answer(
+                    f"Please wait {hours}h {minutes}m before applying again.",
+                    parse_mode=None,
+                )
+                return
+
+        pending_count = await count_pending_applications()
+        if pending_count >= APPLY_MAX_PENDING:
+            await message.answer(
+                "Application queue is full right now. Please try later.",
+                parse_mode=None,
+            )
+            return
+
+        try:
+            api_client = await get_api_client()
+            clan_data = await api_client.get_clan(clan_tag)
+            members = clan_data.get("members") if isinstance(clan_data, dict) else None
+            max_members = (
+                clan_data.get("maxMembers", 50) if isinstance(clan_data, dict) else 50
+            )
+            if isinstance(members, int) and members < int(max_members or 50):
+                await message.answer(
+                    f"Clan has free slots now. Join using clan tag {clan_tag}.",
+                    parse_mode=None,
+                )
+                return
+        except ClashRoyaleAPIError as e:
+            logger.warning("Apply clan info fetch failed: %s", e)
+        except Exception as e:
+            logger.warning("Apply clan info fetch failed: %s", e)
+
+        state_key = _apply_state_key(message.from_user.id)
+        state = await get_app_state(state_key)
+        if state and state.get("status") == "awaiting_tag":
+            await message.answer(
+                "Please send your player tag (or 'skip').", parse_mode=None
+            )
+            return
+
+        await set_app_state(
+            state_key,
+            {"status": "awaiting_name", "started_at": datetime.now(timezone.utc).isoformat()},
+        )
+        await message.answer(
+            "Send your in-game nickname exactly as it appears.",
+            parse_mode=None,
+        )
+        return
+
     welcome_text = (
         "Welcome to the Clash Royale Clan Monitor Bot!\n\n"
         "This bot monitors your clan's River Race participation "
@@ -618,6 +755,169 @@ async def cmd_help(message: Message) -> None:
         ]
     )
     await message.answer("\n".join(lines), parse_mode=None)
+
+
+@router.message(Command("apps"))
+async def cmd_apps(message: Message) -> None:
+    if message.from_user is None or not _is_debug_admin(message.from_user.id):
+        await message.answer("Not allowed.", parse_mode=None)
+        return
+    limit = 10
+    if message.text:
+        parts = message.text.split(maxsplit=1)
+        if len(parts) > 1:
+            try:
+                limit = int(parts[1])
+            except ValueError:
+                limit = 10
+    if limit < 1:
+        limit = 1
+    if limit > 50:
+        limit = 50
+
+    apps = await list_pending_applications(limit=limit)
+    if not apps:
+        await message.answer("No pending applications.", parse_mode=None)
+        return
+
+    lines = [f"Pending applications (latest {len(apps)}):"]
+    for app in apps:
+        tag = app.get("player_tag") or "n/a"
+        user = app.get("telegram_username") or app.get("telegram_display_name") or "user"
+        created_at = _format_dt(app.get("created_at"))
+        lines.append(
+            f"{app.get('id')}) {app.get('player_name')} | {tag} | {user} | {created_at}"
+        )
+    await message.answer("\n".join(lines), parse_mode=None)
+
+
+@router.message(Command("app"))
+async def cmd_app(message: Message) -> None:
+    if message.from_user is None or not _is_debug_admin(message.from_user.id):
+        await message.answer("Not allowed.", parse_mode=None)
+        return
+    if not message.text:
+        await message.answer("Usage: /app <id>", parse_mode=None)
+        return
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        await message.answer("Usage: /app <id>", parse_mode=None)
+        return
+    try:
+        app_id = int(parts[1])
+    except ValueError:
+        await message.answer("Invalid application id.", parse_mode=None)
+        return
+    app = await get_application_by_id(app_id)
+    if not app:
+        await message.answer("Application not found.", parse_mode=None)
+        return
+    username = app.get("telegram_username")
+    username_display = f"@{username}" if username else "n/a"
+    lines = [
+        f"Application {app_id}",
+        f"Status: {app.get('status')}",
+        f"Player: {app.get('player_name')}",
+        f"Tag: {app.get('player_tag') or 'n/a'}",
+        (
+            "User: "
+            f"{app.get('telegram_display_name') or 'user'} "
+            f"({username_display}) id={app.get('telegram_user_id')}"
+        ),
+        f"Created: {_format_dt(app.get('created_at'))}",
+        f"Updated: {_format_dt(app.get('updated_at'))}",
+    ]
+    await message.answer("\n".join(lines), parse_mode=None)
+
+
+@router.message(Command("app_approve"))
+async def cmd_app_approve(message: Message) -> None:
+    if message.from_user is None or not _is_debug_admin(message.from_user.id):
+        await message.answer("Not allowed.", parse_mode=None)
+        return
+    if not message.text:
+        await message.answer("Usage: /app_approve <id>", parse_mode=None)
+        return
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        await message.answer("Usage: /app_approve <id>", parse_mode=None)
+        return
+    try:
+        app_id = int(parts[1])
+    except ValueError:
+        await message.answer("Invalid application id.", parse_mode=None)
+        return
+    app = await get_application_by_id(app_id)
+    if not app:
+        await message.answer("Application not found.", parse_mode=None)
+        return
+    if app.get("status") == "approved":
+        await message.answer("Application already approved.", parse_mode=None)
+        return
+    updated = await set_application_status(app_id, "approved")
+    if not updated:
+        await message.answer("Unable to approve application.", parse_mode=None)
+        return
+    await message.answer("Application approved.", parse_mode=None)
+    try:
+        await message.bot.send_message(
+            app["telegram_user_id"],
+            "✅ Your application was approved.",
+            parse_mode=None,
+        )
+    except Exception as e:
+        logger.warning("Failed to notify applicant: %s", e)
+    await _notify_application(
+        message.bot,
+        f"Application {app_id} approved by admin {message.from_user.id}.",
+    )
+
+
+@router.message(Command("app_reject"))
+async def cmd_app_reject(message: Message) -> None:
+    if message.from_user is None or not _is_debug_admin(message.from_user.id):
+        await message.answer("Not allowed.", parse_mode=None)
+        return
+    if not message.text:
+        await message.answer("Usage: /app_reject <id> [reason]", parse_mode=None)
+        return
+    parts = message.text.split(maxsplit=2)
+    if len(parts) < 2:
+        await message.answer("Usage: /app_reject <id> [reason]", parse_mode=None)
+        return
+    try:
+        app_id = int(parts[1])
+    except ValueError:
+        await message.answer("Invalid application id.", parse_mode=None)
+        return
+    reason = parts[2].strip() if len(parts) > 2 else ""
+    app = await get_application_by_id(app_id)
+    if not app:
+        await message.answer("Application not found.", parse_mode=None)
+        return
+    if app.get("status") == "rejected":
+        await message.answer("Application already rejected.", parse_mode=None)
+        return
+    updated = await set_application_status(app_id, "rejected")
+    if not updated:
+        await message.answer("Unable to reject application.", parse_mode=None)
+        return
+    await message.answer("Application rejected.", parse_mode=None)
+    try:
+        text = "Your application was rejected."
+        if reason:
+            text = f"{text}\nReason: {reason}"
+        await message.bot.send_message(
+            app["telegram_user_id"],
+            text,
+            parse_mode=None,
+        )
+    except Exception as e:
+        logger.warning("Failed to notify applicant: %s", e)
+    await _notify_application(
+        message.bot,
+        f"Application {app_id} rejected by admin {message.from_user.id}.",
+    )
 
 
 @moderation_router.chat_member()
@@ -1924,6 +2224,94 @@ async def handle_private_text(message: Message) -> None:
         return
     if message.from_user is None:
         return
+
+    state_key = _apply_state_key(message.from_user.id)
+    apply_state = await get_app_state(state_key)
+    if apply_state:
+        status = apply_state.get("status")
+        if status == "awaiting_name":
+            nickname = message.text.strip()
+            if not nickname:
+                await message.answer(
+                    "Nickname cannot be empty. Send your in-game nickname.",
+                    parse_mode=None,
+                )
+                return
+            if len(nickname) > 32:
+                await message.answer(
+                    "Nickname is too long. Please send a shorter one.",
+                    parse_mode=None,
+                )
+                return
+
+            pending_app = await get_pending_application_for_user(message.from_user.id)
+            if pending_app:
+                await delete_app_state(state_key)
+                await message.answer(
+                    "You already have a pending application:\n"
+                    f"{_format_application_summary(pending_app)}",
+                    parse_mode=None,
+                )
+                return
+
+            app = await create_application(
+                telegram_user_id=message.from_user.id,
+                telegram_username=message.from_user.username,
+                telegram_display_name=message.from_user.full_name,
+                player_name=nickname,
+                player_tag=None,
+            )
+            await set_app_state(
+                state_key,
+                {
+                    "status": "awaiting_tag",
+                    "application_id": app["id"],
+                    "player_name": nickname,
+                },
+            )
+            user_label = message.from_user.full_name
+            if message.from_user.username:
+                user_label = f"{user_label} (@{message.from_user.username})"
+            await _notify_application(
+                message.bot,
+                (
+                    "New application received:\n"
+                    f"ID: {app['id']}\n"
+                    f"Player: {nickname}\n"
+                    f"Tag: n/a\n"
+                    f"User: {user_label} id={message.from_user.id}"
+                ),
+            )
+            await message.answer(
+                "Send your player tag (optional) or type 'skip'.",
+                parse_mode=None,
+            )
+            return
+
+        if status == "awaiting_tag":
+            app_id = apply_state.get("application_id")
+            if not app_id:
+                await delete_app_state(state_key)
+                await message.answer(
+                    "Please restart with /start apply.",
+                    parse_mode=None,
+                )
+                return
+            ok, tag = _parse_optional_tag(message.text)
+            if not ok:
+                await message.answer(
+                    "Invalid tag format. Send like #ABC123 or type 'skip'.",
+                    parse_mode=None,
+                )
+                return
+            if tag:
+                await update_application_tag(app_id, tag)
+            await delete_app_state(state_key)
+            await message.answer(
+                "✅ Application received. Admins will review.",
+                parse_mode=None,
+            )
+            return
 
     request = await get_user_link_request(message.from_user.id)
     if not request:
