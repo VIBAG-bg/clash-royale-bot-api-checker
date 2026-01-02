@@ -64,6 +64,9 @@ LAST_REPORTED_WEEK_KEY = "last_reported_week"
 LAST_PROMOTE_SEASON_KEY = "last_promote_season"
 LAST_WAR_REMINDER_KEY = "last_war_reminder"
 WAR_DAY_START_KEY = "war_day_start"
+WAR_DAY_NUMBER_KEY = "war_day_number"
+WAR_DAY_NUMBER_DATE_KEY = "war_day_number_date"
+WAR_DAY_RESOLVED_BY_KEY = "war_day_resolved_by"
 BOT: Bot | None = None
 
 
@@ -80,6 +83,22 @@ def _coerce_non_negative_int(value: object) -> int | None:
     except (TypeError, ValueError):
         return None
     return number if number >= 0 else None
+
+
+def _parse_cr_timestamp(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+    if not isinstance(value, str):
+        return None
+    for fmt in ("%Y%m%dT%H%M%S.%fZ", "%Y%m%dT%H%M%SZ"):
+        try:
+            parsed = datetime.strptime(value, fmt)
+        except ValueError:
+            continue
+        return parsed.replace(tzinfo=timezone.utc)
+    return None
 
 
 def _parse_season_id(value: object) -> int | None:
@@ -129,42 +148,136 @@ async def _store_war_day_start(
     )
 
 
+async def _store_war_day_number_state(
+    season_id: int,
+    section_index: int,
+    period_type: str,
+    day_number: int,
+    resolved_by: str,
+    war_day_start_time: object,
+    session,
+) -> None:
+    today = datetime.now(timezone.utc).date().isoformat()
+    await set_app_state(
+        WAR_DAY_NUMBER_KEY,
+        {
+            "day_number": day_number,
+            "season_id": season_id,
+            "section_index": section_index,
+            "period_type": period_type,
+            "war_day_start_time": war_day_start_time,
+            "set_at": datetime.now(timezone.utc).isoformat(),
+        },
+        session=session,
+    )
+    await set_app_state(
+        WAR_DAY_NUMBER_DATE_KEY,
+        {"date": today},
+        session=session,
+    )
+    await set_app_state(
+        WAR_DAY_RESOLVED_BY_KEY,
+        {"resolved_by": resolved_by},
+        session=session,
+    )
+
+
 async def _resolve_war_day_number(
     *,
     period_index: object,
+    war_day_start_time: object,
     season_id: int,
     section_index: int,
     period_type: str,
     session,
-) -> int | None:
+) -> tuple[int | None, str | None]:
+    today = datetime.now(timezone.utc).date().isoformat()
+    stored_day = await get_app_state(WAR_DAY_NUMBER_KEY, session=session)
+    stored_date = await get_app_state(WAR_DAY_NUMBER_DATE_KEY, session=session)
+    stored_by = await get_app_state(WAR_DAY_RESOLVED_BY_KEY, session=session)
+    if isinstance(stored_day, dict) and isinstance(stored_date, dict):
+        try:
+            if stored_date.get("date") == today:
+                if (
+                    int(stored_day.get("season_id", 0)) == season_id
+                    and int(stored_day.get("section_index", -1)) == section_index
+                    and str(stored_day.get("period_type", "")).lower() == period_type
+                ):
+                    day_number = int(stored_day.get("day_number", 0))
+                    if 1 <= day_number <= 7:
+                        resolved_by = None
+                        if isinstance(stored_by, dict):
+                            resolved_by = str(stored_by.get("resolved_by") or "")
+                        return day_number, (resolved_by or "stored")
+        except Exception:
+            pass
+
     parsed_index = _coerce_non_negative_int(period_index)
     if parsed_index is not None:
         day_number = parsed_index + 1
-        if 1 <= day_number <= 4:
+        if 1 <= day_number <= 7:
             await _store_war_day_start(
                 season_id, section_index, period_type, day_number, session
             )
-            return day_number
-        return None
+            await _store_war_day_number_state(
+                season_id,
+                section_index,
+                period_type,
+                day_number,
+                "periodIndex",
+                war_day_start_time,
+                session,
+            )
+            return day_number, "periodIndex"
+        return None, None
+
+    start_dt = _parse_cr_timestamp(war_day_start_time)
+    if start_dt is not None:
+        delta_seconds = (datetime.now(timezone.utc) - start_dt).total_seconds()
+        elapsed_days = int(delta_seconds // 86400)
+        day_number = elapsed_days + 1
+        if day_number < 1:
+            day_number = 1
+        if 1 <= day_number <= 7:
+            await _store_war_day_number_state(
+                season_id,
+                section_index,
+                period_type,
+                day_number,
+                "warDayStartTime",
+                war_day_start_time,
+                session,
+            )
+            return day_number, "warDayStartTime"
+        return None, None
 
     state = await get_app_state(WAR_DAY_START_KEY, session=session)
     if not isinstance(state, dict):
-        return None
+        return None, None
     try:
         if int(state.get("season_id", 0)) != season_id:
-            return None
+            return None, None
         if int(state.get("section_index", -1)) != section_index:
-            return None
+            return None, None
         if str(state.get("period_type", "")).lower() != period_type:
-            return None
+            return None, None
         start_date = datetime.fromisoformat(state.get("start_date")).date()
     except Exception:
-        return None
+        return None, None
     delta_days = (datetime.now(timezone.utc).date() - start_date).days
     day_number = delta_days + 1
     if 1 <= day_number <= 4:
-        return day_number
-    return None
+        await _store_war_day_number_state(
+            season_id,
+            section_index,
+            period_type,
+            day_number,
+            "stored",
+            war_day_start_time,
+            session,
+        )
+        return day_number, "stored"
+    return None, None
 
 
 def _parse_active_week_state(
@@ -526,15 +639,27 @@ async def maybe_post_daily_war_reminder(bot: Bot) -> None:
                     "Reminder skipped: unable to resolve week (source=%s)", source
                 )
                 return
-            day_number = await _resolve_war_day_number(
+            day_number, resolved_by = await _resolve_war_day_number(
                 period_index=river_race.get("periodIndex"),
+                war_day_start_time=river_race.get("warDayStartTime"),
                 season_id=resolved_season_id,
                 section_index=resolved_section_index,
                 period_type=period_type_lower,
                 session=session,
             )
             if day_number is None:
-                logger.warning("Reminder skipped: unknown day number")
+                state = await get_app_state(WAR_DAY_START_KEY, session=session)
+                logger.info(
+                    "Reminder skipped: unknown day number (season=%s section=%s period=%s periodIndex=%r warDayStartTime=%r war_day_start=%r resolved_by=%r now=%s)",
+                    resolved_season_id,
+                    resolved_section_index,
+                    period_type_lower,
+                    river_race.get("periodIndex"),
+                    river_race.get("warDayStartTime"),
+                    state,
+                    resolved_by,
+                    datetime.now(timezone.utc).isoformat(),
+                )
                 return
 
             last_state = await get_app_state(LAST_WAR_REMINDER_KEY, session=session)
