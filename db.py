@@ -315,12 +315,107 @@ class ClanApplication(Base):
     player_name: Mapped[str] = mapped_column(Text, nullable=False)
     player_tag: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(16), default="pending", nullable=False)
+    last_notified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    notify_attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    invite_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utc_now, nullable=False
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utc_now, onupdate=_utc_now, nullable=False
     )
+
+
+class ChatSettings(Base):
+    __tablename__ = "chat_settings"
+
+    chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    raid_mode: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    flood_window_seconds: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=10
+    )
+    flood_max_messages: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=6
+    )
+    flood_mute_minutes: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=10
+    )
+    new_user_link_block_hours: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=72
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, onupdate=_utc_now, nullable=False
+    )
+
+
+class ModAction(Base):
+    __tablename__ = "mod_actions"
+    __table_args__ = (
+        Index("ix_mod_actions_chat_created", "chat_id", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    target_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    admin_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    action: Mapped[str] = mapped_column(String(32), nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text)
+    message_id: Mapped[int | None] = mapped_column(BigInteger)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, nullable=False
+    )
+
+
+class UserWarning(Base):
+    __tablename__ = "user_warnings"
+    __table_args__ = (
+        UniqueConstraint("chat_id", "user_id", name="uq_user_warnings_chat_user"),
+    )
+
+    chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_warned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class UserPenalty(Base):
+    __tablename__ = "user_penalties"
+    __table_args__ = (
+        UniqueConstraint(
+            "chat_id",
+            "user_id",
+            "penalty",
+            name="uq_user_penalties_chat_user_penalty",
+        ),
+    )
+
+    chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    penalty: Mapped[str] = mapped_column(String(16), primary_key=True)
+    until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, nullable=False
+    )
+
+
+class RateCounter(Base):
+    __tablename__ = "rate_counters"
+    __table_args__ = (
+        UniqueConstraint(
+            "chat_id",
+            "user_id",
+            name="uq_rate_counters_chat_user",
+        ),
+    )
+
+    chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
 
 class AppState(Base):
@@ -2044,6 +2139,9 @@ def _application_to_dict(app: ClanApplication) -> dict[str, Any]:
         "player_name": app.player_name,
         "player_tag": app.player_tag,
         "status": app.status,
+        "last_notified_at": app.last_notified_at,
+        "notify_attempts": app.notify_attempts,
+        "invite_expires_at": app.invite_expires_at,
         "created_at": app.created_at,
         "updated_at": app.updated_at,
     }
@@ -2222,6 +2320,444 @@ async def set_application_status(
         result = await session.execute(stmt)
     return bool(result.rowcount)
 
+
+def _chat_settings_to_dict(settings: ChatSettings) -> dict[str, Any]:
+    return {
+        "chat_id": settings.chat_id,
+        "raid_mode": settings.raid_mode,
+        "flood_window_seconds": settings.flood_window_seconds,
+        "flood_max_messages": settings.flood_max_messages,
+        "flood_mute_minutes": settings.flood_mute_minutes,
+        "new_user_link_block_hours": settings.new_user_link_block_hours,
+        "updated_at": settings.updated_at,
+    }
+
+
+async def get_chat_settings(
+    chat_id: int,
+    *,
+    defaults: dict[str, int | bool],
+    session: AsyncSession | None = None,
+) -> dict[str, Any]:
+    if session is None:
+        async with _get_session() as session:
+            return await get_chat_settings(
+                chat_id, defaults=defaults, session=session
+            )
+    result = await session.execute(
+        select(ChatSettings).where(ChatSettings.chat_id == chat_id)
+    )
+    settings = result.scalar_one_or_none()
+    if settings:
+        return _chat_settings_to_dict(settings)
+    now = _utc_now()
+    stmt = pg_insert(ChatSettings.__table__).values(
+        chat_id=chat_id,
+        raid_mode=bool(defaults.get("raid_mode", False)),
+        flood_window_seconds=int(defaults.get("flood_window_seconds", 10)),
+        flood_max_messages=int(defaults.get("flood_max_messages", 6)),
+        flood_mute_minutes=int(defaults.get("flood_mute_minutes", 10)),
+        new_user_link_block_hours=int(
+            defaults.get("new_user_link_block_hours", 72)
+        ),
+        updated_at=now,
+    )
+    stmt = stmt.on_conflict_do_nothing(index_elements=["chat_id"])
+    await session.execute(stmt)
+    await session.commit()
+    settings = await session.get(ChatSettings, chat_id)
+    if settings:
+        return _chat_settings_to_dict(settings)
+    return {
+        "chat_id": chat_id,
+        "raid_mode": bool(defaults.get("raid_mode", False)),
+        "flood_window_seconds": int(defaults.get("flood_window_seconds", 10)),
+        "flood_max_messages": int(defaults.get("flood_max_messages", 6)),
+        "flood_mute_minutes": int(defaults.get("flood_mute_minutes", 10)),
+        "new_user_link_block_hours": int(
+            defaults.get("new_user_link_block_hours", 72)
+        ),
+        "updated_at": now,
+    }
+
+
+async def set_chat_raid_mode(
+    chat_id: int, raid_mode: bool, session: AsyncSession | None = None
+) -> None:
+    now = _utc_now()
+    stmt = pg_insert(ChatSettings.__table__).values(
+        chat_id=chat_id,
+        raid_mode=raid_mode,
+        updated_at=now,
+    )
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["chat_id"],
+        set_={"raid_mode": raid_mode, "updated_at": now},
+    )
+    if session is None:
+        async with _get_session() as session:
+            try:
+                await session.execute(stmt)
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+    else:
+        await session.execute(stmt)
+
+
+async def record_rate_counter(
+    chat_id: int,
+    user_id: int,
+    *,
+    window_seconds: int,
+    now: datetime,
+    session: AsyncSession | None = None,
+) -> int:
+    if session is None:
+        async with _get_session() as session:
+            return await record_rate_counter(
+                chat_id,
+                user_id,
+                window_seconds=window_seconds,
+                now=now,
+                session=session,
+            )
+    result = await session.execute(
+        select(RateCounter).where(
+            RateCounter.chat_id == chat_id, RateCounter.user_id == user_id
+        )
+    )
+    counter = result.scalar_one_or_none()
+    if counter is None:
+        stmt = pg_insert(RateCounter.__table__).values(
+            chat_id=chat_id,
+            user_id=user_id,
+            window_start=now,
+            count=1,
+        )
+        stmt = stmt.on_conflict_do_nothing(
+            index_elements=["chat_id", "user_id"]
+        )
+        await session.execute(stmt)
+        await session.commit()
+        return 1
+    elapsed = (now - counter.window_start).total_seconds()
+    if elapsed > window_seconds:
+        counter.window_start = now
+        counter.count = 1
+    else:
+        counter.count += 1
+    await session.commit()
+    return int(counter.count)
+
+
+async def increment_user_warning(
+    chat_id: int,
+    user_id: int,
+    *,
+    now: datetime,
+    session: AsyncSession | None = None,
+) -> int:
+    stmt = pg_insert(UserWarning.__table__).values(
+        chat_id=chat_id,
+        user_id=user_id,
+        count=1,
+        last_warned_at=now,
+    )
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["chat_id", "user_id"],
+        set_={
+            "count": UserWarning.__table__.c.count + 1,
+            "last_warned_at": now,
+        },
+    ).returning(UserWarning.count)
+    if session is None:
+        async with _get_session() as session:
+            try:
+                result = await session.execute(stmt)
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+    else:
+        result = await session.execute(stmt)
+    return int(result.scalar_one())
+
+
+async def get_warning_count(
+    chat_id: int, user_id: int, session: AsyncSession | None = None
+) -> int:
+    if session is None:
+        async with _get_session() as session:
+            return await get_warning_count(chat_id, user_id, session=session)
+    result = await session.execute(
+        select(UserWarning.count).where(
+            UserWarning.chat_id == chat_id, UserWarning.user_id == user_id
+        )
+    )
+    value = result.scalar_one_or_none()
+    return int(value or 0)
+
+
+async def get_warning_info(
+    chat_id: int, user_id: int, session: AsyncSession | None = None
+) -> dict[str, Any] | None:
+    if session is None:
+        async with _get_session() as session:
+            return await get_warning_info(chat_id, user_id, session=session)
+    result = await session.execute(
+        select(UserWarning).where(
+            UserWarning.chat_id == chat_id, UserWarning.user_id == user_id
+        )
+    )
+    warning = result.scalar_one_or_none()
+    if not warning:
+        return None
+    return {
+        "count": warning.count,
+        "last_warned_at": warning.last_warned_at,
+    }
+
+
+async def set_user_penalty(
+    chat_id: int,
+    user_id: int,
+    penalty: str,
+    until: datetime | None,
+    session: AsyncSession | None = None,
+) -> None:
+    now = _utc_now()
+    stmt = pg_insert(UserPenalty.__table__).values(
+        chat_id=chat_id,
+        user_id=user_id,
+        penalty=penalty,
+        until=until,
+        created_at=now,
+    )
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["chat_id", "user_id", "penalty"],
+        set_={"until": until, "created_at": now},
+    )
+    if session is None:
+        async with _get_session() as session:
+            try:
+                await session.execute(stmt)
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+    else:
+        await session.execute(stmt)
+
+
+async def clear_user_penalty(
+    chat_id: int, user_id: int, penalty: str, session: AsyncSession | None = None
+) -> None:
+    stmt = delete(UserPenalty).where(
+        UserPenalty.chat_id == chat_id,
+        UserPenalty.user_id == user_id,
+        UserPenalty.penalty == penalty,
+    )
+    if session is None:
+        async with _get_session() as session:
+            try:
+                await session.execute(stmt)
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+    else:
+        await session.execute(stmt)
+
+
+async def log_mod_action(
+    *,
+    chat_id: int,
+    target_user_id: int,
+    admin_user_id: int,
+    action: str,
+    reason: str | None = None,
+    message_id: int | None = None,
+    session: AsyncSession | None = None,
+) -> None:
+    now = _utc_now()
+    stmt = pg_insert(ModAction.__table__).values(
+        chat_id=chat_id,
+        target_user_id=target_user_id,
+        admin_user_id=admin_user_id,
+        action=action,
+        reason=reason,
+        message_id=message_id,
+        created_at=now,
+    )
+    if session is None:
+        async with _get_session() as session:
+            try:
+                await session.execute(stmt)
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+    else:
+        await session.execute(stmt)
+
+
+async def list_mod_actions(
+    chat_id: int, limit: int = 20, session: AsyncSession | None = None
+) -> list[dict[str, Any]]:
+    if session is None:
+        async with _get_session() as session:
+            return await list_mod_actions(chat_id, limit=limit, session=session)
+    result = await session.execute(
+        select(ModAction)
+        .where(ModAction.chat_id == chat_id)
+        .order_by(ModAction.created_at.desc())
+        .limit(limit)
+    )
+    actions = []
+    for action in result.scalars().all():
+        actions.append(
+            {
+                "id": action.id,
+                "chat_id": action.chat_id,
+                "target_user_id": action.target_user_id,
+                "admin_user_id": action.admin_user_id,
+                "action": action.action,
+                "reason": action.reason,
+                "message_id": action.message_id,
+                "created_at": action.created_at,
+            }
+        )
+    return actions
+
+
+async def get_first_seen_time(
+    chat_id: int, user_id: int, session: AsyncSession | None = None
+) -> datetime | None:
+    if session is None:
+        async with _get_session() as session:
+            return await get_first_seen_time(chat_id, user_id, session=session)
+    result = await session.execute(
+        select(func.min(CaptchaChallenge.created_at)).where(
+            CaptchaChallenge.chat_id == chat_id,
+            CaptchaChallenge.user_id == user_id,
+        )
+    )
+    return result.scalar_one()
+
+
+async def list_invite_candidates(
+    *,
+    max_attempts: int,
+    limit: int,
+    session: AsyncSession | None = None,
+) -> list[dict[str, Any]]:
+    if session is None:
+        async with _get_session() as session:
+            return await list_invite_candidates(
+                max_attempts=max_attempts, limit=limit, session=session
+            )
+    result = await session.execute(
+        select(ClanApplication)
+        .where(
+            ClanApplication.status == "pending",
+            ClanApplication.player_tag.is_not(None),
+            ClanApplication.notify_attempts < max_attempts,
+        )
+        .order_by(ClanApplication.created_at.asc())
+        .limit(limit)
+    )
+    return [_application_to_dict(app) for app in result.scalars().all()]
+
+
+async def list_invited_applications(
+    session: AsyncSession | None = None,
+) -> list[dict[str, Any]]:
+    if session is None:
+        async with _get_session() as session:
+            return await list_invited_applications(session=session)
+    result = await session.execute(
+        select(ClanApplication)
+        .where(ClanApplication.status == "invited")
+        .order_by(ClanApplication.updated_at.desc())
+    )
+    return [_application_to_dict(app) for app in result.scalars().all()]
+
+
+async def mark_application_invited(
+    app_id: int,
+    *,
+    now: datetime,
+    invite_expires_at: datetime,
+    session: AsyncSession | None = None,
+) -> None:
+    stmt = (
+        update(ClanApplication)
+        .where(ClanApplication.id == app_id)
+        .values(
+            status="invited",
+            last_notified_at=now,
+            notify_attempts=ClanApplication.notify_attempts + 1,
+            invite_expires_at=invite_expires_at,
+            updated_at=now,
+        )
+    )
+    if session is None:
+        async with _get_session() as session:
+            try:
+                await session.execute(stmt)
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+    else:
+        await session.execute(stmt)
+
+
+async def mark_application_joined(
+    app_id: int, *, now: datetime, session: AsyncSession | None = None
+) -> None:
+    stmt = (
+        update(ClanApplication)
+        .where(ClanApplication.id == app_id)
+        .values(status="joined", updated_at=now)
+    )
+    if session is None:
+        async with _get_session() as session:
+            try:
+                await session.execute(stmt)
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+    else:
+        await session.execute(stmt)
+
+
+async def reset_expired_invite(
+    app_id: int,
+    *,
+    now: datetime,
+    exhausted: bool,
+    session: AsyncSession | None = None,
+) -> None:
+    status = "expired" if exhausted else "pending"
+    stmt = (
+        update(ClanApplication)
+        .where(ClanApplication.id == app_id)
+        .values(status=status, invite_expires_at=None, updated_at=now)
+    )
+    if session is None:
+        async with _get_session() as session:
+            try:
+                await session.execute(stmt)
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+    else:
+        await session.execute(stmt)
 
 async def get_user_link(
     telegram_user_id: int, session: AsyncSession | None = None

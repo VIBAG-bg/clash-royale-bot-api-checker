@@ -11,9 +11,15 @@ from aiogram.enums import ParseMode
 
 from bot import router, moderation_router
 from config import (
+    AUTO_INVITE_BATCH_SIZE,
+    AUTO_INVITE_CHECK_INTERVAL_MINUTES,
+    AUTO_INVITE_ENABLED,
+    AUTO_INVITE_INVITE_MINUTES,
+    AUTO_INVITE_MAX_ATTEMPTS,
     CLAN_TAG,
     CR_API_TOKEN,
     FETCH_INTERVAL_SECONDS,
+    MODLOG_CHAT_ID,
     REMINDER_COLOSSEUM_BANNER_URL,
     REMINDER_COLOSSEUM_BANNER_URL_DAY4,
     REMINDER_ENABLED,
@@ -35,6 +41,12 @@ from db import (
     get_first_snapshot_date_for_week,
     get_river_race_state_for_week,
     get_session,
+    list_invite_candidates,
+    list_invited_applications,
+    log_mod_action,
+    mark_application_invited,
+    mark_application_joined,
+    reset_expired_invite,
     try_mark_reminder_posted,
     set_colosseum_index_for_season,
     set_app_state,
@@ -70,6 +82,20 @@ WAR_DAY_NUMBER_KEY = "war_day_number"
 WAR_DAY_NUMBER_DATE_KEY = "war_day_number_date"
 WAR_DAY_RESOLVED_BY_KEY = "war_day_resolved_by"
 BOT: Bot | None = None
+
+
+async def _send_modlog(bot: Bot, text: str) -> None:
+    if MODLOG_CHAT_ID == 0:
+        return
+    try:
+        await bot.send_message(
+            MODLOG_CHAT_ID,
+            text,
+            parse_mode=None,
+            disable_web_page_preview=True,
+        )
+    except Exception as e:
+        logger.warning("Failed to send modlog: %s", e)
 
 
 def _ensure_required_config() -> str:
@@ -901,6 +927,136 @@ async def daily_reminder_task(bot: Bot) -> None:
             await asyncio.sleep(60)
 
 
+async def maybe_auto_invite(bot: Bot) -> None:
+    if not AUTO_INVITE_ENABLED:
+        return
+    if not CLAN_TAG:
+        return
+    try:
+        api_client = await get_api_client()
+        members = await api_client.get_clan_members(CLAN_TAG)
+    except ClashRoyaleAPIError as e:
+        logger.info("Auto-invite skipped: CR API error: %s", e)
+        return
+    except Exception as e:
+        logger.info("Auto-invite skipped: API error: %s", e)
+        return
+
+    if not isinstance(members, list):
+        return
+    member_tags = {
+        _normalize_clan_tag(member.get("tag", ""))
+        for member in members
+        if isinstance(member, dict) and member.get("tag")
+    }
+    now = datetime.now(timezone.utc)
+
+    invited = await list_invited_applications()
+    for app in invited:
+        tag = app.get("player_tag")
+        if not tag:
+            continue
+        if _normalize_clan_tag(tag) in member_tags:
+            await mark_application_joined(app["id"], now=now)
+            await log_mod_action(
+                chat_id=0,
+                target_user_id=int(app["telegram_user_id"]),
+                admin_user_id=0,
+                action="joined",
+                reason="auto_invite",
+            )
+            await _send_modlog(
+                bot,
+                f"[AUTO] joined: app={app['id']} user={app['telegram_user_id']}",
+            )
+            continue
+        invite_expires_at = app.get("invite_expires_at")
+        if isinstance(invite_expires_at, datetime):
+            if invite_expires_at.tzinfo is None:
+                invite_expires_at = invite_expires_at.replace(tzinfo=timezone.utc)
+            if invite_expires_at < now:
+                exhausted = int(app.get("notify_attempts") or 0) >= AUTO_INVITE_MAX_ATTEMPTS
+                await reset_expired_invite(
+                    app["id"], now=now, exhausted=exhausted
+                )
+
+    if len(members) >= 50:
+        return
+
+    candidates = await list_invite_candidates(
+        max_attempts=AUTO_INVITE_MAX_ATTEMPTS,
+        limit=AUTO_INVITE_BATCH_SIZE,
+    )
+    for app in candidates:
+        tag = app.get("player_tag")
+        if not tag:
+            continue
+        if _normalize_clan_tag(tag) in member_tags:
+            await mark_application_joined(app["id"], now=now)
+            await log_mod_action(
+                chat_id=0,
+                target_user_id=int(app["telegram_user_id"]),
+                admin_user_id=0,
+                action="joined",
+                reason="auto_invite",
+            )
+            await _send_modlog(
+                bot,
+                f"[AUTO] joined: app={app['id']} user={app['telegram_user_id']}",
+            )
+            continue
+
+        invite_expires_at = now + timedelta(minutes=AUTO_INVITE_INVITE_MINUTES)
+        text = (
+            "🎉 A slot is free in Black Poison!\n"
+            f"Join now: clan tag #{_normalize_clan_tag(CLAN_TAG)}\n"
+            f"⏳ You have ~{AUTO_INVITE_INVITE_MINUTES} minutes."
+        )
+        try:
+            await bot.send_message(
+                int(app["telegram_user_id"]),
+                text,
+                parse_mode=None,
+            )
+        except Exception as e:
+            logger.info("Auto-invite DM failed for %s: %s", app["id"], e)
+            continue
+
+        await mark_application_invited(
+            app["id"], now=now, invite_expires_at=invite_expires_at
+        )
+        await log_mod_action(
+            chat_id=0,
+            target_user_id=int(app["telegram_user_id"]),
+            admin_user_id=0,
+            action="auto_invite",
+            reason=f"invite_until={invite_expires_at.isoformat()}",
+        )
+        await _send_modlog(
+            bot,
+            f"[AUTO] invite sent: app={app['id']} user={app['telegram_user_id']}",
+        )
+
+
+async def auto_invite_task(bot: Bot) -> None:
+    interval_seconds = AUTO_INVITE_CHECK_INTERVAL_MINUTES * 60
+    if interval_seconds <= 0:
+        return
+    logger.info(
+        "Auto-invite task started (interval %sm)",
+        AUTO_INVITE_CHECK_INTERVAL_MINUTES,
+    )
+    while True:
+        try:
+            await maybe_auto_invite(bot)
+            await asyncio.sleep(interval_seconds)
+        except asyncio.CancelledError:
+            logger.info("Auto-invite task cancelled")
+            break
+        except Exception as e:
+            logger.error("Error in auto-invite task: %s", e, exc_info=True)
+
+
 @asynccontextmanager
 async def lifespan(dispatcher: Dispatcher):
     """
@@ -921,8 +1077,11 @@ async def lifespan(dispatcher: Dispatcher):
     # Start background task
     fetch_task = asyncio.create_task(background_fetch_task())
     reminder_task = None
+    invite_task = None
     if REMINDER_ENABLED:
         reminder_task = asyncio.create_task(daily_reminder_task(BOT))
+    if AUTO_INVITE_ENABLED:
+        invite_task = asyncio.create_task(auto_invite_task(BOT))
     logger.info("Background fetch task started")
     
     yield
@@ -934,6 +1093,8 @@ async def lifespan(dispatcher: Dispatcher):
     fetch_task.cancel()
     if reminder_task is not None:
         reminder_task.cancel()
+    if invite_task is not None:
+        invite_task.cancel()
     try:
         await fetch_task
     except asyncio.CancelledError:
@@ -941,6 +1102,11 @@ async def lifespan(dispatcher: Dispatcher):
     if reminder_task is not None:
         try:
             await reminder_task
+        except asyncio.CancelledError:
+            pass
+    if invite_task is not None:
+        try:
+            await invite_task
         except asyncio.CancelledError:
             pass
     

@@ -4,7 +4,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot, F, Router
-from aiogram.enums import ChatMemberStatus, ChatType
+from aiogram.enums import ChatMemberStatus, ChatType, MessageEntityType
 from aiogram.filters import Command
 from aiogram.types import (
     CallbackQuery,
@@ -28,10 +28,18 @@ from config import (
     CAPTCHA_REMIND_COOLDOWN_SECONDS,
     CLAN_TAG,
     ENABLE_CAPTCHA,
+    FLOOD_MAX_MESSAGES,
+    FLOOD_MUTE_MINUTES,
+    FLOOD_WINDOW_SECONDS,
     INACTIVE_LAST_SEEN_LIMIT,
     LAST_SEEN_RED_DAYS,
     LAST_SEEN_YELLOW_DAYS,
+    MODERATION_ENABLED,
     MODLOG_CHAT_ID,
+    NEW_USER_LINK_BLOCK_HOURS,
+    RAID_FLOOD_MAX_MESSAGES,
+    RAID_LINK_BLOCK_ALL,
+    RAID_MODE_DEFAULT,
     WELCOME_RULES_MESSAGE_LINK,
 )
 from cr_api import ClashRoyaleAPIError, get_api_client
@@ -43,18 +51,24 @@ from db import (
     delete_user_link,
     delete_user_link_request,
     expire_active_challenges,
+    get_chat_settings,
     get_app_state,
     get_application_by_id,
     get_captcha_question,
     get_current_member_tags,
+    get_first_seen_time,
     get_last_rejected_time_for_user,
     get_latest_challenge,
     get_pending_application_for_user,
     get_or_create_pending_challenge,
     get_pending_challenge,
     get_top_absent_members,
+    get_warning_info,
     increment_challenge_attempts,
+    record_rate_counter,
+    increment_user_warning,
     is_user_verified,
+    log_mod_action,
     mark_challenge_expired,
     mark_challenge_failed,
     mark_challenge_passed,
@@ -64,8 +78,12 @@ from db import (
     get_challenge_by_id,
     get_user_link,
     get_user_link_request,
+    list_mod_actions,
     search_player_candidates,
+    set_chat_raid_mode,
     set_application_status,
+    set_user_penalty,
+    clear_user_penalty,
     set_user_verified,
     touch_last_reminded_at,
     update_application_tag,
@@ -214,6 +232,94 @@ async def _notify_application(bot: Bot, text: str) -> None:
     except Exception as e:
         logger.warning("Failed to notify application chat: %s", e)
 
+
+def _message_has_link(message: Message) -> bool:
+    entities = []
+    if message.entities:
+        entities.extend(message.entities)
+    if message.caption_entities:
+        entities.extend(message.caption_entities)
+    for entity in entities:
+        if entity.type in (MessageEntityType.URL, MessageEntityType.TEXT_LINK):
+            return True
+    text = message.text or message.caption or ""
+    if not text:
+        return False
+    lowered = text.lower()
+    if "http" in lowered or "https" in lowered or "t.me/" in lowered:
+        return True
+    for token in ("bit.ly", "tinyurl.com", "t.co", "goo.gl", "discord.gg"):
+        if token in lowered:
+            return True
+    return False
+
+
+async def _is_recent_user(
+    chat_id: int, user_id: int, *, now: datetime, hours: int
+) -> bool:
+    if hours <= 0:
+        return False
+    first_seen = await get_first_seen_time(chat_id, user_id)
+    if not first_seen:
+        return True
+    if first_seen.tzinfo is None:
+        first_seen = first_seen.replace(tzinfo=timezone.utc)
+    return now - first_seen < timedelta(hours=hours)
+
+
+async def _delete_message_safe(message: Message) -> None:
+    try:
+        await message.delete()
+    except Exception as e:
+        logger.warning("Failed to delete message: %s", e, exc_info=True)
+        await send_modlog(
+            message.bot,
+            f"[MOD] ERROR: delete failed: chat={message.chat.id} "
+            f"user={message.from_user.id if message.from_user else 'n/a'} "
+            f"msg_id={message.message_id} err={e}",
+        )
+
+
+async def _mute_user(
+    message: Message, user_id: int, *, minutes: int, reason: str
+) -> None:
+    until = datetime.now(timezone.utc) + timedelta(minutes=minutes)
+    try:
+        await message.bot.restrict_chat_member(
+            message.chat.id,
+            user_id,
+            permissions=ChatPermissions(
+                can_send_messages=False,
+                can_send_media_messages=False,
+                can_send_other_messages=False,
+                can_add_web_page_previews=False,
+            ),
+            until_date=until,
+        )
+    except Exception as e:
+        logger.warning("Failed to mute user: %s", e, exc_info=True)
+        await send_modlog(
+            message.bot,
+            f"[MOD] ERROR: mute failed: chat={message.chat.id} "
+            f"user={user_id} err={e}",
+        )
+        return
+    await set_user_penalty(
+        message.chat.id, user_id, "mute", until=until
+    )
+    await log_mod_action(
+        chat_id=message.chat.id,
+        target_user_id=user_id,
+        admin_user_id=0,
+        action="mute",
+        reason=reason,
+        message_id=message.message_id,
+    )
+    await send_modlog(
+        message.bot,
+        f"[MOD] mute: chat={message.chat.id} user={user_id} "
+        f"until={until.isoformat()} reason={reason}",
+    )
 
 async def send_modlog(bot: Bot, text: str) -> None:
     if MODLOG_CHAT_ID == 0:
@@ -579,188 +685,83 @@ async def cmd_help(message: Message) -> None:
             except Exception:
                 is_admin = False
 
-    general_commands: list[dict[str, object]] = [
-        {
-            "name": "/help",
-            "what": "Show this help message.",
-            "where": "Group + DM",
-            "who": "Everyone",
-            "usage": ["/help"],
-            "args": "none",
-            "notes": "Shows admin commands only to chat admins.",
-        },
-        {
-            "name": "/start",
-            "what": "Show the welcome message and command list.",
-            "where": "Group + DM",
-            "who": "Everyone",
-            "usage": ["/start", "/start link"],
-            "args": "Optional: link (starts account linking in DM). Example: /start link",
-            "notes": "In groups, linking will ask you to open the bot in private.",
-        },
-        {
-            "name": "/ping",
-            "what": "Check bot responsiveness and API status.",
-            "where": "Group + DM",
-            "who": "Everyone",
-            "usage": ["/ping"],
-            "args": "none",
-            "notes": "Uses the Clash Royale API; may show errors if API is down.",
-        },
-        {
-            "name": "/war",
-            "what": "Weekly war report (top active/inactive).",
-            "where": "Group + DM",
-            "who": "Everyone",
-            "usage": ["/war"],
-            "args": "none",
-            "notes": "Uses the last completed week for the configured clan.",
-        },
-        {
-            "name": "/war8",
-            "what": "Rolling report for last 8 completed weeks.",
-            "where": "Group + DM",
-            "who": "Everyone",
-            "usage": ["/war8"],
-            "args": "none",
-            "notes": "Current members only (latest snapshot).",
-        },
-        {
-            "name": "/war_all",
-            "what": "Send weekly, rolling, and kick shortlist reports together.",
-            "where": "Group + DM",
-            "who": "Everyone",
-            "usage": ["/war_all"],
-            "args": "none",
-            "notes": "Sends three messages in sequence.",
-        },
-        {
-            "name": "/current_war",
-            "what": "Current war snapshot from database.",
-            "where": "Group + DM",
-            "who": "Everyone",
-            "usage": ["/current_war"],
-            "args": "none",
-            "notes": "Data is based on latest DB snapshots (not live UI).",
-        },
-        {
-            "name": "/my_activity",
-            "what": "Show your own war activity report.",
-            "where": "Group + DM",
-            "who": "Everyone",
-            "usage": ["/my_activity", "/my_activity <nickname>"],
-            "args": "Optional nickname for self-linking in DM. Example: /my_activity Arcaneum",
-            "notes": "If not linked, the bot guides you through linking.",
-        },
-        {
-            "name": "/activity",
-            "what": "Show a player's activity by nickname, @username, or reply.",
-            "where": "Group + DM",
-            "who": "Everyone",
-            "usage": [
-                "/activity <nickname>",
-                "/activity @username",
-                "Reply + /activity",
-            ],
-            "args": "Nickname or @username; reply to a user to use their linked account.",
-            "notes": "If multiple matches, you will be asked to be more specific.",
-        },
-        {
-            "name": "/promote_candidates",
-            "what": "Promotion recommendations (elder/co-leader).",
-            "where": "Group + DM",
-            "who": "Everyone",
-            "usage": ["/promote_candidates"],
-            "args": "none",
-            "notes": "Based on last 8 weeks and current member snapshot.",
-        },
-        {
-            "name": "/donations",
-            "what": "Donation leaderboards for current and recent weeks.",
-            "where": "Group + DM",
-            "who": "Everyone",
-            "usage": ["/donations"],
-            "args": "none",
-            "notes": "Includes only current members from the latest snapshot.",
-        },
-        {
-            "name": "/list_for_kick",
-            "what": "Kick shortlist based on last 8 weeks.",
-            "where": "Group + DM",
-            "who": "Everyone",
-            "usage": ["/list_for_kick"],
-            "args": "none",
-            "notes": "Applies filters and warnings (revived, donations, last seen).",
-        },
-        {
-            "name": "/inactive",
-            "what": "List most absent members by last seen time.",
-            "where": "Group + DM",
-            "who": "Everyone",
-            "usage": ["/inactive"],
-            "args": "none",
-            "notes": "Current members only, based on latest snapshot.",
-        },
+    general_lines = [
+        "/help - show this help",
+        "/start - welcome (/start link, /start apply)",
+        "/ping - health check",
+        "/war - weekly report",
+        "/war8 - last 8 weeks report",
+        "/war_all - war + war8 + kick list",
+        "/current_war - current week snapshot",
+        "/my_activity - your activity",
+        "/activity - activity by name/@/reply",
+        "/donations - donations leaderboard",
+        "/list_for_kick - kick shortlist",
+        "/inactive - last seen list",
+        "/promote_candidates - promotions",
+        "/info - clan info",
     ]
 
-    admin_commands: list[dict[str, object]] = [
-        {
-            "name": "/bind",
-            "what": "Bind this chat for scheduled war reports.",
-            "where": "Group only",
-            "who": "Chat admins/creators",
-            "usage": ["/bind"],
-            "args": "none",
-            "notes": "Binds this chat to the configured clan tag.",
-        },
-        {
-            "name": "/admin_link_name",
-            "what": "Force-link a user to an in-game nickname.",
-            "where": "Group + DM",
-            "who": "Chat admins/creators or ADMIN_USER_IDS",
-            "usage": ["/admin_link_name <nickname> (reply required)"],
-            "args": "Nickname (exact or partial). Example: reply + /admin_link_name Arcaneum",
-            "notes": "Must be used as a reply to the target user.",
-        },
-        {
-            "name": "/unlink",
-            "what": "Remove a user's linked account.",
-            "where": "Group + DM",
-            "who": "Chat admins/creators or ADMIN_USER_IDS",
-            "usage": ["/unlink (reply required)"],
-            "args": "none",
-            "notes": "Must be used as a reply to the target user.",
-        },
+    admin_lines = [
+        "/bind - bind this chat",
+        "/admin_link_name - link user (reply)",
+        "/unlink - unlink user (reply)",
+        "/apps - list applications",
+        "/app <id> - application details",
+        "/app_approve <id> - approve",
+        "/app_reject <id> [reason] - reject",
+        "/app_notify <id> - notify slot",
+        "/captcha_send - send captcha (reply)",
+        "/captcha_status - captcha status (reply)",
+        "/captcha_reset - reset captcha (reply)",
+        "/captcha_verify - verify user (reply)",
+        "/captcha_unverify - remove verify (reply)",
+        "/riverside [day] - test war reminder",
+        "/coliseum [day] - test colosseum reminder",
+        "/modlog_test - test modlog",
+    ]
+
+    moderation_lines = [
+        "/warn - warn user (reply)",
+        "/mute <min> - mute user (reply)",
+        "/unmute - unmute user (reply)",
+        "/ban - ban user (reply)",
+        "/unban <id> - unban by id",
+        "/purge <N> - delete last N messages",
+        "/raid_on - enable raid mode",
+        "/raid_off - disable raid mode",
+        "/modlog [N] - recent mod actions",
     ]
 
     lines = [
         HEADER_LINE,
-        "🤖 Black Poison Bot — Help",
+        "?? Black Poison Bot - Help",
         HEADER_LINE,
-        "📌 Quick command list (plain text).",
-        "",
-        "🧩 GENERAL COMMANDS (everyone)",
+        "?? GENERAL COMMANDS",
         DIVIDER_LINE,
-        *_format_help_commands(general_commands),
+        *general_lines,
     ]
     if is_admin:
         lines.extend(
             [
                 "",
-                "🛡 ADMIN COMMANDS (chat admins only)",
+                "?? ADMIN COMMANDS",
                 DIVIDER_LINE,
-                *_format_help_commands(admin_commands),
+                *admin_lines,
+                "",
+                "?? MODERATION COMMANDS",
+                DIVIDER_LINE,
+                *moderation_lines,
             ]
         )
     lines.extend(
         [
             HEADER_LINE,
-            "ℹ️ Tip: Use /my_activity in DM to link your account.",
+            "?? Tip: Use /my_activity in DM to link your account.",
             HEADER_LINE,
         ]
     )
     await message.answer("\n".join(lines), parse_mode=None)
-
 
 @router.message(Command("apps"))
 async def cmd_apps(message: Message) -> None:
@@ -1019,6 +1020,447 @@ async def cmd_app_notify(message: Message) -> None:
     await message.answer("✅ Applicant notified successfully.", parse_mode=None)
 
 
+@router.message(Command("warn"))
+async def cmd_warn(message: Message) -> None:
+    if message.from_user is None:
+        await message.answer("Unable to verify permissions.", parse_mode=None)
+        return
+    if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await message.answer("Use this command in a group.", parse_mode=None)
+        return
+    if message.reply_to_message is None or message.reply_to_message.from_user is None:
+        await message.answer("Reply to a user's message.", parse_mode=None)
+        return
+    try:
+        if not await _is_admin_user(message, message.from_user.id):
+            await message.answer("Not allowed.", parse_mode=None)
+            return
+    except Exception as e:
+        logger.error("Failed to check admin status: %s", e, exc_info=True)
+        await message.answer("Unable to verify admin status.", parse_mode=None)
+        return
+
+    target = message.reply_to_message.from_user
+    reason = ""
+    if message.text:
+        parts = message.text.split(maxsplit=1)
+        if len(parts) > 1:
+            reason = parts[1].strip()
+
+    now = datetime.now(timezone.utc)
+    warn_count = await increment_user_warning(
+        message.chat.id, target.id, now=now
+    )
+    await log_mod_action(
+        chat_id=message.chat.id,
+        target_user_id=target.id,
+        admin_user_id=message.from_user.id,
+        action="warn",
+        reason=reason or None,
+        message_id=message.message_id,
+    )
+    await send_modlog(
+        message.bot,
+        f"[MOD] warn: chat={message.chat.id} user={target.id} "
+        f"count={warn_count} reason={reason or 'n/a'}",
+    )
+    await message.answer(
+        f"Warning issued. Total warnings: {warn_count}.", parse_mode=None
+    )
+
+
+@router.message(Command("mute"))
+async def cmd_mute(message: Message) -> None:
+    if message.from_user is None:
+        await message.answer("Unable to verify permissions.", parse_mode=None)
+        return
+    if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await message.answer("Use this command in a group.", parse_mode=None)
+        return
+    if message.reply_to_message is None or message.reply_to_message.from_user is None:
+        await message.answer("Reply to a user's message.", parse_mode=None)
+        return
+    try:
+        if not await _is_admin_user(message, message.from_user.id):
+            await message.answer("Not allowed.", parse_mode=None)
+            return
+    except Exception as e:
+        logger.error("Failed to check admin status: %s", e, exc_info=True)
+        await message.answer("Unable to verify admin status.", parse_mode=None)
+        return
+
+    parts = (message.text or "").split(maxsplit=2)
+    if len(parts) < 2:
+        await message.answer("Usage: /mute <minutes> [reason]", parse_mode=None)
+        return
+    try:
+        minutes = int(parts[1])
+    except ValueError:
+        await message.answer("Invalid minutes.", parse_mode=None)
+        return
+    if minutes <= 0:
+        await message.answer("Minutes must be positive.", parse_mode=None)
+        return
+    reason = parts[2].strip() if len(parts) > 2 else ""
+    target = message.reply_to_message.from_user
+
+    until = datetime.now(timezone.utc) + timedelta(minutes=minutes)
+    try:
+        await message.bot.restrict_chat_member(
+            message.chat.id,
+            target.id,
+            permissions=ChatPermissions(
+                can_send_messages=False,
+                can_send_media_messages=False,
+                can_send_other_messages=False,
+                can_add_web_page_previews=False,
+            ),
+            until_date=until,
+        )
+    except Exception as e:
+        logger.warning("Failed to mute user: %s", e, exc_info=True)
+        await message.answer("Failed to mute user.", parse_mode=None)
+        return
+
+    await set_user_penalty(message.chat.id, target.id, "mute", until=until)
+    await log_mod_action(
+        chat_id=message.chat.id,
+        target_user_id=target.id,
+        admin_user_id=message.from_user.id,
+        action="mute",
+        reason=reason or None,
+        message_id=message.message_id,
+    )
+    await send_modlog(
+        message.bot,
+        f"[MOD] mute: chat={message.chat.id} user={target.id} "
+        f"until={until.isoformat()} reason={reason or 'n/a'}",
+    )
+    await message.answer("User muted.", parse_mode=None)
+
+
+@router.message(Command("unmute"))
+async def cmd_unmute(message: Message) -> None:
+    if message.from_user is None:
+        await message.answer("Unable to verify permissions.", parse_mode=None)
+        return
+    if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await message.answer("Use this command in a group.", parse_mode=None)
+        return
+    if message.reply_to_message is None or message.reply_to_message.from_user is None:
+        await message.answer("Reply to a user's message.", parse_mode=None)
+        return
+    try:
+        if not await _is_admin_user(message, message.from_user.id):
+            await message.answer("Not allowed.", parse_mode=None)
+            return
+    except Exception as e:
+        logger.error("Failed to check admin status: %s", e, exc_info=True)
+        await message.answer("Unable to verify admin status.", parse_mode=None)
+        return
+
+    target = message.reply_to_message.from_user
+    try:
+        await message.bot.restrict_chat_member(
+            message.chat.id,
+            target.id,
+            permissions=ChatPermissions(
+                can_send_messages=True,
+                can_send_media_messages=True,
+                can_send_other_messages=True,
+                can_add_web_page_previews=True,
+            ),
+        )
+    except Exception as e:
+        logger.warning("Failed to unmute user: %s", e, exc_info=True)
+        await message.answer("Failed to unmute user.", parse_mode=None)
+        return
+
+    await clear_user_penalty(message.chat.id, target.id, "mute")
+    await log_mod_action(
+        chat_id=message.chat.id,
+        target_user_id=target.id,
+        admin_user_id=message.from_user.id,
+        action="unmute",
+        reason=None,
+        message_id=message.message_id,
+    )
+    await send_modlog(
+        message.bot,
+        f"[MOD] unmute: chat={message.chat.id} user={target.id}",
+    )
+    await message.answer("User unmuted.", parse_mode=None)
+
+
+@router.message(Command("ban"))
+async def cmd_ban(message: Message) -> None:
+    if message.from_user is None:
+        await message.answer("Unable to verify permissions.", parse_mode=None)
+        return
+    if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await message.answer("Use this command in a group.", parse_mode=None)
+        return
+    if message.reply_to_message is None or message.reply_to_message.from_user is None:
+        await message.answer("Reply to a user's message.", parse_mode=None)
+        return
+    try:
+        if not await _is_admin_user(message, message.from_user.id):
+            await message.answer("Not allowed.", parse_mode=None)
+            return
+    except Exception as e:
+        logger.error("Failed to check admin status: %s", e, exc_info=True)
+        await message.answer("Unable to verify admin status.", parse_mode=None)
+        return
+
+    reason = ""
+    if message.text:
+        parts = message.text.split(maxsplit=1)
+        if len(parts) > 1:
+            reason = parts[1].strip()
+    target = message.reply_to_message.from_user
+
+    try:
+        await message.bot.ban_chat_member(message.chat.id, target.id)
+    except Exception as e:
+        logger.warning("Failed to ban user: %s", e, exc_info=True)
+        await message.answer("Failed to ban user.", parse_mode=None)
+        return
+
+    await set_user_penalty(message.chat.id, target.id, "ban", until=None)
+    await log_mod_action(
+        chat_id=message.chat.id,
+        target_user_id=target.id,
+        admin_user_id=message.from_user.id,
+        action="ban",
+        reason=reason or None,
+        message_id=message.message_id,
+    )
+    await send_modlog(
+        message.bot,
+        f"[MOD] ban: chat={message.chat.id} user={target.id} "
+        f"reason={reason or 'n/a'}",
+    )
+    await message.answer("User banned.", parse_mode=None)
+
+
+@router.message(Command("unban"))
+async def cmd_unban(message: Message) -> None:
+    if message.from_user is None:
+        await message.answer("Unable to verify permissions.", parse_mode=None)
+        return
+    if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await message.answer("Use this command in a group.", parse_mode=None)
+        return
+    try:
+        if not await _is_admin_user(message, message.from_user.id):
+            await message.answer("Not allowed.", parse_mode=None)
+            return
+    except Exception as e:
+        logger.error("Failed to check admin status: %s", e, exc_info=True)
+        await message.answer("Unable to verify admin status.", parse_mode=None)
+        return
+
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await message.answer("Usage: /unban <user_id>", parse_mode=None)
+        return
+    try:
+        user_id = int(parts[1])
+    except ValueError:
+        await message.answer("Invalid user id.", parse_mode=None)
+        return
+
+    try:
+        await message.bot.unban_chat_member(message.chat.id, user_id)
+    except Exception as e:
+        logger.warning("Failed to unban user: %s", e, exc_info=True)
+        await message.answer("Failed to unban user.", parse_mode=None)
+        return
+
+    await clear_user_penalty(message.chat.id, user_id, "ban")
+    await log_mod_action(
+        chat_id=message.chat.id,
+        target_user_id=user_id,
+        admin_user_id=message.from_user.id,
+        action="unban",
+        reason=None,
+        message_id=message.message_id,
+    )
+    await send_modlog(
+        message.bot,
+        f"[MOD] unban: chat={message.chat.id} user={user_id}",
+    )
+    await message.answer("User unbanned.", parse_mode=None)
+
+
+@router.message(Command("purge"))
+async def cmd_purge(message: Message) -> None:
+    if message.from_user is None:
+        await message.answer("Unable to verify permissions.", parse_mode=None)
+        return
+    if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await message.answer("Use this command in a group.", parse_mode=None)
+        return
+    try:
+        if not await _is_admin_user(message, message.from_user.id):
+            await message.answer("Not allowed.", parse_mode=None)
+            return
+    except Exception as e:
+        logger.error("Failed to check admin status: %s", e, exc_info=True)
+        await message.answer("Unable to verify admin status.", parse_mode=None)
+        return
+
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await message.answer("Usage: /purge <N>", parse_mode=None)
+        return
+    try:
+        count = int(parts[1])
+    except ValueError:
+        await message.answer("Invalid number.", parse_mode=None)
+        return
+    if count < 1:
+        await message.answer("Number must be positive.", parse_mode=None)
+        return
+    if count > 100:
+        count = 100
+
+    deleted = 0
+    start_id = message.message_id
+    for msg_id in range(start_id, start_id - count, -1):
+        try:
+            await message.bot.delete_message(message.chat.id, msg_id)
+            deleted += 1
+        except Exception:
+            continue
+
+    await log_mod_action(
+        chat_id=message.chat.id,
+        target_user_id=0,
+        admin_user_id=message.from_user.id,
+        action="purge",
+        reason=f"{deleted} messages",
+        message_id=message.message_id,
+    )
+    await send_modlog(
+        message.bot,
+        f"[MOD] purge: chat={message.chat.id} "
+        f"admin={message.from_user.id} deleted={deleted}",
+    )
+    await message.answer(f"Purged {deleted} messages.", parse_mode=None)
+
+
+@router.message(Command("raid_on"))
+async def cmd_raid_on(message: Message) -> None:
+    if message.from_user is None:
+        await message.answer("Unable to verify permissions.", parse_mode=None)
+        return
+    if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await message.answer("Use this command in a group.", parse_mode=None)
+        return
+    try:
+        if not await _is_admin_user(message, message.from_user.id):
+            await message.answer("Not allowed.", parse_mode=None)
+            return
+    except Exception as e:
+        logger.error("Failed to check admin status: %s", e, exc_info=True)
+        await message.answer("Unable to verify admin status.", parse_mode=None)
+        return
+
+    await set_chat_raid_mode(message.chat.id, True)
+    await log_mod_action(
+        chat_id=message.chat.id,
+        target_user_id=0,
+        admin_user_id=message.from_user.id,
+        action="raid_on",
+        reason=None,
+        message_id=message.message_id,
+    )
+    await send_modlog(
+        message.bot,
+        f"[MOD] raid_on: chat={message.chat.id} admin={message.from_user.id}",
+    )
+    await message.answer("Raid mode enabled.", parse_mode=None)
+
+
+@router.message(Command("raid_off"))
+async def cmd_raid_off(message: Message) -> None:
+    if message.from_user is None:
+        await message.answer("Unable to verify permissions.", parse_mode=None)
+        return
+    if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await message.answer("Use this command in a group.", parse_mode=None)
+        return
+    try:
+        if not await _is_admin_user(message, message.from_user.id):
+            await message.answer("Not allowed.", parse_mode=None)
+            return
+    except Exception as e:
+        logger.error("Failed to check admin status: %s", e, exc_info=True)
+        await message.answer("Unable to verify admin status.", parse_mode=None)
+        return
+
+    await set_chat_raid_mode(message.chat.id, False)
+    await log_mod_action(
+        chat_id=message.chat.id,
+        target_user_id=0,
+        admin_user_id=message.from_user.id,
+        action="raid_off",
+        reason=None,
+        message_id=message.message_id,
+    )
+    await send_modlog(
+        message.bot,
+        f"[MOD] raid_off: chat={message.chat.id} admin={message.from_user.id}",
+    )
+    await message.answer("Raid mode disabled.", parse_mode=None)
+
+
+@router.message(Command("modlog"))
+async def cmd_modlog(message: Message) -> None:
+    if message.from_user is None:
+        await message.answer("Unable to verify permissions.", parse_mode=None)
+        return
+    if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await message.answer("Use this command in a group.", parse_mode=None)
+        return
+    try:
+        if not await _is_admin_user(message, message.from_user.id):
+            await message.answer("Not allowed.", parse_mode=None)
+            return
+    except Exception as e:
+        logger.error("Failed to check admin status: %s", e, exc_info=True)
+        await message.answer("Unable to verify admin status.", parse_mode=None)
+        return
+
+    limit = 10
+    if message.text:
+        parts = message.text.split(maxsplit=1)
+        if len(parts) > 1:
+            try:
+                limit = int(parts[1])
+            except ValueError:
+                limit = 10
+    if limit < 1:
+        limit = 1
+    if limit > 50:
+        limit = 50
+    actions = await list_mod_actions(message.chat.id, limit=limit)
+    if not actions:
+        await message.answer("No moderation actions found.", parse_mode=None)
+        return
+    lines = [f"Last {len(actions)} moderation actions:"]
+    for entry in actions:
+        created_at = _format_dt(entry.get("created_at"))
+        lines.append(
+            f"{entry.get('id')}) {entry.get('action')} "
+            f"user={entry.get('target_user_id')} "
+            f"admin={entry.get('admin_user_id')} "
+            f"at {created_at}"
+        )
+    await message.answer("\n".join(lines), parse_mode=None)
+
+
 @moderation_router.chat_member()
 async def handle_member_join(event: ChatMemberUpdated) -> None:
     user = event.new_chat_member.user
@@ -1245,6 +1687,126 @@ async def handle_pending_user_message(message: Message) -> None:
             )
             if message_id:
                 await update_challenge_message_id(challenge["id"], message_id)
+
+
+@moderation_router.message(
+    F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP})
+)
+async def handle_moderation_message(message: Message) -> None:
+    if not MODERATION_ENABLED:
+        return
+    if message.from_user is None or message.from_user.is_bot:
+        return
+    if ENABLE_CAPTCHA:
+        pending = await get_pending_challenge(message.chat.id, message.from_user.id)
+        if pending:
+            return
+    try:
+        if await _is_admin_user(message, message.from_user.id):
+            return
+    except Exception:
+        pass
+
+    now = datetime.now(timezone.utc)
+    settings = await get_chat_settings(
+        message.chat.id,
+        defaults={
+            "raid_mode": RAID_MODE_DEFAULT,
+            "flood_window_seconds": FLOOD_WINDOW_SECONDS,
+            "flood_max_messages": FLOOD_MAX_MESSAGES,
+            "flood_mute_minutes": FLOOD_MUTE_MINUTES,
+            "new_user_link_block_hours": NEW_USER_LINK_BLOCK_HOURS,
+        },
+    )
+    raid_mode = bool(settings.get("raid_mode"))
+    flood_window = int(settings.get("flood_window_seconds", FLOOD_WINDOW_SECONDS))
+    flood_max = int(settings.get("flood_max_messages", FLOOD_MAX_MESSAGES))
+    flood_mute = int(settings.get("flood_mute_minutes", FLOOD_MUTE_MINUTES))
+    link_block_hours = int(
+        settings.get("new_user_link_block_hours", NEW_USER_LINK_BLOCK_HOURS)
+    )
+
+    if _message_has_link(message):
+        verified = await is_user_verified(message.chat.id, message.from_user.id)
+        recent = await _is_recent_user(
+            message.chat.id,
+            message.from_user.id,
+            now=now,
+            hours=link_block_hours,
+        )
+        block_links = (not verified) or recent
+        if raid_mode and RAID_LINK_BLOCK_ALL:
+            block_links = True
+        if block_links:
+            await _delete_message_safe(message)
+            warn_count = await increment_user_warning(
+                message.chat.id, message.from_user.id, now=now
+            )
+            await log_mod_action(
+                chat_id=message.chat.id,
+                target_user_id=message.from_user.id,
+                admin_user_id=0,
+                action="link_block",
+                reason="link",
+                message_id=message.message_id,
+            )
+            await send_modlog(
+                message.bot,
+                f"[MOD] link blocked: chat={message.chat.id} "
+                f"user={message.from_user.id} warnings={warn_count}",
+            )
+            if warn_count >= 3:
+                await _mute_user(
+                    message,
+                    message.from_user.id,
+                    minutes=flood_mute,
+                    reason="link warnings",
+                )
+            return
+
+    if raid_mode:
+        flood_max = RAID_FLOOD_MAX_MESSAGES
+
+    count = await record_rate_counter(
+        message.chat.id,
+        message.from_user.id,
+        window_seconds=flood_window,
+        now=now,
+    )
+    if count > flood_max:
+        await _delete_message_safe(message)
+        warn_info = await get_warning_info(
+            message.chat.id, message.from_user.id
+        )
+        recent_warn = False
+        if warn_info and isinstance(warn_info.get("last_warned_at"), datetime):
+            last_warned = warn_info["last_warned_at"]
+            if last_warned.tzinfo is None:
+                last_warned = last_warned.replace(tzinfo=timezone.utc)
+            recent_warn = now - last_warned < timedelta(hours=1)
+        warn_count = await increment_user_warning(
+            message.chat.id, message.from_user.id, now=now
+        )
+        await log_mod_action(
+            chat_id=message.chat.id,
+            target_user_id=message.from_user.id,
+            admin_user_id=0,
+            action="flood",
+            reason="flood",
+            message_id=message.message_id,
+        )
+        await send_modlog(
+            message.bot,
+            f"[MOD] flood: chat={message.chat.id} "
+            f"user={message.from_user.id} count={count}",
+        )
+        if recent_warn and warn_count >= 2:
+            await _mute_user(
+                message,
+                message.from_user.id,
+                minutes=flood_mute,
+                reason="flood repeat",
+            )
 
 
 @moderation_router.callback_query(F.data.startswith("cap:"))

@@ -156,6 +156,26 @@ MODLOG_CHAT_ID: int = int(
     get_env_var("MODLOG_CHAT_ID", default="0", required=False) or "0"
 )
 
+# Moderation system
+MODERATION_ENABLED: bool = get_env_bool("MODERATION_ENABLED", default="true")
+FLOOD_WINDOW_SECONDS: int = int(
+    get_env_var("FLOOD_WINDOW_SECONDS", default="10", required=False)
+)
+FLOOD_MAX_MESSAGES: int = int(
+    get_env_var("FLOOD_MAX_MESSAGES", default="6", required=False)
+)
+FLOOD_MUTE_MINUTES: int = int(
+    get_env_var("FLOOD_MUTE_MINUTES", default="10", required=False)
+)
+NEW_USER_LINK_BLOCK_HOURS: int = int(
+    get_env_var("NEW_USER_LINK_BLOCK_HOURS", default="72", required=False)
+)
+RAID_MODE_DEFAULT: bool = get_env_bool("RAID_MODE_DEFAULT", default="false")
+RAID_FLOOD_MAX_MESSAGES: int = int(
+    get_env_var("RAID_FLOOD_MAX_MESSAGES", default="3", required=False)
+)
+RAID_LINK_BLOCK_ALL: bool = get_env_bool("RAID_LINK_BLOCK_ALL", default="true")
+
 # Applications / waitlist
 APPLY_ENABLED: bool = get_env_bool("APPLY_ENABLED", default="true")
 APPLY_COOLDOWN_HOURS: int = int(
@@ -168,6 +188,20 @@ APPLY_CHAT_FORWARD_TO: int = int(
     get_env_var("APPLY_CHAT_FORWARD_TO", default="0", required=False) or "0"
 )
 
+# Auto-invite
+AUTO_INVITE_ENABLED: bool = get_env_bool("AUTO_INVITE_ENABLED", default="true")
+AUTO_INVITE_CHECK_INTERVAL_MINUTES: int = int(
+    get_env_var("AUTO_INVITE_CHECK_INTERVAL_MINUTES", default="5", required=False)
+)
+AUTO_INVITE_MAX_ATTEMPTS: int = int(
+    get_env_var("AUTO_INVITE_MAX_ATTEMPTS", default="3", required=False)
+)
+AUTO_INVITE_INVITE_MINUTES: int = int(
+    get_env_var("AUTO_INVITE_INVITE_MINUTES", default="20", required=False)
+)
+AUTO_INVITE_BATCH_SIZE: int = int(
+    get_env_var("AUTO_INVITE_BATCH_SIZE", default="1", required=False)
+)
 # Promotion recommendations
 PROMOTE_ELDER_LIMIT: int = int(
     get_env_var("PROMOTE_ELDER_LIMIT", default="2", required=False)
