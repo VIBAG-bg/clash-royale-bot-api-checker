@@ -50,6 +50,25 @@ logger = logging.getLogger(__name__)
 # Create router for handlers
 router = Router(name="main_handlers")
 
+HEADER_LINE = "══════════════════════════════"
+DIVIDER_LINE = "---------------------------"
+
+
+def _format_help_commands(commands: list[dict[str, object]]) -> list[str]:
+    lines: list[str] = []
+    for index, cmd in enumerate(commands, 1):
+        lines.append(f"{index}) {cmd['name']}")
+        lines.append(f"   What: {cmd['what']}")
+        lines.append(f"   Where: {cmd['where']}")
+        lines.append(f"   Who: {cmd['who']}")
+        lines.append("   Usage:")
+        for usage in cmd["usage"]:
+            lines.append(f"   - {usage}")
+        lines.append(f"   Args: {cmd['args']}")
+        lines.append(f"   Notes: {cmd['notes']}")
+        lines.append("")
+    return lines[:-1] if lines else lines
+
 
 def _require_clan_tag() -> str | None:
     if CLAN_TAG:
@@ -213,6 +232,198 @@ async def cmd_start(message: Message) -> None:
         "/donations - Donations leaderboard"
     )
     await message.answer(welcome_text, parse_mode=None)
+
+
+@router.message(Command("help"))
+async def cmd_help(message: Message) -> None:
+    """Show help for available commands."""
+    is_admin = False
+    if message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
+        if message.from_user is not None:
+            try:
+                member = await message.bot.get_chat_member(
+                    message.chat.id, message.from_user.id
+                )
+                is_admin = member.status in (
+                    ChatMemberStatus.ADMINISTRATOR,
+                    ChatMemberStatus.CREATOR,
+                )
+            except Exception:
+                is_admin = False
+
+    general_commands: list[dict[str, object]] = [
+        {
+            "name": "/help",
+            "what": "Show this help message.",
+            "where": "Group + DM",
+            "who": "Everyone",
+            "usage": ["/help"],
+            "args": "none",
+            "notes": "Shows admin commands only to chat admins.",
+        },
+        {
+            "name": "/start",
+            "what": "Show the welcome message and command list.",
+            "where": "Group + DM",
+            "who": "Everyone",
+            "usage": ["/start", "/start link"],
+            "args": "Optional: link (starts account linking in DM). Example: /start link",
+            "notes": "In groups, linking will ask you to open the bot in private.",
+        },
+        {
+            "name": "/ping",
+            "what": "Check bot responsiveness and API status.",
+            "where": "Group + DM",
+            "who": "Everyone",
+            "usage": ["/ping"],
+            "args": "none",
+            "notes": "Uses the Clash Royale API; may show errors if API is down.",
+        },
+        {
+            "name": "/war",
+            "what": "Weekly war report (top active/inactive).",
+            "where": "Group + DM",
+            "who": "Everyone",
+            "usage": ["/war"],
+            "args": "none",
+            "notes": "Uses the last completed week for the configured clan.",
+        },
+        {
+            "name": "/war8",
+            "what": "Rolling report for last 8 completed weeks.",
+            "where": "Group + DM",
+            "who": "Everyone",
+            "usage": ["/war8"],
+            "args": "none",
+            "notes": "Current members only (latest snapshot).",
+        },
+        {
+            "name": "/war_all",
+            "what": "Send weekly, rolling, and kick shortlist reports together.",
+            "where": "Group + DM",
+            "who": "Everyone",
+            "usage": ["/war_all"],
+            "args": "none",
+            "notes": "Sends three messages in sequence.",
+        },
+        {
+            "name": "/current_war",
+            "what": "Current war snapshot from database.",
+            "where": "Group + DM",
+            "who": "Everyone",
+            "usage": ["/current_war"],
+            "args": "none",
+            "notes": "Data is based on latest DB snapshots (not live UI).",
+        },
+        {
+            "name": "/my_activity",
+            "what": "Show your own war activity report.",
+            "where": "Group + DM",
+            "who": "Everyone",
+            "usage": ["/my_activity", "/my_activity <nickname>"],
+            "args": "Optional nickname for self-linking in DM. Example: /my_activity Arcaneum",
+            "notes": "If not linked, the bot guides you through linking.",
+        },
+        {
+            "name": "/activity",
+            "what": "Show a player's activity by nickname, @username, or reply.",
+            "where": "Group + DM",
+            "who": "Everyone",
+            "usage": [
+                "/activity <nickname>",
+                "/activity @username",
+                "Reply + /activity",
+            ],
+            "args": "Nickname or @username; reply to a user to use their linked account.",
+            "notes": "If multiple matches, you will be asked to be more specific.",
+        },
+        {
+            "name": "/donations",
+            "what": "Donation leaderboards for current and recent weeks.",
+            "where": "Group + DM",
+            "who": "Everyone",
+            "usage": ["/donations"],
+            "args": "none",
+            "notes": "Includes only current members from the latest snapshot.",
+        },
+        {
+            "name": "/list_for_kick",
+            "what": "Kick shortlist based on last 8 weeks.",
+            "where": "Group + DM",
+            "who": "Everyone",
+            "usage": ["/list_for_kick"],
+            "args": "none",
+            "notes": "Applies filters and warnings (revived, donations, last seen).",
+        },
+        {
+            "name": "/inactive",
+            "what": "List most absent members by last seen time.",
+            "where": "Group + DM",
+            "who": "Everyone",
+            "usage": ["/inactive"],
+            "args": "none",
+            "notes": "Current members only, based on latest snapshot.",
+        },
+    ]
+
+    admin_commands: list[dict[str, object]] = [
+        {
+            "name": "/bind",
+            "what": "Bind this chat for scheduled war reports.",
+            "where": "Group only",
+            "who": "Chat admins/creators",
+            "usage": ["/bind"],
+            "args": "none",
+            "notes": "Binds this chat to the configured clan tag.",
+        },
+        {
+            "name": "/admin_link_name",
+            "what": "Force-link a user to an in-game nickname.",
+            "where": "Group + DM",
+            "who": "Chat admins/creators or ADMIN_USER_IDS",
+            "usage": ["/admin_link_name <nickname> (reply required)"],
+            "args": "Nickname (exact or partial). Example: reply + /admin_link_name Arcaneum",
+            "notes": "Must be used as a reply to the target user.",
+        },
+        {
+            "name": "/unlink",
+            "what": "Remove a user's linked account.",
+            "where": "Group + DM",
+            "who": "Chat admins/creators or ADMIN_USER_IDS",
+            "usage": ["/unlink (reply required)"],
+            "args": "none",
+            "notes": "Must be used as a reply to the target user.",
+        },
+    ]
+
+    lines = [
+        HEADER_LINE,
+        "🤖 Black Poison Bot — Help",
+        HEADER_LINE,
+        "📌 This bot tracks Clan Wars + activity and helps manage kick lists fairly.",
+        "Data is based on our database snapshots (not live game UI).",
+        "",
+        "🧩 GENERAL COMMANDS (everyone)",
+        DIVIDER_LINE,
+        *_format_help_commands(general_commands),
+    ]
+    if is_admin:
+        lines.extend(
+            [
+                "",
+                "🛡 ADMIN COMMANDS (chat admins only)",
+                DIVIDER_LINE,
+                *_format_help_commands(admin_commands),
+            ]
+        )
+    lines.extend(
+        [
+            HEADER_LINE,
+            "ℹ️ Tip: If you want your own stats, use /my_activity in DM. If not linked, the bot will guide you.",
+            HEADER_LINE,
+        ]
+    )
+    await message.answer("\n".join(lines), parse_mode=None)
 
 
 @router.message(Command("ping"))
