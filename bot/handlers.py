@@ -145,6 +145,16 @@ def _format_user_label(user: object) -> str:
     return label
 
 
+def _build_user_mention(user: object) -> str:
+    username = getattr(user, "username", None)
+    if username:
+        return f"@{username}"
+    user_id = getattr(user, "id", None)
+    if user_id:
+        return f"tg://user?id={user_id}"
+    return "user"
+
+
 def _build_captcha_keyboard(
     challenge_id: int, question: dict[str, object]
 ) -> InlineKeyboardMarkup:
@@ -185,8 +195,11 @@ async def _send_captcha_message(
     *,
     challenge_id: int,
     question: dict[str, object],
+    mention: str | None = None,
 ) -> int | None:
+    prefix = f"{mention}\n" if mention else ""
     text = (
+        f"{prefix}"
         "🛡 Please verify to chat.\n"
         f"{question.get('question_text')}\n"
         "Choose the correct answer:"
@@ -715,6 +728,7 @@ async def handle_member_join(event: ChatMemberUpdated) -> None:
         event.chat.id,
         challenge_id=challenge["id"],
         question=question,
+        mention=_build_user_mention(user),
     )
     if message_id:
         await update_challenge_message_id(challenge["id"], message_id)
@@ -767,6 +781,7 @@ async def handle_pending_user_message(message: Message) -> None:
                 message.chat.id,
                 challenge_id=challenge["id"],
                 question=question,
+                mention=_build_user_mention(message.from_user),
             )
             if message_id:
                 await update_challenge_message_id(challenge["id"], message_id)
@@ -870,6 +885,7 @@ async def handle_captcha_callback(query: CallbackQuery) -> None:
                 challenge["chat_id"],
                 challenge_id=new_challenge["id"],
                 question=new_question,
+                mention=_build_user_mention(query.from_user),
             )
             if message_id:
                 await update_challenge_message_id(
@@ -1284,6 +1300,7 @@ async def cmd_captcha_send(message: Message) -> None:
         chat_id,
         challenge_id=challenge["id"],
         question=question,
+        mention=_build_user_mention(target),
     )
     if message_id:
         await update_challenge_message_id(challenge["id"], message_id)
@@ -1423,6 +1440,7 @@ async def cmd_captcha_reset(message: Message) -> None:
             chat_id,
             challenge_id=challenge["id"],
             question=question,
+            mention=_build_user_mention(target),
         )
     if message_id:
         await update_challenge_message_id(challenge["id"], message_id)
