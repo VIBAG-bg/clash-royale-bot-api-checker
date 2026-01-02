@@ -3,8 +3,7 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
-from datetime import timedelta
+from datetime import datetime, timezone, date, timedelta
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -21,6 +20,7 @@ from config import (
     REMINDER_TIME_UTC,
     REMINDER_WAR_BANNER_URL,
     REMINDER_WAR_BANNER_URL_DAY4,
+    TRAINING_DAYS_FALLBACK,
     TELEGRAM_BOT_TOKEN,
     require_env_value,
 )
@@ -32,6 +32,7 @@ from db import (
     get_colosseum_index_for_season,
     get_app_state,
     get_enabled_clan_chats,
+    get_first_snapshot_date_for_week,
     get_river_race_state_for_week,
     get_session,
     set_colosseum_index_for_season,
@@ -99,6 +100,42 @@ def _parse_cr_timestamp(value: object) -> datetime | None:
             continue
         return parsed.replace(tzinfo=timezone.utc)
     return None
+
+
+def _normalize_clan_tag(tag: str) -> str:
+    return tag[1:].upper() if tag.startswith("#") else tag.upper()
+
+
+def _find_riverrace_log_anchor(
+    items: object, clan_tag: str
+) -> tuple[datetime | None, str | None]:
+    if isinstance(items, dict):
+        items = items.get("items", [])
+    if not isinstance(items, list):
+        return None, None
+    target_tag = _normalize_clan_tag(clan_tag)
+    for item in items:
+        standings = item.get("standings", [])
+        if not isinstance(standings, list):
+            continue
+        clan_entry = None
+        for standing in standings:
+            clan = standing.get("clan", {})
+            tag = clan.get("tag", "")
+            if tag and _normalize_clan_tag(tag) == target_tag:
+                clan_entry = clan
+                break
+        if not clan_entry:
+            continue
+        finish_time = clan_entry.get("finishTime")
+        anchor = _parse_cr_timestamp(finish_time)
+        if anchor is not None:
+            return anchor, "finishTime"
+        created_date = item.get("createdDate")
+        anchor = _parse_cr_timestamp(created_date)
+        if anchor is not None:
+            return anchor, "createdDate"
+    return None, None
 
 
 def _parse_season_id(value: object) -> int | None:
@@ -185,99 +222,50 @@ async def _store_war_day_number_state(
 async def _resolve_war_day_number(
     *,
     period_index: object,
-    war_day_start_time: object,
     season_id: int,
     section_index: int,
     period_type: str,
-    session,
-) -> tuple[int | None, str | None]:
-    today = datetime.now(timezone.utc).date().isoformat()
-    stored_day = await get_app_state(WAR_DAY_NUMBER_KEY, session=session)
-    stored_date = await get_app_state(WAR_DAY_NUMBER_DATE_KEY, session=session)
-    stored_by = await get_app_state(WAR_DAY_RESOLVED_BY_KEY, session=session)
-    if isinstance(stored_day, dict) and isinstance(stored_date, dict):
-        try:
-            if stored_date.get("date") == today:
-                if (
-                    int(stored_day.get("season_id", 0)) == season_id
-                    and int(stored_day.get("section_index", -1)) == section_index
-                    and str(stored_day.get("period_type", "")).lower() == period_type
-                ):
-                    day_number = int(stored_day.get("day_number", 0))
-                    if 1 <= day_number <= 7:
-                        resolved_by = None
-                        if isinstance(stored_by, dict):
-                            resolved_by = str(stored_by.get("resolved_by") or "")
-                        return day_number, (resolved_by or "stored")
-        except Exception:
-            pass
-
-    parsed_index = _coerce_non_negative_int(period_index)
-    if parsed_index is not None:
-        day_number = parsed_index + 1
-        if 1 <= day_number <= 7:
-            await _store_war_day_start(
-                season_id, section_index, period_type, day_number, session
-            )
-            await _store_war_day_number_state(
-                season_id,
-                section_index,
-                period_type,
-                day_number,
-                "periodIndex",
-                war_day_start_time,
-                session,
-            )
-            return day_number, "periodIndex"
-        return None, None
-
-    start_dt = _parse_cr_timestamp(war_day_start_time)
-    if start_dt is not None:
-        delta_seconds = (datetime.now(timezone.utc) - start_dt).total_seconds()
-        elapsed_days = int(delta_seconds // 86400)
-        day_number = elapsed_days + 1
+    first_snapshot_date: date | None,
+    log_items: object | None,
+) -> tuple[int | None, str | None, dict[str, object]]:
+    context: dict[str, object] = {
+        "season_id": season_id,
+        "section_index": section_index,
+        "period_type": period_type,
+        "periodIndex": period_index,
+        "first_snapshot_date": first_snapshot_date.isoformat()
+        if isinstance(first_snapshot_date, date)
+        else None,
+    }
+    today = datetime.now(timezone.utc).date()
+    if isinstance(first_snapshot_date, date):
+        day_number = (today - first_snapshot_date).days + 1
         if day_number < 1:
             day_number = 1
-        if 1 <= day_number <= 7:
-            await _store_war_day_number_state(
-                season_id,
-                section_index,
-                period_type,
-                day_number,
-                "warDayStartTime",
-                war_day_start_time,
-                session,
-            )
-            return day_number, "warDayStartTime"
-        return None, None
+        if day_number <= 10:
+            return day_number, "db", context
+        return None, "none", context
 
-    state = await get_app_state(WAR_DAY_START_KEY, session=session)
-    if not isinstance(state, dict):
-        return None, None
-    try:
-        if int(state.get("season_id", 0)) != season_id:
-            return None, None
-        if int(state.get("section_index", -1)) != section_index:
-            return None, None
-        if str(state.get("period_type", "")).lower() != period_type:
-            return None, None
-        start_date = datetime.fromisoformat(state.get("start_date")).date()
-    except Exception:
-        return None, None
-    delta_days = (datetime.now(timezone.utc).date() - start_date).days
-    day_number = delta_days + 1
-    if 1 <= day_number <= 4:
-        await _store_war_day_number_state(
-            season_id,
-            section_index,
-            period_type,
-            day_number,
-            "stored",
-            war_day_start_time,
-            session,
-        )
-        return day_number, "stored"
-    return None, None
+    anchor_dt, anchor_source = _find_riverrace_log_anchor(log_items, CLAN_TAG)
+    context["finish_anchor"] = (
+        anchor_dt.isoformat() if isinstance(anchor_dt, datetime) else None
+    )
+    context["finish_anchor_source"] = anchor_source
+    context["training_days_fallback"] = TRAINING_DAYS_FALLBACK
+    if anchor_dt is not None:
+        war_start_date = anchor_dt.date() + timedelta(days=TRAINING_DAYS_FALLBACK)
+        day_number = (today - war_start_date).days + 1
+        if day_number < 1:
+            return None, "none", context
+        if day_number <= 10:
+            return day_number, (anchor_source or "finishTime"), context
+        return None, "none", context
+
+    parsed_index = _coerce_non_negative_int(period_index)
+    if parsed_index is not None and 0 <= parsed_index <= 10:
+        return parsed_index + 1, "periodIndex", context
+
+    return None, "none", context
 
 
 def _parse_active_week_state(
@@ -639,28 +627,53 @@ async def maybe_post_daily_war_reminder(bot: Bot) -> None:
                     "Reminder skipped: unable to resolve week (source=%s)", source
                 )
                 return
-            day_number, resolved_by = await _resolve_war_day_number(
+            first_snapshot_date = await get_first_snapshot_date_for_week(
+                resolved_season_id, resolved_section_index, session=session
+            )
+            log_items = None
+            if first_snapshot_date is None:
+                try:
+                    log_items = await api_client.get_river_race_log(CLAN_TAG)
+                except ClashRoyaleAPIError as e:
+                    logger.info(
+                        "Reminder log fallback failed: %s", e
+                    )
+                except Exception as e:
+                    logger.info(
+                        "Reminder log fallback failed: %s", e, exc_info=True
+                    )
+
+            day_number, resolved_by, context = await _resolve_war_day_number(
                 period_index=river_race.get("periodIndex"),
-                war_day_start_time=river_race.get("warDayStartTime"),
                 season_id=resolved_season_id,
                 section_index=resolved_section_index,
                 period_type=period_type_lower,
-                session=session,
+                first_snapshot_date=first_snapshot_date,
+                log_items=log_items,
             )
             if day_number is None:
-                state = await get_app_state(WAR_DAY_START_KEY, session=session)
                 logger.info(
-                    "Reminder skipped: unknown day number (season=%s section=%s period=%s periodIndex=%r warDayStartTime=%r war_day_start=%r resolved_by=%r now=%s)",
-                    resolved_season_id,
-                    resolved_section_index,
-                    period_type_lower,
-                    river_race.get("periodIndex"),
-                    river_race.get("warDayStartTime"),
-                    state,
+                    "Reminder skipped: unknown day number (season=%s section=%s period=%s periodIndex=%r first_snapshot_date=%r finish_anchor=%r finish_source=%r training_days_fallback=%s resolved_by=%r now=%s)",
+                    context.get("season_id"),
+                    context.get("section_index"),
+                    context.get("period_type"),
+                    context.get("periodIndex"),
+                    context.get("first_snapshot_date"),
+                    context.get("finish_anchor"),
+                    context.get("finish_anchor_source"),
+                    context.get("training_days_fallback"),
                     resolved_by,
                     datetime.now(timezone.utc).isoformat(),
                 )
                 return
+            logger.info(
+                "Resolved reminder day: source=%s day=%s season=%s section=%s period=%s",
+                resolved_by,
+                day_number,
+                resolved_season_id,
+                resolved_section_index,
+                period_type_lower,
+            )
 
             last_state = await get_app_state(LAST_WAR_REMINDER_KEY, session=session)
             if isinstance(last_state, dict):

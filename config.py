@@ -102,6 +102,9 @@ REMINDER_ENABLED: bool = get_env_bool("REMINDER_ENABLED", default="true")
 REMINDER_TIME_UTC: str = (
     get_env_var("REMINDER_TIME_UTC", default="09:05", required=False) or "09:05"
 )
+TRAINING_DAYS_FALLBACK: int = int(
+    get_env_var("TRAINING_DAYS_FALLBACK", default="3", required=False)
+)
 REMINDER_WAR_BANNER_URL: str = (
     get_env_var(
         "REMINDER_WAR_BANNER_URL",

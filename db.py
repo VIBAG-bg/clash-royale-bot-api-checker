@@ -1080,6 +1080,23 @@ async def get_latest_membership_date(
     return result.scalar_one()
 
 
+async def get_first_snapshot_date_for_week(
+    season_id: int, section_index: int, session: AsyncSession | None = None
+) -> date | None:
+    if session is None:
+        async with _get_session() as session:
+            return await get_first_snapshot_date_for_week(
+                season_id, section_index, session=session
+            )
+    result = await session.execute(
+        select(func.min(PlayerParticipationDaily.snapshot_date)).where(
+            PlayerParticipationDaily.season_id == season_id,
+            PlayerParticipationDaily.section_index == section_index,
+        )
+    )
+    return result.scalar_one()
+
+
 async def get_current_member_tags(
     clan_tag: str, session: AsyncSession | None = None
 ) -> set[str]:
