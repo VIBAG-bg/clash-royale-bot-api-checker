@@ -218,6 +218,17 @@ def _format_user(user: object) -> str:
     return full_name
 
 
+WARN_THRESHOLD = 3
+
+
+def _warn_step(total: int) -> int:
+    return min(total, WARN_THRESHOLD)
+
+
+def _warn_suffix(total: int) -> str:
+    return f" (total: {total})" if total > WARN_THRESHOLD else ""
+
+
 def _build_user_mention(user: object) -> str:
     username = getattr(user, "username", None)
     if username:
@@ -2175,8 +2186,8 @@ async def handle_moderation_message(message: Message) -> None:
                 message.chat.id, message.from_user.id, now=now
             )
             await message.answer(
-                f"⚠️ Warning {warn_count}/3 — links are not allowed here. "
-                f"User: {_format_user(message.from_user)}",
+                f"⚠️ Warning {_warn_step(warn_count)}/3{_warn_suffix(warn_count)} — "
+                f"links are not allowed here. User: {_format_user(message.from_user)}",
                 parse_mode=None,
                 disable_web_page_preview=True,
             )
@@ -2253,8 +2264,8 @@ async def handle_moderation_message(message: Message) -> None:
             f"user={message.from_user.id} count={count}",
         )
         await message.answer(
-            f"⚠️ Warning {warn_count}/3 — flood/spam detected "
-            f"(>{flood_max} msgs/{flood_window}s). "
+            f"⚠️ Warning {_warn_step(warn_count)}/3{_warn_suffix(warn_count)} — "
+            f"flood/spam detected (>{flood_max} msgs/{flood_window}s). "
             f"User: {_format_user(message.from_user)}.",
             parse_mode=None,
             disable_web_page_preview=True,
