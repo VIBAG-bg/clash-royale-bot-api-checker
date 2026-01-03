@@ -2,6 +2,63 @@
 
 A Python Telegram bot that monitors a Clash Royale clan using the official Clash Royale API and PostgreSQL.
 
+# 🚨 MODERATION ARCHITECTURE: READ BEFORE TOUCHING ANYTHING 🚨
+
+This bot currently supports TWO moderation execution paths for safe rollout and instant rollback.
+
+## Modes (controlled by env vars)
+
+### 1) Legacy enforcement (handlers enforce)
+- `MODERATION_MW_ENABLED=false`  ✅ default / safe
+- Result:
+  - `handle_moderation_message` enforces moderation actions
+  - middleware is effectively OFF
+
+### 2) Shadow mode (handlers enforce, middleware only logs)
+- `MODERATION_MW_ENABLED=true`
+- `MODERATION_MW_DRY_RUN=true`
+- Result:
+  - handlers still enforce (deletes/warns/mutes)
+  - middleware ONLY evaluates and logs decisions when `mod_debug` is enabled
+  - NO middleware enforcement in this mode
+
+### 3) Middleware enforcement (CUTOVER mode)
+- `MODERATION_MW_ENABLED=true`
+- `MODERATION_MW_DRY_RUN=false`
+- Result:
+  - middleware enforces moderation actions
+  - `handle_moderation_message` MUST be a NO-OP to prevent double actions
+
+## CRITICAL SAFETY RULES (DO NOT BREAK)
+1) NEVER allow both enforcement paths to run at the same time.
+   The legacy handler must short-circuit when middleware is enforcing:
+   `if MODERATION_MW_ENABLED and not MODERATION_MW_DRY_RUN: return`
+
+2) Commands must always work in group chats.
+   Middleware MUST bypass messages that look like commands:
+   `text.startswith("/") or caption.startswith("/")`
+
+3) Pending captcha users must be isolated.
+   Middleware MUST bypass pending users BEFORE any evaluation/enforcement:
+   `ENABLE_CAPTCHA + get_pending_challenge(chat_id, user_id)`
+
+4) Auto-mute threshold matches current production behavior:
+   trigger when `warn_count >= 3` (NOT `== 3`).
+
+## Source of truth
+All new moderation rules MUST be implemented in ONE place:
+- `evaluate_moderation(message, ...)`  (policy/evaluation core)
+
+Enforcement must be implemented ONLY in the active execution path:
+- legacy handler (legacy mode), OR
+- middleware (cutover mode)
+
+Do NOT duplicate policy logic across handler and middleware.
+
+## Rollback (instant, no code changes)
+- Set `MODERATION_MW_DRY_RUN=true` to disable middleware enforcement (shadow mode).
+- OR set `MODERATION_MW_ENABLED=false` to disable middleware completely (legacy mode).
+
 ## Features
 
 - **River Race Monitoring**: Automatically fetches clan war (River Race) stats at regular intervals

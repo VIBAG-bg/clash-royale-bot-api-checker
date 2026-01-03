@@ -37,6 +37,8 @@ from config import (
     LAST_SEEN_RED_DAYS,
     LAST_SEEN_YELLOW_DAYS,
     MODERATION_ENABLED,
+    MODERATION_MW_DRY_RUN,
+    MODERATION_MW_ENABLED,
     MODLOG_CHAT_ID,
     NEW_USER_LINK_BLOCK_HOURS,
     RAID_FLOOD_MAX_MESSAGES,
@@ -2174,6 +2176,8 @@ async def handle_pending_user_message(message: Message) -> None:
     NotPendingCaptchaFilter(),
 )
 async def handle_moderation_message(message: Message) -> None:
+    if MODERATION_MW_ENABLED and not MODERATION_MW_DRY_RUN:
+        return
     mod_debug = await _is_mod_debug(message.chat.id)
     if mod_debug:
         logger.warning(
