@@ -157,8 +157,19 @@ def _app_notify_state_key(app_id: int) -> str:
     return f"app_notify:{app_id}"
 
 
+def _mod_debug_state_key(chat_id: int) -> str:
+    return f"mod_debug:{chat_id}"
+
+
 def _is_debug_admin(user_id: int) -> bool:
     return user_id in ADMIN_TELEGRAM_IDS
+
+
+async def _is_mod_debug(chat_id: int) -> bool:
+    state = await get_app_state(_mod_debug_state_key(chat_id))
+    if not state:
+        return False
+    return bool(state.get("enabled") is True)
 
 
 def _parse_debug_day(text: str | None) -> int:
@@ -277,8 +288,21 @@ async def _is_recent_user(
 async def _delete_message_safe(message: Message) -> None:
     try:
         await message.delete()
+        logger.warning(
+            "[MOD] delete ok: chat=%s user=%s msg_id=%s",
+            message.chat.id,
+            message.from_user.id if message.from_user else None,
+            message.message_id,
+        )
     except Exception as e:
-        logger.warning("Failed to delete message: %s", e, exc_info=True)
+        logger.warning(
+            "[MOD] delete failed: chat=%s user=%s msg_id=%s err=%s",
+            message.chat.id,
+            message.from_user.id if message.from_user else None,
+            message.message_id,
+            type(e).__name__,
+            exc_info=True,
+        )
         await send_modlog(
             message.bot,
             f"[MOD] ERROR: delete failed: chat={message.chat.id} "
@@ -302,6 +326,13 @@ async def _mute_user(
                 can_add_web_page_previews=False,
             ),
             until_date=until,
+        )
+        logger.warning(
+            "[MOD] mute ok: chat=%s user=%s until=%s reason=%s",
+            message.chat.id,
+            user_id,
+            until.isoformat(),
+            reason,
         )
     except Exception as e:
         logger.warning("Failed to mute user: %s", e, exc_info=True)
@@ -1622,6 +1653,51 @@ async def cmd_raid_status(message: Message) -> None:
     await message.answer("\n".join(lines), parse_mode=None)
 
 
+@router.message(Command("mod_debug_on"))
+async def cmd_mod_debug_on(message: Message) -> None:
+    if message.from_user is None:
+        await message.answer("Unable to verify permissions.", parse_mode=None)
+        return
+    if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await message.answer("Use this command in a group.", parse_mode=None)
+        return
+    try:
+        if not await _is_admin_user(message, message.from_user.id):
+            await message.answer("Not allowed.", parse_mode=None)
+            return
+    except Exception as e:
+        logger.error("Failed to check admin status: %s", e, exc_info=True)
+        await message.answer("Unable to verify admin status.", parse_mode=None)
+        return
+
+    await set_app_state(
+        _mod_debug_state_key(message.chat.id),
+        {"enabled": True, "updated_at": datetime.now(timezone.utc).isoformat()},
+    )
+    await message.answer("Mod debug enabled for this chat.", parse_mode=None)
+
+
+@router.message(Command("mod_debug_off"))
+async def cmd_mod_debug_off(message: Message) -> None:
+    if message.from_user is None:
+        await message.answer("Unable to verify permissions.", parse_mode=None)
+        return
+    if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await message.answer("Use this command in a group.", parse_mode=None)
+        return
+    try:
+        if not await _is_admin_user(message, message.from_user.id):
+            await message.answer("Not allowed.", parse_mode=None)
+            return
+    except Exception as e:
+        logger.error("Failed to check admin status: %s", e, exc_info=True)
+        await message.answer("Unable to verify admin status.", parse_mode=None)
+        return
+
+    await delete_app_state(_mod_debug_state_key(message.chat.id))
+    await message.answer("Mod debug disabled for this chat.", parse_mode=None)
+
+
 @router.message(Command("modlog"))
 async def cmd_modlog(message: Message) -> None:
     if message.from_user is None:
@@ -1899,18 +1975,53 @@ async def handle_pending_user_message(message: Message) -> None:
     F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP})
 )
 async def handle_moderation_message(message: Message) -> None:
+    logger.warning(
+        "[MOD] HIT chat=%s type=%s msg_id=%s from=%s text=%r entities=%s",
+        message.chat.id,
+        message.chat.type,
+        message.message_id,
+        message.from_user.id if message.from_user else None,
+        (message.text or message.caption or "")[:200],
+        [entity.type for entity in (message.entities or [])],
+    )
     if not MODERATION_ENABLED:
+        logger.warning(
+            "[MOD] skip: disabled chat=%s msg_id=%s",
+            message.chat.id,
+            message.message_id,
+        )
         return
     if message.from_user is None or message.from_user.is_bot:
+        logger.warning(
+            "[MOD] skip: no_user_or_bot chat=%s msg_id=%s",
+            message.chat.id,
+            message.message_id,
+        )
         return
+    mod_debug = await _is_mod_debug(message.chat.id)
     if ENABLE_CAPTCHA:
         pending = await get_pending_challenge(message.chat.id, message.from_user.id)
         if pending:
+            logger.warning(
+                "[MOD] skip: pending_captcha chat=%s user=%s",
+                message.chat.id,
+                message.from_user.id,
+            )
             return
     try:
         if await _is_admin_user(message, message.from_user.id):
+            logger.warning(
+                "[MOD] skip: admin chat=%s user=%s",
+                message.chat.id,
+                message.from_user.id,
+            )
             return
     except Exception:
+        logger.warning(
+            "[MOD] skip: admin_check_failed chat=%s user=%s",
+            message.chat.id,
+            message.from_user.id,
+        )
         pass
 
     now = datetime.now(timezone.utc)
@@ -1924,6 +2035,9 @@ async def handle_moderation_message(message: Message) -> None:
             "new_user_link_block_hours": NEW_USER_LINK_BLOCK_HOURS,
         },
     )
+    if not settings:
+        logger.warning("[MOD] skip: no_settings chat=%s", message.chat.id)
+        return
     raid_mode = bool(settings.get("raid_mode"))
     flood_window = int(settings.get("flood_window_seconds", FLOOD_WINDOW_SECONDS))
     flood_max = int(settings.get("flood_max_messages", FLOOD_MAX_MESSAGES))
@@ -1931,6 +2045,22 @@ async def handle_moderation_message(message: Message) -> None:
     link_block_hours = int(
         settings.get("new_user_link_block_hours", NEW_USER_LINK_BLOCK_HOURS)
     )
+    if mod_debug:
+        logger.warning(
+            "[MOD] settings chat=%s raid=%s flood_window=%s flood_max=%s flood_mute=%s link_block_hours=%s",
+            message.chat.id,
+            raid_mode,
+            flood_window,
+            flood_max,
+            flood_mute,
+            link_block_hours,
+        )
+    if mod_debug and not (message.text or message.caption):
+        logger.warning(
+            "[MOD] note: no_text_or_caption chat=%s msg_id=%s",
+            message.chat.id,
+            message.message_id,
+        )
 
     if _message_has_link(message):
         verified = await is_user_verified(message.chat.id, message.from_user.id)
@@ -1947,6 +2077,15 @@ async def handle_moderation_message(message: Message) -> None:
             await _delete_message_safe(message)
             warn_count = await increment_user_warning(
                 message.chat.id, message.from_user.id, now=now
+            )
+            logger.warning(
+                "[MOD] link_block: chat=%s user=%s warnings=%s verified=%s recent=%s raid=%s",
+                message.chat.id,
+                message.from_user.id,
+                warn_count,
+                verified,
+                recent,
+                raid_mode,
             )
             await log_mod_action(
                 chat_id=message.chat.id,
@@ -1981,6 +2120,14 @@ async def handle_moderation_message(message: Message) -> None:
     )
     if count > flood_max:
         await _delete_message_safe(message)
+        logger.warning(
+            "[MOD] flood_detected: chat=%s user=%s count=%s limit=%s raid=%s",
+            message.chat.id,
+            message.from_user.id,
+            count,
+            flood_max,
+            raid_mode,
+        )
         warn_info = await get_warning_info(
             message.chat.id, message.from_user.id
         )
@@ -2007,6 +2154,12 @@ async def handle_moderation_message(message: Message) -> None:
             f"user={message.from_user.id} count={count}",
         )
         if recent_warn and warn_count >= 2:
+            logger.warning(
+                "[MOD] auto_mute: chat=%s user=%s warn_count=%s",
+                message.chat.id,
+                message.from_user.id,
+                warn_count,
+            )
             await _mute_user(
                 message,
                 message.from_user.id,
@@ -3269,3 +3422,20 @@ async def handle_link_select(query: CallbackQuery) -> None:
         )
 
     await query.answer("Linked.")
+
+
+@router.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}))
+async def trace_catch_all(message: Message) -> None:
+    if message.from_user is None or message.from_user.is_bot:
+        return
+    if (message.text or message.caption or "").startswith("/"):
+        return
+    if not await _is_mod_debug(message.chat.id):
+        return
+    logger.warning(
+        "[TRACE] catch-all consumed: chat=%s msg_id=%s from=%s text=%r",
+        message.chat.id,
+        message.message_id,
+        message.from_user.id,
+        (message.text or message.caption or "")[:200],
+    )

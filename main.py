@@ -1131,8 +1131,8 @@ async def main() -> None:
     dp = Dispatcher()
     
     # Register router with handlers
-    dp.include_router(router)
     dp.include_router(moderation_router)
+    dp.include_router(router)
     
     # Run bot with lifespan management
     async with lifespan(dp):
