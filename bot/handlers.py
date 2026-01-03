@@ -5,7 +5,6 @@ from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatMemberStatus, ChatType, MessageEntityType
-from aiogram.exceptions import SkipHandler
 from aiogram.filters import Command
 from aiogram.types import (
     CallbackQuery,
@@ -1935,22 +1934,14 @@ async def handle_member_join(event: ChatMemberUpdated) -> None:
 
 
 @moderation_router.message(
-    F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP})
+    F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}),
+    ~(F.text.startswith("/") | F.caption.startswith("/")),
 )
 async def handle_pending_user_message(message: Message) -> None:
     if not ENABLE_CAPTCHA:
         return
     if message.from_user is None or message.from_user.is_bot:
         return
-    if is_bot_command_message(message):
-        if await _is_mod_debug(message.chat.id):
-            logger.warning(
-                "[MOD] bypass command %s from user=%s chat=%s",
-                _extract_command_name(message),
-                message.from_user.id,
-                message.chat.id,
-            )
-        raise SkipHandler
     challenge = await get_pending_challenge(message.chat.id, message.from_user.id)
     if not challenge:
         return
@@ -2003,65 +1994,63 @@ async def handle_pending_user_message(message: Message) -> None:
 
 
 @moderation_router.message(
-    F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP})
+    F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}),
+    ~(F.text.startswith("/") | F.caption.startswith("/")),
 )
 async def handle_moderation_message(message: Message) -> None:
-    logger.warning(
-        "[MOD] HIT chat=%s type=%s msg_id=%s from=%s text=%r entities=%s",
-        message.chat.id,
-        message.chat.type,
-        message.message_id,
-        message.from_user.id if message.from_user else None,
-        (message.text or message.caption or "")[:200],
-        [entity.type for entity in (message.entities or [])],
-    )
-    if is_bot_command_message(message):
-        if await _is_mod_debug(message.chat.id):
-            logger.warning(
-                "[MOD] bypass command %s from user=%s chat=%s",
-                _extract_command_name(message),
-                message.from_user.id if message.from_user else None,
-                message.chat.id,
-            )
-        raise SkipHandler
-    if not MODERATION_ENABLED:
+    mod_debug = await _is_mod_debug(message.chat.id)
+    if mod_debug:
         logger.warning(
-            "[MOD] skip: disabled chat=%s msg_id=%s",
+            "[MOD] HIT chat=%s type=%s msg_id=%s from=%s text=%r entities=%s",
             message.chat.id,
+            message.chat.type,
             message.message_id,
+            message.from_user.id if message.from_user else None,
+            (message.text or message.caption or "")[:200],
+            [entity.type for entity in (message.entities or [])],
         )
+    if not MODERATION_ENABLED:
+        if mod_debug:
+            logger.warning(
+                "[MOD] skip: disabled chat=%s msg_id=%s",
+                message.chat.id,
+                message.message_id,
+            )
         return
     if message.from_user is None or message.from_user.is_bot:
-        logger.warning(
-            "[MOD] skip: no_user_or_bot chat=%s msg_id=%s",
-            message.chat.id,
-            message.message_id,
-        )
+        if mod_debug:
+            logger.warning(
+                "[MOD] skip: no_user_or_bot chat=%s msg_id=%s",
+                message.chat.id,
+                message.message_id,
+            )
         return
-    mod_debug = await _is_mod_debug(message.chat.id)
     if ENABLE_CAPTCHA:
         pending = await get_pending_challenge(message.chat.id, message.from_user.id)
         if pending:
-            logger.warning(
-                "[MOD] skip: pending_captcha chat=%s user=%s",
-                message.chat.id,
-                message.from_user.id,
-            )
+            if mod_debug:
+                logger.warning(
+                    "[MOD] skip: pending_captcha chat=%s user=%s",
+                    message.chat.id,
+                    message.from_user.id,
+                )
             return
     try:
         if await _is_admin_user(message, message.from_user.id):
+            if mod_debug:
+                logger.warning(
+                    "[MOD] skip: admin chat=%s user=%s",
+                    message.chat.id,
+                    message.from_user.id,
+                )
+            return
+    except Exception:
+        if mod_debug:
             logger.warning(
-                "[MOD] skip: admin chat=%s user=%s",
+                "[MOD] skip: admin_check_failed chat=%s user=%s",
                 message.chat.id,
                 message.from_user.id,
             )
-            return
-    except Exception:
-        logger.warning(
-            "[MOD] skip: admin_check_failed chat=%s user=%s",
-            message.chat.id,
-            message.from_user.id,
-        )
         pass
 
     now = datetime.now(timezone.utc)
@@ -2076,7 +2065,8 @@ async def handle_moderation_message(message: Message) -> None:
         },
     )
     if not settings:
-        logger.warning("[MOD] skip: no_settings chat=%s", message.chat.id)
+        if mod_debug:
+            logger.warning("[MOD] skip: no_settings chat=%s", message.chat.id)
         return
     raid_mode = bool(settings.get("raid_mode"))
     flood_window = int(settings.get("flood_window_seconds", FLOOD_WINDOW_SECONDS))
@@ -3464,12 +3454,13 @@ async def handle_link_select(query: CallbackQuery) -> None:
     await query.answer("Linked.")
 
 
-@router.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}))
+@router.message(
+    F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}),
+    ~(F.text.startswith("/") | F.caption.startswith("/")),
+)
 async def trace_catch_all(message: Message) -> None:
     if message.from_user is None or message.from_user.is_bot:
         return
-    if is_bot_command_message(message):
-        raise SkipHandler
     if not await _is_mod_debug(message.chat.id):
         return
     logger.warning(
