@@ -22,6 +22,8 @@ from config import (
     APPLY_COOLDOWN_HOURS,
     APPLY_ENABLED,
     APPLY_MAX_PENDING,
+    APP_NOTIFY_COOLDOWN_HOURS,
+    AUTO_INVITE_INVITE_MINUTES,
     BOT_USERNAME,
     CAPTCHA_EXPIRE_MINUTES,
     CAPTCHA_MAX_ATTEMPTS,
@@ -40,6 +42,9 @@ from config import (
     RAID_FLOOD_MAX_MESSAGES,
     RAID_LINK_BLOCK_ALL,
     RAID_MODE_DEFAULT,
+    WARN_MUTE_AFTER,
+    WARN_MUTE_MINUTES,
+    WARN_RESET_AFTER_MUTE,
     WELCOME_RULES_MESSAGE_LINK,
 )
 from cr_api import ClashRoyaleAPIError, get_api_client
@@ -67,6 +72,7 @@ from db import (
     increment_challenge_attempts,
     record_rate_counter,
     increment_user_warning,
+    reset_user_warnings,
     is_user_verified,
     log_mod_action,
     mark_challenge_expired,
@@ -79,6 +85,7 @@ from db import (
     get_user_link,
     get_user_link_request,
     list_mod_actions,
+    list_mod_actions_for_user,
     search_player_candidates,
     set_chat_raid_mode,
     set_application_status,
@@ -87,6 +94,7 @@ from db import (
     set_user_verified,
     touch_last_reminded_at,
     update_application_tag,
+    mark_application_invited,
     update_challenge_message_id,
     upsert_clan_chat,
     upsert_user_link,
@@ -115,7 +123,6 @@ moderation_router = Router(name="moderation_router")
 
 HEADER_LINE = "══════════════════════════════"
 DIVIDER_LINE = "---------------------------"
-APP_NOTIFY_COOLDOWN_HOURS = 6
 
 
 def _format_help_commands(commands: list[dict[str, object]]) -> list[str]:
@@ -723,6 +730,7 @@ async def cmd_help(message: Message) -> None:
 
     moderation_lines = [
         "/warn <reason> - warn user (reply)",
+        "/warns [N] - last warnings (reply)",
         "/mute <min> <reason> - mute user (reply)",
         "/unmute - unmute user (reply)",
         "/ban <reason> - ban user (reply)",
@@ -730,10 +738,12 @@ async def cmd_help(message: Message) -> None:
         "/purge <N> - delete last N messages",
         "/raid_on - enable raid mode",
         "/raid_off - disable raid mode",
+        "/raid_status - show raid settings",
         "/modlog [N] - recent mod actions",
     ]
 
     lines = [
+
         HEADER_LINE,
         "🤖 Black Poison Bot - Help",
         HEADER_LINE,
@@ -932,24 +942,47 @@ async def cmd_app_notify(message: Message) -> None:
         await message.answer("Not allowed.", parse_mode=None)
         return
     if not message.text:
-        await message.answer("Usage: /app_notify <id>", parse_mode=None)
+        await message.answer("Usage: /app_notify <id> [reason]", parse_mode=None)
         return
-    parts = message.text.split(maxsplit=1)
+    parts = message.text.split(maxsplit=2)
     if len(parts) < 2:
-        await message.answer("Usage: /app_notify <id>", parse_mode=None)
+        await message.answer("Usage: /app_notify <id> [reason]", parse_mode=None)
         return
     try:
         app_id = int(parts[1])
     except ValueError:
         await message.answer("Invalid application id.", parse_mode=None)
         return
+    reason = parts[2].strip() if len(parts) > 2 else ""
 
     app = await get_application_by_id(app_id)
     if not app:
         await message.answer("Application not found.", parse_mode=None)
+        await log_mod_action(
+            chat_id=message.chat.id,
+            target_user_id=0,
+            admin_user_id=message.from_user.id,
+            action="app_notify_not_found",
+            reason=f"id={app_id}",
+        )
+        await send_modlog(
+            message.bot,
+            f"[APP_NOTIFY] not found: id={app_id} admin={message.from_user.id}",
+        )
         return
     if app.get("status") != "pending":
         await message.answer("Application is not pending.", parse_mode=None)
+        await log_mod_action(
+            chat_id=message.chat.id,
+            target_user_id=int(app.get("telegram_user_id") or 0),
+            admin_user_id=message.from_user.id,
+            action="app_notify_not_pending",
+            reason=f"status={app.get('status')}",
+        )
+        await send_modlog(
+            message.bot,
+            f"[APP_NOTIFY] not pending: id={app_id} status={app.get('status')} admin={message.from_user.id}",
+        )
         return
 
     clan_tag = _require_clan_tag()
@@ -958,28 +991,49 @@ async def cmd_app_notify(message: Message) -> None:
         return
     clan_tag = _normalize_tag(clan_tag)
 
-    state_key = _app_notify_state_key(app_id)
-    state = await get_app_state(state_key)
-    if state and state.get("notified_at"):
-        try:
-            notified_at = datetime.fromisoformat(state["notified_at"])
-        except (TypeError, ValueError):
-            notified_at = None
-        if notified_at:
-            if notified_at.tzinfo is None:
-                notified_at = notified_at.replace(tzinfo=timezone.utc)
-            now = datetime.now(timezone.utc)
-            if now - notified_at < timedelta(hours=APP_NOTIFY_COOLDOWN_HOURS):
-                remaining = timedelta(hours=APP_NOTIFY_COOLDOWN_HOURS) - (
-                    now - notified_at
-                )
-                hours = int(remaining.total_seconds() // 3600)
-                minutes = int((remaining.total_seconds() % 3600) // 60)
-                await message.answer(
-                    f"Already notified recently. Try again in {hours}h {minutes}m.",
-                    parse_mode=None,
-                )
-                return
+    now = datetime.now(timezone.utc)
+    last_notified = app.get("last_notified_at")
+    if isinstance(last_notified, datetime):
+        if last_notified.tzinfo is None:
+            last_notified = last_notified.replace(tzinfo=timezone.utc)
+        if now - last_notified < timedelta(hours=APP_NOTIFY_COOLDOWN_HOURS):
+            remaining = timedelta(hours=APP_NOTIFY_COOLDOWN_HOURS) - (
+                now - last_notified
+            )
+            hours = int(remaining.total_seconds() // 3600)
+            minutes = int((remaining.total_seconds() % 3600) // 60)
+            await message.answer(
+                f"Already notified recently. Try again in {hours}h {minutes}m.",
+                parse_mode=None,
+            )
+            await log_mod_action(
+                chat_id=message.chat.id,
+                target_user_id=int(app.get("telegram_user_id") or 0),
+                admin_user_id=message.from_user.id,
+                action="app_notify_cooldown",
+                reason=f"remaining={hours}h{minutes}m",
+            )
+            await send_modlog(
+                message.bot,
+                f"[APP_NOTIFY] cooldown: id={app_id} user={app.get('telegram_user_id')} remaining={hours}h{minutes}m",
+            )
+            return
+
+    telegram_user_id = app.get("telegram_user_id")
+    if not telegram_user_id:
+        await message.answer("No telegram_user_id on application.", parse_mode=None)
+        await log_mod_action(
+            chat_id=message.chat.id,
+            target_user_id=0,
+            admin_user_id=message.from_user.id,
+            action="app_notify_failed",
+            reason="missing telegram_user_id",
+        )
+        await send_modlog(
+            message.bot,
+            f"[APP_NOTIFY] failed: id={app_id} reason=no_user_id",
+        )
+        return
 
     text = (
         "Hi! A slot has opened in Black Poison.\n"
@@ -988,7 +1042,7 @@ async def cmd_app_notify(message: Message) -> None:
     )
     try:
         await message.bot.send_message(
-            app["telegram_user_id"],
+            int(telegram_user_id),
             text,
             parse_mode=None,
         )
@@ -998,24 +1052,34 @@ async def cmd_app_notify(message: Message) -> None:
             "⚠️ Failed to notify user (DM unavailable).",
             parse_mode=None,
         )
+        await log_mod_action(
+            chat_id=message.chat.id,
+            target_user_id=int(telegram_user_id),
+            admin_user_id=message.from_user.id,
+            action="app_notify_failed",
+            reason=f"{type(e).__name__}",
+        )
+        await send_modlog(
+            message.bot,
+            f"[APP_NOTIFY] failed: id={app_id} user={telegram_user_id} error={type(e).__name__}",
+        )
         return
 
-    now = datetime.now(timezone.utc)
-    notify_count = 1
-    if state and isinstance(state.get("notify_count"), int):
-        notify_count = int(state.get("notify_count")) + 1
-    await set_app_state(
-        state_key,
-        {
-            "notified_at": now.isoformat(),
-            "notify_count": notify_count,
-        },
+    invite_expires_at = now + timedelta(minutes=AUTO_INVITE_INVITE_MINUTES)
+    await mark_application_invited(
+        app_id, now=now, invite_expires_at=invite_expires_at
     )
-    logger.info(
-        "app_notify: admin=%s app_id=%s user_id=%s",
-        message.from_user.id,
-        app_id,
-        app["telegram_user_id"],
+    await log_mod_action(
+        chat_id=message.chat.id,
+        target_user_id=int(telegram_user_id),
+        admin_user_id=message.from_user.id,
+        action="app_notify",
+        reason=reason or None,
+    )
+    await send_modlog(
+        message.bot,
+        f"[APP_NOTIFY] sent: id={app_id} user={telegram_user_id} "
+        f"tag={app.get('player_tag') or 'n/a'} admin={message.from_user.id}",
     )
     await message.answer("✅ Applicant notified successfully.", parse_mode=None)
 
@@ -1064,9 +1128,113 @@ async def cmd_warn(message: Message) -> None:
         f"[MOD] warn: chat={message.chat.id} user={target.id} "
         f"count={warn_count} reason={reason or 'n/a'}",
     )
+    if warn_count >= WARN_MUTE_AFTER:
+        until = datetime.now(timezone.utc) + timedelta(minutes=WARN_MUTE_MINUTES)
+        try:
+            await message.bot.restrict_chat_member(
+                message.chat.id,
+                target.id,
+                permissions=ChatPermissions(
+                    can_send_messages=False,
+                    can_send_media_messages=False,
+                    can_send_other_messages=False,
+                    can_add_web_page_previews=False,
+                ),
+                until_date=until,
+            )
+        except Exception as e:
+            logger.warning("Failed to auto-mute user: %s", e, exc_info=True)
+            await send_modlog(
+                message.bot,
+                f"[MOD] auto_mute failed: chat={message.chat.id} "
+                f"user={target.id} err={e}",
+            )
+            await message.answer(
+                f"Warning issued. Total warnings: {warn_count}.",
+                parse_mode=None,
+            )
+            return
+
+        await set_user_penalty(
+            message.chat.id, target.id, "mute", until=until
+        )
+        await log_mod_action(
+            chat_id=message.chat.id,
+            target_user_id=target.id,
+            admin_user_id=message.from_user.id,
+            action="auto_mute_warn_threshold",
+            reason=f"warns={warn_count}",
+            message_id=message.message_id,
+        )
+        await send_modlog(
+            message.bot,
+            f"[MOD] auto_mute_warn_threshold: chat={message.chat.id} "
+            f"user={target.id} until={until.isoformat()} warns={warn_count}",
+        )
+        if WARN_RESET_AFTER_MUTE:
+            await reset_user_warnings(message.chat.id, target.id)
+        await message.answer(
+            f"Warning issued. Total warnings: {warn_count}. Auto-muted.",
+            parse_mode=None,
+        )
+        return
+
     await message.answer(
         f"Warning issued. Total warnings: {warn_count}.", parse_mode=None
     )
+
+
+@router.message(Command("warns"))
+async def cmd_warns(message: Message) -> None:
+    if message.from_user is None:
+        await message.answer("Unable to verify permissions.", parse_mode=None)
+        return
+    if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await message.answer("Use this command in a group.", parse_mode=None)
+        return
+    if message.reply_to_message is None or message.reply_to_message.from_user is None:
+        await message.answer("Reply to a user's message.", parse_mode=None)
+        return
+    try:
+        if not await _is_admin_user(message, message.from_user.id):
+            await message.answer("Not allowed.", parse_mode=None)
+            return
+    except Exception as e:
+        logger.error("Failed to check admin status: %s", e, exc_info=True)
+        await message.answer("Unable to verify admin status.", parse_mode=None)
+        return
+
+    limit = 5
+    if message.text:
+        parts = message.text.split(maxsplit=1)
+        if len(parts) > 1:
+            try:
+                limit = int(parts[1])
+            except ValueError:
+                limit = 5
+    if limit < 1:
+        limit = 1
+    if limit > 10:
+        limit = 10
+
+    target = message.reply_to_message.from_user
+    actions = await list_mod_actions_for_user(
+        message.chat.id,
+        target.id,
+        ["warn", "auto_mute_warn_threshold"],
+        limit=limit,
+    )
+    if not actions:
+        await message.answer("No warnings found.", parse_mode=None)
+        return
+    lines = [f"Last {len(actions)} warnings for {target.full_name}:"]
+    for action in actions:
+        created_at = _format_dt(action.get("created_at"))
+        reason = action.get("reason") or "n/a"
+        lines.append(
+            f"{action.get('action')} at {created_at} by {action.get('admin_user_id')} - {reason}"
+        )
+    await message.answer("\n".join(lines), parse_mode=None)
 
 
 @router.message(Command("mute"))
@@ -1414,6 +1582,44 @@ async def cmd_raid_off(message: Message) -> None:
         f"[MOD] raid_off: chat={message.chat.id} admin={message.from_user.id}",
     )
     await message.answer("Raid mode disabled.", parse_mode=None)
+
+
+@router.message(Command("raid_status"))
+async def cmd_raid_status(message: Message) -> None:
+    if message.from_user is None:
+        await message.answer("Unable to verify permissions.", parse_mode=None)
+        return
+    if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await message.answer("Use this command in a group.", parse_mode=None)
+        return
+    try:
+        if not await _is_admin_user(message, message.from_user.id):
+            await message.answer("Not allowed.", parse_mode=None)
+            return
+    except Exception as e:
+        logger.error("Failed to check admin status: %s", e, exc_info=True)
+        await message.answer("Unable to verify admin status.", parse_mode=None)
+        return
+
+    settings = await get_chat_settings(
+        message.chat.id,
+        defaults={
+            "raid_mode": RAID_MODE_DEFAULT,
+            "flood_window_seconds": FLOOD_WINDOW_SECONDS,
+            "flood_max_messages": FLOOD_MAX_MESSAGES,
+            "flood_mute_minutes": FLOOD_MUTE_MINUTES,
+            "new_user_link_block_hours": NEW_USER_LINK_BLOCK_HOURS,
+        },
+    )
+    lines = [
+        "Raid status",
+        f"raid_mode: {settings.get('raid_mode')}",
+        f"flood_window_seconds: {settings.get('flood_window_seconds')}",
+        f"flood_max_messages: {settings.get('flood_max_messages')}",
+        f"flood_mute_minutes: {settings.get('flood_mute_minutes')}",
+        f"new_user_link_block_hours: {settings.get('new_user_link_block_hours')}",
+    ]
+    await message.answer("\n".join(lines), parse_mode=None)
 
 
 @router.message(Command("modlog"))

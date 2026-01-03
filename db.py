@@ -2520,6 +2520,27 @@ async def get_warning_info(
     }
 
 
+async def reset_user_warnings(
+    chat_id: int, user_id: int, session: AsyncSession | None = None
+) -> None:
+    now = _utc_now()
+    stmt = (
+        update(UserWarning)
+        .where(UserWarning.chat_id == chat_id, UserWarning.user_id == user_id)
+        .values(count=0, last_warned_at=now)
+    )
+    if session is None:
+        async with _get_session() as session:
+            try:
+                await session.execute(stmt)
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+    else:
+        await session.execute(stmt)
+
+
 async def set_user_penalty(
     chat_id: int,
     user_id: int,
@@ -2630,6 +2651,42 @@ async def list_mod_actions(
             }
         )
     return actions
+
+
+async def list_mod_actions_for_user(
+    chat_id: int,
+    user_id: int,
+    actions: list[str],
+    limit: int = 5,
+    session: AsyncSession | None = None,
+) -> list[dict[str, Any]]:
+    if session is None:
+        async with _get_session() as session:
+            return await list_mod_actions_for_user(
+                chat_id, user_id, actions, limit=limit, session=session
+            )
+    result = await session.execute(
+        select(ModAction)
+        .where(
+            ModAction.chat_id == chat_id,
+            ModAction.target_user_id == user_id,
+            ModAction.action.in_(actions),
+        )
+        .order_by(ModAction.created_at.desc())
+        .limit(limit)
+    )
+    rows = []
+    for action in result.scalars().all():
+        rows.append(
+            {
+                "id": action.id,
+                "action": action.action,
+                "reason": action.reason,
+                "created_at": action.created_at,
+                "admin_user_id": action.admin_user_id,
+            }
+        )
+    return rows
 
 
 async def get_first_seen_time(

@@ -167,6 +167,15 @@ FLOOD_MAX_MESSAGES: int = int(
 FLOOD_MUTE_MINUTES: int = int(
     get_env_var("FLOOD_MUTE_MINUTES", default="10", required=False)
 )
+WARN_MUTE_AFTER: int = int(
+    get_env_var("WARN_MUTE_AFTER", default="3", required=False)
+)
+WARN_MUTE_MINUTES: int = int(
+    get_env_var("WARN_MUTE_MINUTES", default="60", required=False)
+)
+WARN_RESET_AFTER_MUTE: bool = get_env_bool(
+    "WARN_RESET_AFTER_MUTE", default="false"
+)
 NEW_USER_LINK_BLOCK_HOURS: int = int(
     get_env_var("NEW_USER_LINK_BLOCK_HOURS", default="72", required=False)
 )
@@ -186,6 +195,9 @@ APPLY_MAX_PENDING: int = int(
 )
 APPLY_CHAT_FORWARD_TO: int = int(
     get_env_var("APPLY_CHAT_FORWARD_TO", default="0", required=False) or "0"
+)
+APP_NOTIFY_COOLDOWN_HOURS: int = int(
+    get_env_var("APP_NOTIFY_COOLDOWN_HOURS", default="6", required=False)
 )
 
 # Auto-invite
