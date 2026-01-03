@@ -551,25 +551,33 @@ def _extract_command_name(message: Message) -> str:
 # - Link from non-admin logs link block + delete attempt.
 # - Pending user message logs [CAPTCHA] pending handler HIT.
 # - /mod_debug_off to reduce logs.
-async def is_user_pending_captcha(chat_id: int, user_id: int) -> bool:
+async def is_user_pending_captcha(chat_id: int, user_id: int, data=None) -> bool:
     if not ENABLE_CAPTCHA:
         return False
+    if data is not None and "pending_captcha_challenge" in data:
+        return bool(data.get("pending_captcha_challenge"))
     challenge = await get_pending_challenge(chat_id, user_id)
+    if data is not None:
+        data["pending_captcha_challenge"] = challenge
     return bool(challenge)
 
 
 class PendingCaptchaFilter(BaseFilter):
-    async def __call__(self, message: Message) -> bool:
+    async def __call__(self, message: Message, data=None) -> bool:
         if message.from_user is None:
             return False
-        return await is_user_pending_captcha(message.chat.id, message.from_user.id)
+        return await is_user_pending_captcha(
+            message.chat.id, message.from_user.id, data=data
+        )
 
 
 class NotPendingCaptchaFilter(BaseFilter):
-    async def __call__(self, message: Message) -> bool:
+    async def __call__(self, message: Message, data=None) -> bool:
         if message.from_user is None:
             return True
-        return not await is_user_pending_captcha(message.chat.id, message.from_user.id)
+        return not await is_user_pending_captcha(
+            message.chat.id, message.from_user.id, data=data
+        )
 
 
 async def _is_recent_user(

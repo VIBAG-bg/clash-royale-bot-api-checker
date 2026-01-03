@@ -41,18 +41,21 @@ class ModerationPolicyMiddleware(BaseMiddleware):
             return await handler(event, data)
 
         if ENABLE_CAPTCHA:
-            try:
-                pending = await get_pending_challenge(
-                    message.chat.id, message.from_user.id
-                )
-            except Exception as e:
-                logger.warning(
-                    "[MOD_MW] bypass: pending check failed chat=%s user=%s err=%s",
-                    message.chat.id,
-                    message.from_user.id,
-                    type(e).__name__,
-                )
-                return await handler(event, data)
+            pending = data.get("pending_captcha_challenge")
+            if "pending_captcha_challenge" not in data:
+                try:
+                    pending = await get_pending_challenge(
+                        message.chat.id, message.from_user.id
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "[MOD_MW] bypass: pending check failed chat=%s user=%s err=%s",
+                        message.chat.id,
+                        message.from_user.id,
+                        type(e).__name__,
+                    )
+                    return await handler(event, data)
+                data["pending_captcha_challenge"] = pending
             if pending:
                 return await handler(event, data)
 
