@@ -311,10 +311,17 @@ async def evaluate_moderation(
     if message.from_user is None or message.from_user.is_bot:
         return {
             "should_check": False,
-            "would_block_link": False,
-            "would_warn": False,
-            "would_mute": False,
+            "violation": "none",
+            "should_delete": False,
             "reason": "no_user",
+            "debug": {},
+        }
+    if not MODERATION_ENABLED:
+        return {
+            "should_check": False,
+            "violation": "none",
+            "should_delete": False,
+            "reason": "disabled",
             "debug": {},
         }
     settings = await get_chat_settings(
@@ -330,10 +337,26 @@ async def evaluate_moderation(
     if not settings:
         return {
             "should_check": False,
-            "would_block_link": False,
-            "would_warn": False,
-            "would_mute": False,
+            "violation": "none",
+            "should_delete": False,
             "reason": "no_settings",
+            "debug": {},
+        }
+    try:
+        if await _is_admin_user(message, message.from_user.id):
+            return {
+                "should_check": False,
+                "violation": "none",
+                "should_delete": False,
+                "reason": "admin",
+                "debug": {},
+            }
+    except Exception:
+        return {
+            "should_check": False,
+            "violation": "none",
+            "should_delete": False,
+            "reason": "admin_check_failed",
             "debug": {},
         }
     raid_mode = bool(settings.get("raid_mode"))
@@ -343,7 +366,10 @@ async def evaluate_moderation(
     link_block_hours = int(
         settings.get("new_user_link_block_hours", NEW_USER_LINK_BLOCK_HOURS)
     )
-    would_block_link = False
+    if raid_mode:
+        flood_max = RAID_FLOOD_MAX_MESSAGES
+    violation = "none"
+    should_delete = False
     reason = "none"
     debug: dict[str, object] = {
         "raid_mode": raid_mode,
@@ -351,7 +377,6 @@ async def evaluate_moderation(
         "flood_max": flood_max,
         "flood_mute": flood_mute,
         "link_block_hours": link_block_hours,
-        "flood_eval": "skipped",
     }
     if _message_has_link(message):
         verified = await is_user_verified(message.chat.id, message.from_user.id)
@@ -373,16 +398,128 @@ async def evaluate_moderation(
                 }
             )
         if block_links:
-            would_block_link = True
-            reason = "link_block"
+            violation = "link"
+            should_delete = True
+            reason = "link"
+    if violation == "none":
+        violation = "flood"
+        reason = "flood"
     return {
         "should_check": True,
-        "would_block_link": would_block_link,
-        "would_warn": would_block_link,
-        "would_mute": False,
+        "violation": violation,
+        "should_delete": should_delete,
         "reason": reason,
+        "flood_window": flood_window,
+        "flood_max": flood_max,
+        "flood_mute": flood_mute,
         "debug": debug,
     }
+
+
+async def apply_moderation_decision(
+    message: Message,
+    decision: dict[str, object],
+    *,
+    now: datetime | None = None,
+) -> None:
+    if now is None:
+        now = datetime.now(timezone.utc)
+    if message.from_user is None or message.from_user.is_bot:
+        return
+    if not decision.get("should_check"):
+        return
+    violation = decision.get("violation")
+    flood_window = int(decision.get("flood_window") or FLOOD_WINDOW_SECONDS)
+    flood_max = int(decision.get("flood_max") or FLOOD_MAX_MESSAGES)
+    flood_mute = int(decision.get("flood_mute") or FLOOD_MUTE_MINUTES)
+
+    if violation == "link":
+        if decision.get("should_delete"):
+            await _delete_message_safe(message)
+        warn_count = await increment_user_warning(
+            message.chat.id, message.from_user.id, now=now
+        )
+        await message.answer(
+            f"⚠️ Warning {_warn_step(warn_count)}/3{_warn_suffix(warn_count)} — "
+            f"links are not allowed here. User: {_format_user(message.from_user)}",
+            parse_mode=None,
+            disable_web_page_preview=True,
+        )
+        await log_mod_action(
+            chat_id=message.chat.id,
+            target_user_id=message.from_user.id,
+            admin_user_id=0,
+            action="link_block",
+            reason="link",
+            message_id=message.message_id,
+        )
+        await send_modlog(
+            message.bot,
+            f"[MOD] link blocked: chat={message.chat.id} "
+            f"user={message.from_user.id} warnings={warn_count}",
+        )
+        if warn_count >= 3:
+            await _mute_user(
+                message,
+                message.from_user.id,
+                minutes=flood_mute,
+                reason="link warnings",
+            )
+            await message.answer(
+                f"🔇 Auto-mute for links — 3/3 warnings. "
+                f"Muted: {_format_user(message.from_user)}. "
+                f"Duration: {flood_mute} min. Reason: link warnings.",
+                parse_mode=None,
+                disable_web_page_preview=True,
+            )
+        return
+
+    if violation == "flood":
+        count = await record_rate_counter(
+            message.chat.id,
+            message.from_user.id,
+            window_seconds=flood_window,
+            now=now,
+        )
+        if count <= flood_max:
+            return
+        warn_count = await increment_user_warning(
+            message.chat.id, message.from_user.id, now=now
+        )
+        await log_mod_action(
+            chat_id=message.chat.id,
+            target_user_id=message.from_user.id,
+            admin_user_id=0,
+            action="flood",
+            reason="flood",
+            message_id=message.message_id,
+        )
+        await send_modlog(
+            message.bot,
+            f"[MOD] flood: chat={message.chat.id} "
+            f"user={message.from_user.id} count={count}",
+        )
+        await message.answer(
+            f"⚠️ Warning {_warn_step(warn_count)}/3{_warn_suffix(warn_count)} — "
+            f"flood/spam detected (>{flood_max} msgs/{flood_window}s). "
+            f"User: {_format_user(message.from_user)}.",
+            parse_mode=None,
+            disable_web_page_preview=True,
+        )
+        if warn_count >= 3:
+            await _mute_user(
+                message,
+                message.from_user.id,
+                minutes=flood_mute,
+                reason="flood warnings",
+            )
+            await message.answer(
+                f"🔇 Auto-mute for flood — 3/3 warnings. "
+                f"Muted: {_format_user(message.from_user)}. "
+                f"Duration: {flood_mute} min. Reason: flood warnings.",
+                parse_mode=None,
+                disable_web_page_preview=True,
+            )
 
 
 def is_bot_command_message(message: Message) -> bool:
@@ -2176,6 +2313,7 @@ async def handle_pending_user_message(message: Message) -> None:
     NotPendingCaptchaFilter(),
 )
 async def handle_moderation_message(message: Message) -> None:
+    # DO NOT ADD POLICY LOGIC HERE. Add new rules only to evaluate_moderation().
     if MODERATION_MW_ENABLED and not MODERATION_MW_DRY_RUN:
         return
     mod_debug = await _is_mod_debug(message.chat.id)
@@ -2189,200 +2327,11 @@ async def handle_moderation_message(message: Message) -> None:
             (message.text or message.caption or "")[:200],
             [entity.type for entity in (message.entities or [])],
         )
-    if not MODERATION_ENABLED:
-        if mod_debug:
-            logger.warning(
-                "[MOD] skip: disabled chat=%s msg_id=%s",
-                message.chat.id,
-                message.message_id,
-            )
-        return
-    if message.from_user is None or message.from_user.is_bot:
-        if mod_debug:
-            logger.warning(
-                "[MOD] skip: no_user_or_bot chat=%s msg_id=%s",
-                message.chat.id,
-                message.message_id,
-            )
-        return
-    try:
-        if await _is_admin_user(message, message.from_user.id):
-            if mod_debug:
-                logger.warning(
-                    "[MOD] skip: admin chat=%s user=%s",
-                    message.chat.id,
-                    message.from_user.id,
-                )
-            return
-    except Exception:
-        if mod_debug:
-            logger.warning(
-                "[MOD] skip: admin_check_failed chat=%s user=%s",
-                message.chat.id,
-                message.from_user.id,
-            )
-        pass
-
     now = datetime.now(timezone.utc)
-    settings = await get_chat_settings(
-        message.chat.id,
-        defaults={
-            "raid_mode": RAID_MODE_DEFAULT,
-            "flood_window_seconds": FLOOD_WINDOW_SECONDS,
-            "flood_max_messages": FLOOD_MAX_MESSAGES,
-            "flood_mute_minutes": FLOOD_MUTE_MINUTES,
-            "new_user_link_block_hours": NEW_USER_LINK_BLOCK_HOURS,
-        },
+    decision = await evaluate_moderation(
+        message, now=now, mod_debug=mod_debug
     )
-    if not settings:
-        if mod_debug:
-            logger.warning("[MOD] skip: no_settings chat=%s", message.chat.id)
-        return
-    raid_mode = bool(settings.get("raid_mode"))
-    flood_window = int(settings.get("flood_window_seconds", FLOOD_WINDOW_SECONDS))
-    flood_max = int(settings.get("flood_max_messages", FLOOD_MAX_MESSAGES))
-    flood_mute = int(settings.get("flood_mute_minutes", FLOOD_MUTE_MINUTES))
-    link_block_hours = int(
-        settings.get("new_user_link_block_hours", NEW_USER_LINK_BLOCK_HOURS)
-    )
-    if mod_debug:
-        logger.warning(
-            "[MOD] settings chat=%s raid=%s flood_window=%s flood_max=%s flood_mute=%s link_block_hours=%s",
-            message.chat.id,
-            raid_mode,
-            flood_window,
-            flood_max,
-            flood_mute,
-            link_block_hours,
-        )
-    if mod_debug and not (message.text or message.caption):
-        logger.warning(
-            "[MOD] note: no_text_or_caption chat=%s msg_id=%s",
-            message.chat.id,
-            message.message_id,
-        )
-
-    if _message_has_link(message):
-        verified = await is_user_verified(message.chat.id, message.from_user.id)
-        recent = await _is_recent_user(
-            message.chat.id,
-            message.from_user.id,
-            now=now,
-            hours=link_block_hours,
-        )
-        block_links = (not verified) or recent
-        if raid_mode and RAID_LINK_BLOCK_ALL:
-            block_links = True
-        if block_links:
-            await _delete_message_safe(message)
-            warn_count = await increment_user_warning(
-                message.chat.id, message.from_user.id, now=now
-            )
-            await message.answer(
-                f"⚠️ Warning {_warn_step(warn_count)}/3{_warn_suffix(warn_count)} — "
-                f"links are not allowed here. User: {_format_user(message.from_user)}",
-                parse_mode=None,
-                disable_web_page_preview=True,
-            )
-            logger.warning(
-                "[MOD] link_block: chat=%s user=%s warnings=%s verified=%s recent=%s raid=%s",
-                message.chat.id,
-                message.from_user.id,
-                warn_count,
-                verified,
-                recent,
-                raid_mode,
-            )
-            await log_mod_action(
-                chat_id=message.chat.id,
-                target_user_id=message.from_user.id,
-                admin_user_id=0,
-                action="link_block",
-                reason="link",
-                message_id=message.message_id,
-            )
-            await send_modlog(
-                message.bot,
-                f"[MOD] link blocked: chat={message.chat.id} "
-                f"user={message.from_user.id} warnings={warn_count}",
-            )
-            if warn_count >= 3:
-                await _mute_user(
-                    message,
-                    message.from_user.id,
-                    minutes=flood_mute,
-                    reason="link warnings",
-                )
-                await message.answer(
-                    f"🔇 Auto-mute for links — 3/3 warnings. "
-                    f"Muted: {_format_user(message.from_user)}. "
-                    f"Duration: {flood_mute} min. Reason: link warnings.",
-                    parse_mode=None,
-                    disable_web_page_preview=True,
-                )
-            return
-
-    if raid_mode:
-        flood_max = RAID_FLOOD_MAX_MESSAGES
-
-    count = await record_rate_counter(
-        message.chat.id,
-        message.from_user.id,
-        window_seconds=flood_window,
-        now=now,
-    )
-    if count > flood_max:
-        logger.warning(
-            "[MOD] flood_detected: chat=%s user=%s count=%s limit=%s raid=%s",
-            message.chat.id,
-            message.from_user.id,
-            count,
-            flood_max,
-            raid_mode,
-        )
-        warn_count = await increment_user_warning(
-            message.chat.id, message.from_user.id, now=now
-        )
-        await log_mod_action(
-            chat_id=message.chat.id,
-            target_user_id=message.from_user.id,
-            admin_user_id=0,
-            action="flood",
-            reason="flood",
-            message_id=message.message_id,
-        )
-        await send_modlog(
-            message.bot,
-            f"[MOD] flood: chat={message.chat.id} "
-            f"user={message.from_user.id} count={count}",
-        )
-        await message.answer(
-            f"⚠️ Warning {_warn_step(warn_count)}/3{_warn_suffix(warn_count)} — "
-            f"flood/spam detected (>{flood_max} msgs/{flood_window}s). "
-            f"User: {_format_user(message.from_user)}.",
-            parse_mode=None,
-            disable_web_page_preview=True,
-        )
-        if warn_count >= 3:
-            logger.warning(
-                "[MOD] auto_mute: chat=%s user=%s warn_count=%s",
-                message.chat.id,
-                message.from_user.id,
-                warn_count,
-            )
-            await _mute_user(
-                message,
-                message.from_user.id,
-                minutes=flood_mute,
-                reason="flood warnings",
-            )
-            await message.answer(
-                f"🔇 Auto-mute for flood — 3/3 warnings. "
-                f"Muted: {_format_user(message.from_user)}. "
-                f"Duration: {flood_mute} min. Reason: flood warnings.",
-                parse_mode=None,
-                disable_web_page_preview=True,
-            )
+    await apply_moderation_decision(message, decision, now=now)
 
 
 @moderation_router.callback_query(F.data.startswith("cap:"))
