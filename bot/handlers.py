@@ -121,6 +121,10 @@ logger.info("MODLOG_CHAT_ID loaded as %r", MODLOG_CHAT_ID)
 router = Router(name="main_handlers")
 moderation_router = Router(name="moderation_router")
 
+from moderation_middleware import ModerationPolicyMiddleware
+
+moderation_router.message.middleware(ModerationPolicyMiddleware())
+
 HEADER_LINE = "══════════════════════════════"
 DIVIDER_LINE = "---------------------------"
 
@@ -292,6 +296,91 @@ def _message_has_link(message: Message) -> bool:
         if token in lowered:
             return True
     return False
+
+
+async def evaluate_moderation(
+    message: Message,
+    *,
+    now: datetime | None = None,
+    mod_debug: bool = False,
+) -> dict[str, object]:
+    if now is None:
+        now = datetime.now(timezone.utc)
+    if message.from_user is None or message.from_user.is_bot:
+        return {
+            "should_check": False,
+            "would_block_link": False,
+            "would_warn": False,
+            "would_mute": False,
+            "reason": "no_user",
+            "debug": {},
+        }
+    settings = await get_chat_settings(
+        message.chat.id,
+        defaults={
+            "raid_mode": RAID_MODE_DEFAULT,
+            "flood_window_seconds": FLOOD_WINDOW_SECONDS,
+            "flood_max_messages": FLOOD_MAX_MESSAGES,
+            "flood_mute_minutes": FLOOD_MUTE_MINUTES,
+            "new_user_link_block_hours": NEW_USER_LINK_BLOCK_HOURS,
+        },
+    )
+    if not settings:
+        return {
+            "should_check": False,
+            "would_block_link": False,
+            "would_warn": False,
+            "would_mute": False,
+            "reason": "no_settings",
+            "debug": {},
+        }
+    raid_mode = bool(settings.get("raid_mode"))
+    flood_window = int(settings.get("flood_window_seconds", FLOOD_WINDOW_SECONDS))
+    flood_max = int(settings.get("flood_max_messages", FLOOD_MAX_MESSAGES))
+    flood_mute = int(settings.get("flood_mute_minutes", FLOOD_MUTE_MINUTES))
+    link_block_hours = int(
+        settings.get("new_user_link_block_hours", NEW_USER_LINK_BLOCK_HOURS)
+    )
+    would_block_link = False
+    reason = "none"
+    debug: dict[str, object] = {
+        "raid_mode": raid_mode,
+        "flood_window": flood_window,
+        "flood_max": flood_max,
+        "flood_mute": flood_mute,
+        "link_block_hours": link_block_hours,
+        "flood_eval": "skipped",
+    }
+    if _message_has_link(message):
+        verified = await is_user_verified(message.chat.id, message.from_user.id)
+        recent = await _is_recent_user(
+            message.chat.id,
+            message.from_user.id,
+            now=now,
+            hours=link_block_hours,
+        )
+        block_links = (not verified) or recent
+        if raid_mode and RAID_LINK_BLOCK_ALL:
+            block_links = True
+        if mod_debug:
+            debug.update(
+                {
+                    "verified": verified,
+                    "recent": recent,
+                    "block_links": block_links,
+                }
+            )
+        if block_links:
+            would_block_link = True
+            reason = "link_block"
+    return {
+        "should_check": True,
+        "would_block_link": would_block_link,
+        "would_warn": would_block_link,
+        "would_mute": False,
+        "reason": reason,
+        "debug": debug,
+    }
 
 
 def is_bot_command_message(message: Message) -> bool:

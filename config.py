@@ -158,6 +158,12 @@ MODLOG_CHAT_ID: int = int(
 
 # Moderation system
 MODERATION_ENABLED: bool = get_env_bool("MODERATION_ENABLED", default="true")
+MODERATION_MW_ENABLED: bool = get_env_bool(
+    "MODERATION_MW_ENABLED", default="false"
+)
+MODERATION_MW_DRY_RUN: bool = get_env_bool(
+    "MODERATION_MW_DRY_RUN", default="true"
+)
 FLOOD_WINDOW_SECONDS: int = int(
     get_env_var("FLOOD_WINDOW_SECONDS", default="10", required=False)
 )
