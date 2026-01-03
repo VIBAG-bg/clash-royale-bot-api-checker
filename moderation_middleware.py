@@ -45,8 +45,14 @@ class ModerationPolicyMiddleware(BaseMiddleware):
                 pending = await get_pending_challenge(
                     message.chat.id, message.from_user.id
                 )
-            except Exception:
-                pending = None
+            except Exception as e:
+                logger.warning(
+                    "[MOD_MW] bypass: pending check failed chat=%s user=%s err=%s",
+                    message.chat.id,
+                    message.from_user.id,
+                    type(e).__name__,
+                )
+                return await handler(event, data)
             if pending:
                 return await handler(event, data)
 
