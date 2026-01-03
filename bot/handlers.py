@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatMemberStatus, ChatType, MessageEntityType
-from aiogram.filters import Command
+from aiogram.filters import BaseFilter, Command
 from aiogram.types import (
     CallbackQuery,
     ChatMemberUpdated,
@@ -291,6 +291,33 @@ def _extract_command_name(message: Message) -> str:
     if not text:
         return "/?"
     return text.split()[0]
+
+
+# Verification checklist:
+# - /help works in group.
+# - /mod_debug_on then normal text logs [MOD] HIT.
+# - Link from non-admin logs link block + delete attempt.
+# - Pending user message logs [CAPTCHA] pending handler HIT.
+# - /mod_debug_off to reduce logs.
+async def is_user_pending_captcha(chat_id: int, user_id: int) -> bool:
+    if not ENABLE_CAPTCHA:
+        return False
+    challenge = await get_pending_challenge(chat_id, user_id)
+    return bool(challenge)
+
+
+class PendingCaptchaFilter(BaseFilter):
+    async def __call__(self, message: Message) -> bool:
+        if message.from_user is None:
+            return False
+        return await is_user_pending_captcha(message.chat.id, message.from_user.id)
+
+
+class NotPendingCaptchaFilter(BaseFilter):
+    async def __call__(self, message: Message) -> bool:
+        if message.from_user is None:
+            return True
+        return not await is_user_pending_captcha(message.chat.id, message.from_user.id)
 
 
 async def _is_recent_user(
@@ -1936,14 +1963,29 @@ async def handle_member_join(event: ChatMemberUpdated) -> None:
 @moderation_router.message(
     F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}),
     ~(F.text.startswith("/") | F.caption.startswith("/")),
+    PendingCaptchaFilter(),
 )
 async def handle_pending_user_message(message: Message) -> None:
     if not ENABLE_CAPTCHA:
         return
     if message.from_user is None or message.from_user.is_bot:
         return
+    if await _is_mod_debug(message.chat.id):
+        logger.warning(
+            "[CAPTCHA] pending handler HIT chat=%s user=%s msg_id=%s",
+            message.chat.id,
+            message.from_user.id,
+            message.message_id,
+        )
     challenge = await get_pending_challenge(message.chat.id, message.from_user.id)
     if not challenge:
+        if await _is_mod_debug(message.chat.id):
+            logger.warning(
+                "[CAPTCHA] pending handler no challenge chat=%s user=%s msg_id=%s",
+                message.chat.id,
+                message.from_user.id,
+                message.message_id,
+            )
         return
     try:
         await message.delete()
@@ -1996,6 +2038,7 @@ async def handle_pending_user_message(message: Message) -> None:
 @moderation_router.message(
     F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}),
     ~(F.text.startswith("/") | F.caption.startswith("/")),
+    NotPendingCaptchaFilter(),
 )
 async def handle_moderation_message(message: Message) -> None:
     mod_debug = await _is_mod_debug(message.chat.id)
@@ -2025,16 +2068,6 @@ async def handle_moderation_message(message: Message) -> None:
                 message.message_id,
             )
         return
-    if ENABLE_CAPTCHA:
-        pending = await get_pending_challenge(message.chat.id, message.from_user.id)
-        if pending:
-            if mod_debug:
-                logger.warning(
-                    "[MOD] skip: pending_captcha chat=%s user=%s",
-                    message.chat.id,
-                    message.from_user.id,
-                )
-            return
     try:
         if await _is_admin_user(message, message.from_user.id):
             if mod_debug:
