@@ -1077,7 +1077,6 @@ async def scheduled_unmute_task(bot: Bot) -> None:
                         user_id,
                         type(e).__name__,
                     )
-                    await mark_scheduled_unmute_sent(item["id"], sent_at=now)
                     continue
 
                 if member.status in (ChatMemberStatus.LEFT, ChatMemberStatus.KICKED):
@@ -1086,7 +1085,6 @@ async def scheduled_unmute_task(bot: Bot) -> None:
                         chat_id,
                         user_id,
                     )
-                    await mark_scheduled_unmute_sent(item["id"], sent_at=now)
                     continue
 
                 user = member.user
@@ -1103,6 +1101,7 @@ async def scheduled_unmute_task(bot: Bot) -> None:
                     logger.warning(
                         "Unmute notify sent: chat=%s user=%s", chat_id, user_id
                     )
+                    await mark_scheduled_unmute_sent(item["id"], sent_at=now)
                 except Exception as e:
                     logger.warning(
                         "Unmute notify failed: chat=%s user=%s err=%s",
@@ -1110,7 +1109,6 @@ async def scheduled_unmute_task(bot: Bot) -> None:
                         user_id,
                         type(e).__name__,
                     )
-                await mark_scheduled_unmute_sent(item["id"], sent_at=now)
             await asyncio.sleep(30)
         except asyncio.CancelledError:
             logger.info("Scheduled unmute task cancelled")
