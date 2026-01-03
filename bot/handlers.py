@@ -306,6 +306,7 @@ async def evaluate_moderation(
     now: datetime | None = None,
     mod_debug: bool = False,
 ) -> dict[str, object]:
+    # MUST REMAIN SIDE-EFFECT FREE
     if now is None:
         now = datetime.now(timezone.utc)
     if message.from_user is None or message.from_user.is_bot:
@@ -422,6 +423,7 @@ async def apply_moderation_decision(
     *,
     now: datetime | None = None,
 ) -> None:
+    # ALL ENFORCEMENT MUST LIVE HERE
     if now is None:
         now = datetime.now(timezone.utc)
     if message.from_user is None or message.from_user.is_bot:
