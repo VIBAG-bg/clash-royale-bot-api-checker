@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatMemberStatus, ChatType, MessageEntityType
+from aiogram.exceptions import SkipHandler
 from aiogram.filters import Command
 from aiogram.types import (
     CallbackQuery,
@@ -1949,7 +1950,7 @@ async def handle_pending_user_message(message: Message) -> None:
                 message.from_user.id,
                 message.chat.id,
             )
-        return
+        raise SkipHandler
     challenge = await get_pending_challenge(message.chat.id, message.from_user.id)
     if not challenge:
         return
@@ -2022,7 +2023,7 @@ async def handle_moderation_message(message: Message) -> None:
                 message.from_user.id if message.from_user else None,
                 message.chat.id,
             )
-        return
+        raise SkipHandler
     if not MODERATION_ENABLED:
         logger.warning(
             "[MOD] skip: disabled chat=%s msg_id=%s",
@@ -3468,7 +3469,7 @@ async def trace_catch_all(message: Message) -> None:
     if message.from_user is None or message.from_user.is_bot:
         return
     if is_bot_command_message(message):
-        return
+        raise SkipHandler
     if not await _is_mod_debug(message.chat.id):
         return
     logger.warning(
