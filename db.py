@@ -562,7 +562,29 @@ async def connect_db() -> None:
     if _engine is None:
         raw_url = _require_database_url()
         async_url = _build_async_database_url(raw_url)
-        _engine = create_async_engine(async_url, pool_pre_ping=True)
+        pool_kwargs = {"pool_pre_ping": True}
+        def _pool_int(name, raw):
+            if raw is None or raw.strip() == "":
+                return None
+            try:
+                return int(raw)
+            except ValueError:
+                logger.warning("Invalid %s value %r; ignoring.", name, raw)
+                return None
+
+        pool_size = _pool_int("DB_POOL_SIZE", os.getenv("DB_POOL_SIZE"))
+        max_overflow = _pool_int("DB_MAX_OVERFLOW", os.getenv("DB_MAX_OVERFLOW"))
+        pool_timeout = _pool_int("DB_POOL_TIMEOUT", os.getenv("DB_POOL_TIMEOUT"))
+        pool_recycle = _pool_int("DB_POOL_RECYCLE", os.getenv("DB_POOL_RECYCLE"))
+        if pool_size is not None:
+            pool_kwargs["pool_size"] = pool_size
+        if max_overflow is not None:
+            pool_kwargs["max_overflow"] = max_overflow
+        if pool_timeout is not None:
+            pool_kwargs["pool_timeout"] = pool_timeout
+        if pool_recycle is not None:
+            pool_kwargs["pool_recycle"] = pool_recycle
+        _engine = create_async_engine(async_url, **pool_kwargs)
         _session_factory = async_sessionmaker(_engine, expire_on_commit=False)
 
 
