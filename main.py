@@ -1195,7 +1195,7 @@ async def main() -> None:
     # Create bot instance
     bot = Bot(
         token=token,
-        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+        default=DefaultBotProperties(parse_mode=None),
     )
     global BOT
     BOT = bot
