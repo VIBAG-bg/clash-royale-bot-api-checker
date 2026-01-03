@@ -418,6 +418,30 @@ class RateCounter(Base):
     count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
 
+class ScheduledUnmute(Base):
+    __tablename__ = "scheduled_unmutes"
+    __table_args__ = (
+        UniqueConstraint(
+            "chat_id",
+            "user_id",
+            name="uq_scheduled_unmutes_chat_user",
+        ),
+        Index("ix_scheduled_unmutes_unmute_at", "unmute_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    unmute_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    reason: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, nullable=False
+    )
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class AppState(Base):
     __tablename__ = "app_state"
 
@@ -2611,6 +2635,100 @@ async def log_mod_action(
         reason=reason,
         message_id=message_id,
         created_at=now,
+    )
+    if session is None:
+        async with _get_session() as session:
+            try:
+                await session.execute(stmt)
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+    else:
+        await session.execute(stmt)
+
+
+async def schedule_unmute_notification(
+    *,
+    chat_id: int,
+    user_id: int,
+    unmute_at: datetime,
+    reason: str | None = None,
+    session: AsyncSession | None = None,
+) -> None:
+    now = _utc_now()
+    stmt = pg_insert(ScheduledUnmute.__table__).values(
+        chat_id=chat_id,
+        user_id=user_id,
+        unmute_at=unmute_at,
+        reason=reason,
+        created_at=now,
+        sent_at=None,
+    )
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["chat_id", "user_id"],
+        set_={
+            "unmute_at": unmute_at,
+            "reason": reason,
+            "created_at": now,
+            "sent_at": None,
+        },
+    )
+    if session is None:
+        async with _get_session() as session:
+            try:
+                await session.execute(stmt)
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+    else:
+        await session.execute(stmt)
+
+
+async def list_due_scheduled_unmutes(
+    *,
+    limit: int = 100,
+    session: AsyncSession | None = None,
+) -> list[dict[str, Any]]:
+    if session is None:
+        async with _get_session() as session:
+            return await list_due_scheduled_unmutes(limit=limit, session=session)
+    now = _utc_now()
+    result = await session.execute(
+        select(ScheduledUnmute)
+        .where(
+            ScheduledUnmute.sent_at.is_(None),
+            ScheduledUnmute.unmute_at <= now,
+        )
+        .order_by(ScheduledUnmute.unmute_at.asc())
+        .limit(limit)
+    )
+    rows = []
+    for row in result.scalars().all():
+        rows.append(
+            {
+                "id": row.id,
+                "chat_id": row.chat_id,
+                "user_id": row.user_id,
+                "unmute_at": row.unmute_at,
+                "reason": row.reason,
+            }
+        )
+    return rows
+
+
+async def mark_scheduled_unmute_sent(
+    unmute_id: int,
+    *,
+    sent_at: datetime | None = None,
+    session: AsyncSession | None = None,
+) -> None:
+    when = sent_at or _utc_now()
+    stmt = (
+        update(ScheduledUnmute)
+        .where(ScheduledUnmute.id == unmute_id)
+        .values(sent_at=when)
     )
     if session is None:
         async with _get_session() as session:

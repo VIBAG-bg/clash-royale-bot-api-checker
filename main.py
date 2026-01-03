@@ -7,7 +7,7 @@ from datetime import datetime, timezone, date, timedelta
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
+from aiogram.enums import ChatMemberStatus, ParseMode
 
 from bot import router, moderation_router
 from config import (
@@ -44,8 +44,10 @@ from db import (
     list_invite_candidates,
     list_invited_applications,
     log_mod_action,
+    list_due_scheduled_unmutes,
     mark_application_invited,
     mark_application_joined,
+    mark_scheduled_unmute_sent,
     reset_expired_invite,
     try_mark_reminder_posted,
     set_colosseum_index_for_season,
@@ -1057,6 +1059,67 @@ async def auto_invite_task(bot: Bot) -> None:
             logger.error("Error in auto-invite task: %s", e, exc_info=True)
 
 
+async def scheduled_unmute_task(bot: Bot) -> None:
+    logger.info("Scheduled unmute notification task started")
+    while True:
+        try:
+            now = datetime.now(timezone.utc)
+            due = await list_due_scheduled_unmutes(limit=100)
+            for item in due:
+                chat_id = int(item["chat_id"])
+                user_id = int(item["user_id"])
+                try:
+                    member = await bot.get_chat_member(chat_id, user_id)
+                except Exception as e:
+                    logger.warning(
+                        "Unmute notify failed: chat=%s user=%s err=%s",
+                        chat_id,
+                        user_id,
+                        type(e).__name__,
+                    )
+                    await mark_scheduled_unmute_sent(item["id"], sent_at=now)
+                    continue
+
+                if member.status in (ChatMemberStatus.LEFT, ChatMemberStatus.KICKED):
+                    logger.warning(
+                        "Unmute notify skipped (left): chat=%s user=%s",
+                        chat_id,
+                        user_id,
+                    )
+                    await mark_scheduled_unmute_sent(item["id"], sent_at=now)
+                    continue
+
+                user = member.user
+                if user.username:
+                    label = f"@{user.username}"
+                else:
+                    label = f"{user.full_name} ({user.id})"
+                try:
+                    await bot.send_message(
+                        chat_id,
+                        f"✅ Mute expired: {label} can write again.",
+                        parse_mode=None,
+                    )
+                    logger.warning(
+                        "Unmute notify sent: chat=%s user=%s", chat_id, user_id
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Unmute notify failed: chat=%s user=%s err=%s",
+                        chat_id,
+                        user_id,
+                        type(e).__name__,
+                    )
+                await mark_scheduled_unmute_sent(item["id"], sent_at=now)
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            logger.info("Scheduled unmute task cancelled")
+            break
+        except Exception as e:
+            logger.warning("Scheduled unmute task error: %s", e, exc_info=True)
+            await asyncio.sleep(30)
+
+
 @asynccontextmanager
 async def lifespan(dispatcher: Dispatcher):
     """
@@ -1078,10 +1141,13 @@ async def lifespan(dispatcher: Dispatcher):
     fetch_task = asyncio.create_task(background_fetch_task())
     reminder_task = None
     invite_task = None
+    unmute_task = None
     if REMINDER_ENABLED:
         reminder_task = asyncio.create_task(daily_reminder_task(BOT))
     if AUTO_INVITE_ENABLED:
         invite_task = asyncio.create_task(auto_invite_task(BOT))
+    unmute_task = asyncio.create_task(scheduled_unmute_task(BOT))
+    logger.info("Scheduled unmute notification task started")
     logger.info("Background fetch task started")
     
     yield
@@ -1095,6 +1161,8 @@ async def lifespan(dispatcher: Dispatcher):
         reminder_task.cancel()
     if invite_task is not None:
         invite_task.cancel()
+    if unmute_task is not None:
+        unmute_task.cancel()
     try:
         await fetch_task
     except asyncio.CancelledError:
@@ -1107,6 +1175,11 @@ async def lifespan(dispatcher: Dispatcher):
     if invite_task is not None:
         try:
             await invite_task
+        except asyncio.CancelledError:
+            pass
+    if unmute_task is not None:
+        try:
+            await unmute_task
         except asyncio.CancelledError:
             pass
     

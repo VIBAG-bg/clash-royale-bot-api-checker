@@ -68,13 +68,13 @@ from db import (
     get_or_create_pending_challenge,
     get_pending_challenge,
     get_top_absent_members,
-    get_warning_info,
     increment_challenge_attempts,
     record_rate_counter,
     increment_user_warning,
     reset_user_warnings,
     is_user_verified,
     log_mod_action,
+    schedule_unmute_notification,
     mark_challenge_expired,
     mark_challenge_failed,
     mark_challenge_passed,
@@ -205,6 +205,17 @@ def _format_user_label(user: object) -> str:
     if username:
         label = f"{label} (@{username})"
     return label
+
+
+def _format_user(user: object) -> str:
+    username = getattr(user, "username", None)
+    user_id = getattr(user, "id", None)
+    full_name = getattr(user, "full_name", "Unknown")
+    if username and user_id:
+        return f"@{username} ({user_id})"
+    if user_id:
+        return f"{full_name} ({user_id})"
+    return full_name
 
 
 def _build_user_mention(user: object) -> str:
@@ -393,6 +404,17 @@ async def _mute_user(
     await set_user_penalty(
         message.chat.id, user_id, "mute", until=until
     )
+    try:
+        await schedule_unmute_notification(
+            chat_id=message.chat.id,
+            user_id=user_id,
+            unmute_at=until,
+            reason=reason,
+        )
+    except Exception as e:
+        logger.warning(
+            "Failed to schedule unmute notification: %s", e, exc_info=True
+        )
     await log_mod_action(
         chat_id=message.chat.id,
         target_user_id=user_id,
@@ -1237,6 +1259,17 @@ async def cmd_warn(message: Message) -> None:
         await set_user_penalty(
             message.chat.id, target.id, "mute", until=until
         )
+        try:
+            await schedule_unmute_notification(
+                chat_id=message.chat.id,
+                user_id=target.id,
+                unmute_at=until,
+                reason="warn threshold",
+            )
+        except Exception as e:
+            logger.warning(
+                "Failed to schedule unmute notification: %s", e, exc_info=True
+            )
         await log_mod_action(
             chat_id=message.chat.id,
             target_user_id=target.id,
@@ -2141,6 +2174,12 @@ async def handle_moderation_message(message: Message) -> None:
             warn_count = await increment_user_warning(
                 message.chat.id, message.from_user.id, now=now
             )
+            await message.answer(
+                f"⚠️ Warning {warn_count}/3 — links are not allowed here. "
+                f"User: {_format_user(message.from_user)}",
+                parse_mode=None,
+                disable_web_page_preview=True,
+            )
             logger.warning(
                 "[MOD] link_block: chat=%s user=%s warnings=%s verified=%s recent=%s raid=%s",
                 message.chat.id,
@@ -2170,6 +2209,13 @@ async def handle_moderation_message(message: Message) -> None:
                     minutes=flood_mute,
                     reason="link warnings",
                 )
+                await message.answer(
+                    f"🔇 Auto-mute for links — 3/3 warnings. "
+                    f"Muted: {_format_user(message.from_user)}. "
+                    f"Duration: {flood_mute} min. Reason: link warnings.",
+                    parse_mode=None,
+                    disable_web_page_preview=True,
+                )
             return
 
     if raid_mode:
@@ -2182,7 +2228,6 @@ async def handle_moderation_message(message: Message) -> None:
         now=now,
     )
     if count > flood_max:
-        await _delete_message_safe(message)
         logger.warning(
             "[MOD] flood_detected: chat=%s user=%s count=%s limit=%s raid=%s",
             message.chat.id,
@@ -2191,15 +2236,6 @@ async def handle_moderation_message(message: Message) -> None:
             flood_max,
             raid_mode,
         )
-        warn_info = await get_warning_info(
-            message.chat.id, message.from_user.id
-        )
-        recent_warn = False
-        if warn_info and isinstance(warn_info.get("last_warned_at"), datetime):
-            last_warned = warn_info["last_warned_at"]
-            if last_warned.tzinfo is None:
-                last_warned = last_warned.replace(tzinfo=timezone.utc)
-            recent_warn = now - last_warned < timedelta(hours=1)
         warn_count = await increment_user_warning(
             message.chat.id, message.from_user.id, now=now
         )
@@ -2216,7 +2252,14 @@ async def handle_moderation_message(message: Message) -> None:
             f"[MOD] flood: chat={message.chat.id} "
             f"user={message.from_user.id} count={count}",
         )
-        if recent_warn and warn_count >= 2:
+        await message.answer(
+            f"⚠️ Warning {warn_count}/3 — flood/spam detected "
+            f"(>{flood_max} msgs/{flood_window}s). "
+            f"User: {_format_user(message.from_user)}.",
+            parse_mode=None,
+            disable_web_page_preview=True,
+        )
+        if warn_count >= 3:
             logger.warning(
                 "[MOD] auto_mute: chat=%s user=%s warn_count=%s",
                 message.chat.id,
@@ -2227,7 +2270,14 @@ async def handle_moderation_message(message: Message) -> None:
                 message,
                 message.from_user.id,
                 minutes=flood_mute,
-                reason="flood repeat",
+                reason="flood warnings",
+            )
+            await message.answer(
+                f"🔇 Auto-mute for flood — 3/3 warnings. "
+                f"Muted: {_format_user(message.from_user)}. "
+                f"Duration: {flood_mute} min. Reason: flood warnings.",
+                parse_mode=None,
+                disable_web_page_preview=True,
             )
 
 
