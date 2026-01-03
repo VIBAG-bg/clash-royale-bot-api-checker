@@ -272,6 +272,27 @@ def _message_has_link(message: Message) -> bool:
     return False
 
 
+def is_bot_command_message(message: Message) -> bool:
+    text = message.text or ""
+    caption = message.caption or ""
+    if text.startswith("/") or caption.startswith("/"):
+        return True
+    for entity in message.entities or []:
+        if entity.type == MessageEntityType.BOT_COMMAND and entity.offset == 0:
+            return True
+    for entity in message.caption_entities or []:
+        if entity.type == MessageEntityType.BOT_COMMAND and entity.offset == 0:
+            return True
+    return False
+
+
+def _extract_command_name(message: Message) -> str:
+    text = message.text or message.caption or ""
+    if not text:
+        return "/?"
+    return text.split()[0]
+
+
 async def _is_recent_user(
     chat_id: int, user_id: int, *, now: datetime, hours: int
 ) -> bool:
@@ -1920,6 +1941,15 @@ async def handle_pending_user_message(message: Message) -> None:
         return
     if message.from_user is None or message.from_user.is_bot:
         return
+    if is_bot_command_message(message):
+        if await _is_mod_debug(message.chat.id):
+            logger.warning(
+                "[MOD] bypass command %s from user=%s chat=%s",
+                _extract_command_name(message),
+                message.from_user.id,
+                message.chat.id,
+            )
+        return
     challenge = await get_pending_challenge(message.chat.id, message.from_user.id)
     if not challenge:
         return
@@ -1984,6 +2014,15 @@ async def handle_moderation_message(message: Message) -> None:
         (message.text or message.caption or "")[:200],
         [entity.type for entity in (message.entities or [])],
     )
+    if is_bot_command_message(message):
+        if await _is_mod_debug(message.chat.id):
+            logger.warning(
+                "[MOD] bypass command %s from user=%s chat=%s",
+                _extract_command_name(message),
+                message.from_user.id if message.from_user else None,
+                message.chat.id,
+            )
+        return
     if not MODERATION_ENABLED:
         logger.warning(
             "[MOD] skip: disabled chat=%s msg_id=%s",
@@ -3428,7 +3467,7 @@ async def handle_link_select(query: CallbackQuery) -> None:
 async def trace_catch_all(message: Message) -> None:
     if message.from_user is None or message.from_user.is_bot:
         return
-    if (message.text or message.caption or "").startswith("/"):
+    if is_bot_command_message(message):
         return
     if not await _is_mod_debug(message.chat.id):
         return
