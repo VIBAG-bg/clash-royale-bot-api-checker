@@ -2458,6 +2458,7 @@ async def record_rate_counter(
     *,
     window_seconds: int,
     now: datetime,
+    increment: int = 1,
     session: AsyncSession | None = None,
 ) -> int:
     if session is None:
@@ -2467,6 +2468,7 @@ async def record_rate_counter(
                 user_id,
                 window_seconds=window_seconds,
                 now=now,
+                increment=increment,
                 session=session,
             )
     result = await session.execute(
@@ -2480,20 +2482,20 @@ async def record_rate_counter(
             chat_id=chat_id,
             user_id=user_id,
             window_start=now,
-            count=1,
+            count=increment,
         )
         stmt = stmt.on_conflict_do_nothing(
             index_elements=["chat_id", "user_id"]
         )
         await session.execute(stmt)
         await session.commit()
-        return 1
+        return int(increment)
     elapsed = (now - counter.window_start).total_seconds()
     if elapsed > window_seconds:
         counter.window_start = now
-        counter.count = 1
+        counter.count = increment
     else:
-        counter.count += 1
+        counter.count += increment
     await session.commit()
     return int(counter.count)
 

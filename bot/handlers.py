@@ -129,6 +129,7 @@ moderation_router.message.middleware(ModerationPolicyMiddleware())
 
 HEADER_LINE = "══════════════════════════════"
 DIVIDER_LINE = "---------------------------"
+_FLOOD_RATE_CACHE: dict[tuple[int, int], dict[str, object]] = {}
 
 
 def _format_help_commands(commands: list[dict[str, object]]) -> list[str]:
@@ -477,12 +478,44 @@ async def apply_moderation_decision(
         return
 
     if violation == "flood":
-        count = await record_rate_counter(
-            message.chat.id,
-            message.from_user.id,
-            window_seconds=flood_window,
-            now=now,
-        )
+        cache_key = (message.chat.id, message.from_user.id)
+        entry = _FLOOD_RATE_CACHE.get(cache_key)
+        if entry:
+            window_start = entry.get("window_start")
+            if isinstance(window_start, datetime):
+                if window_start.tzinfo is None:
+                    window_start = window_start.replace(tzinfo=timezone.utc)
+                if (now - window_start).total_seconds() > flood_window:
+                    entry = None
+        if entry is None:
+            count = await record_rate_counter(
+                message.chat.id,
+                message.from_user.id,
+                window_seconds=flood_window,
+                now=now,
+                increment=1,
+            )
+            _FLOOD_RATE_CACHE[cache_key] = {
+                "window_start": now,
+                "last_db_count": count,
+                "pending": 0,
+            }
+        else:
+            pending = int(entry.get("pending") or 0) + 1
+            last_db_count = int(entry.get("last_db_count") or 0)
+            total = last_db_count + pending
+            if total <= flood_max:
+                entry["pending"] = pending
+                return
+            count = await record_rate_counter(
+                message.chat.id,
+                message.from_user.id,
+                window_seconds=flood_window,
+                now=now,
+                increment=pending,
+            )
+            entry["last_db_count"] = count
+            entry["pending"] = 0
         if count <= flood_max:
             return
         warn_count = await increment_user_warning(
