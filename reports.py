@@ -1134,6 +1134,7 @@ async def build_kick_shortlist_report(
     ]
     if not weeks or not last_week:
         lines.append(t("kick_shortlist_none", lang))
+        lines.append(t("kick_wtd_note", lang))
         return "\n".join(lines)
 
     async with get_session() as session:
@@ -1144,6 +1145,7 @@ async def build_kick_shortlist_report(
         )
         if not inactive:
             lines.append(t("kick_shortlist_none", lang))
+            lines.append(t("kick_wtd_note", lang))
             return "\n".join(lines)
 
         inactive = _filter_protected(inactive)
@@ -1154,6 +1156,7 @@ async def build_kick_shortlist_report(
         }
         if not inactive_tags:
             lines.append(t("kick_shortlist_none", lang))
+            lines.append(t("kick_wtd_note", lang))
             return "\n".join(lines)
 
         history_counts = await get_participation_week_counts(
@@ -1389,6 +1392,7 @@ async def build_kick_shortlist_report(
                 )
             )
 
+    lines.append(t("kick_wtd_note", lang))
     return "\n".join(lines)
 
 

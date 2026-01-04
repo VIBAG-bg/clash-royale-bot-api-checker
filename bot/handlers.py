@@ -890,6 +890,7 @@ async def _send_welcome_message(
     chat_id: int,
     user_display: str,
 ) -> None:
+    lang = DEFAULT_LANG
     buttons: list[list[InlineKeyboardButton]] = []
     if WELCOME_RULES_MESSAGE_LINK:
         buttons.append(
@@ -912,9 +913,13 @@ async def _send_welcome_message(
     keyboard = (
         InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None
     )
+    text = (
+        f"{t('welcome_message', lang, user=user_display)} "
+        f"{t('welcome_message_help', lang)}"
+    )
     await bot.send_message(
         chat_id,
-        t("welcome_message", DEFAULT_LANG, user=user_display),
+        text,
         reply_markup=keyboard,
         parse_mode=None,
     )
@@ -4284,7 +4289,10 @@ async def handle_lang_select(query: CallbackQuery) -> None:
         await query.answer(t("lang_not_for_you", DEFAULT_LANG), show_alert=True)
         return
     await set_user_language(target_user_id, lang_code)
-    confirm = t("lang_set_confirm", lang_code)
+    confirm = (
+        f"{t('lang_set_confirm', lang_code)} "
+        f"{t('lang_set_change_hint', lang_code)}"
+    )
     if query.message is not None:
         try:
             await query.message.edit_text(confirm, parse_mode=None)
