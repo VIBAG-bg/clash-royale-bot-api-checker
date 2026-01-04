@@ -103,6 +103,7 @@ from db import (
     upsert_user_link_request,
     delete_app_state,
     set_app_state,
+    list_invited_applications,
 )
 from reports import (
     build_clan_info_report,
@@ -1175,18 +1176,52 @@ async def cmd_apps(message: Message) -> None:
         limit = 50
 
     apps = await list_pending_applications(limit=limit)
-    if not apps:
-        await message.answer("No pending applications.", parse_mode=None)
+    invited_all = await list_invited_applications()
+    now = datetime.now(timezone.utc)
+    invited = []
+    for app in invited_all:
+        invite_expires_at = app.get("invite_expires_at")
+        if not isinstance(invite_expires_at, datetime):
+            continue
+        if invite_expires_at.tzinfo is None:
+            invite_expires_at = invite_expires_at.replace(tzinfo=timezone.utc)
+        if invite_expires_at < now:
+            continue
+        invited.append(app)
+    invited = invited[:limit]
+
+    if not apps and not invited:
+        await message.answer(
+            "No pending applications or active invites.", parse_mode=None
+        )
         return
 
-    lines = [f"Pending applications (latest {len(apps)}):"]
-    for app in apps:
-        tag = app.get("player_tag") or "n/a"
-        user = app.get("telegram_username") or app.get("telegram_display_name") or "user"
-        created_at = _format_dt(app.get("created_at"))
-        lines.append(
-            f"{app.get('id')}) {app.get('player_name')} | {tag} | {user} | {created_at}"
-        )
+    lines = []
+    if apps:
+        lines.append(f"Pending applications (latest {len(apps)}):")
+        for app in apps:
+            tag = app.get("player_tag") or "n/a"
+            user = app.get("telegram_username") or app.get("telegram_display_name") or "user"
+            created_at = _format_dt(app.get("created_at"))
+            lines.append(
+                f"{app.get('id')}) {app.get('player_name')} | {tag} | {user} | {created_at}"
+            )
+    if invited:
+        if lines:
+            lines.append("")
+        lines.append(f"Active invites (latest {len(invited)}):")
+        for app in invited:
+            tag = app.get("player_tag") or "n/a"
+            user = app.get("telegram_username") or app.get("telegram_display_name") or "user"
+            notified_at = _format_dt(app.get("last_notified_at"))
+            expires_at = _format_dt(app.get("invite_expires_at"))
+            lines.append(
+                f"{app.get('id')}) {app.get('player_name')} | {tag} | {user} | "
+                f"notified={notified_at} | expires={expires_at}"
+            )
+    lines.append(
+        "Note: auto-invite moves applications from \"pending\" to \"invited\", so they may disappear from the pending list."
+    )
     await message.answer("\n".join(lines), parse_mode=None)
 
 
