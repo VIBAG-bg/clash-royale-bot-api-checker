@@ -372,6 +372,8 @@ async def build_weekly_report(
         season_id=season_id,
         section_index=section_index,
         clan_tag=clan_tag,
+        inactive_limit=15,
+        active_limit=25,
     )
     inactive = _filter_protected(inactive)
     member_count = len(await get_current_member_tags(clan_tag))
@@ -408,6 +410,8 @@ async def build_rolling_report(
     inactive, active = await get_rolling_leaderboard(
         weeks=weeks,
         clan_tag=clan_tag,
+        inactive_limit=15,
+        active_limit=25,
     )
     inactive = _filter_protected(inactive)
     member_count = len(await get_current_member_tags(clan_tag))
@@ -1506,7 +1510,7 @@ async def build_current_war_report(
                 base_query.order_by(
                     PlayerParticipation.decks_used.desc(),
                     PlayerParticipation.fame.desc(),
-                ).limit(5)
+                ).limit(10)
             )
             top_rows = [
                 {
@@ -1522,7 +1526,7 @@ async def build_current_war_report(
                 base_query.order_by(
                     PlayerParticipation.decks_used.asc(),
                     PlayerParticipation.fame.asc(),
-                ).limit(30)
+                ).limit(60)
             )
             bottom_rows = [
                 {
@@ -1538,7 +1542,7 @@ async def build_current_war_report(
         row
         for row in bottom_rows
         if _normalize_tag(row.get("player_tag")) not in PROTECTED_TAGS_NORMALIZED
-    ][:5]
+    ][:10]
 
     lines = [
         t("current_war_title", lang),

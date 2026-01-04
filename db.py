@@ -1926,12 +1926,19 @@ async def get_week_leaderboard(
     season_id: int,
     section_index: int,
     clan_tag: str,
+    inactive_limit: int = 10,
+    active_limit: int = 10,
     session: AsyncSession | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     if session is None:
         async with _get_session() as session:
             return await get_week_leaderboard(
-                season_id, section_index, clan_tag, session=session
+                season_id,
+                section_index,
+                clan_tag,
+                inactive_limit=inactive_limit,
+                active_limit=active_limit,
+                session=session,
             )
     current_members = await get_current_member_tags(clan_tag, session=session)
     if not current_members:
@@ -1953,13 +1960,13 @@ async def get_week_leaderboard(
         base.order_by(
             PlayerParticipation.decks_used.asc(),
             PlayerParticipation.fame.asc(),
-        ).limit(10)
+        ).limit(inactive_limit)
     )
     active_result = await session.execute(
         base.order_by(
             PlayerParticipation.decks_used.desc(),
             PlayerParticipation.fame.desc(),
-        ).limit(10)
+        ).limit(active_limit)
     )
     inactive = [
         {
@@ -2078,11 +2085,19 @@ async def get_rolling_summary(
 async def get_rolling_leaderboard(
     weeks: list[tuple[int, int]],
     clan_tag: str,
+    inactive_limit: int = 10,
+    active_limit: int = 10,
     session: AsyncSession | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     if session is None:
         async with _get_session() as session:
-            return await get_rolling_leaderboard(weeks, clan_tag, session=session)
+            return await get_rolling_leaderboard(
+                weeks,
+                clan_tag,
+                inactive_limit=inactive_limit,
+                active_limit=active_limit,
+                session=session,
+            )
     if not weeks:
         return [], []
     current_members = await get_current_member_tags(clan_tag, session=session)
@@ -2107,10 +2122,10 @@ async def get_rolling_leaderboard(
         .group_by(PlayerParticipation.player_tag)
     )
     inactive_result = await session.execute(
-        base.order_by(decks_sum.asc(), fame_sum.asc()).limit(10)
+        base.order_by(decks_sum.asc(), fame_sum.asc()).limit(inactive_limit)
     )
     active_result = await session.execute(
-        base.order_by(decks_sum.desc(), fame_sum.desc()).limit(10)
+        base.order_by(decks_sum.desc(), fame_sum.desc()).limit(active_limit)
     )
     inactive = [
         {
