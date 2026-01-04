@@ -525,6 +525,7 @@ class VerifiedUser(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    language: Mapped[str] = mapped_column(String(2), default="ru", nullable=False)
     verified_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utc_now, nullable=False
     )
@@ -3167,6 +3168,53 @@ async def set_user_verified(
     )
     stmt = stmt.on_conflict_do_nothing(
         index_elements=["chat_id", "user_id"]
+    )
+    if session is None:
+        async with _get_session() as session:
+            try:
+                await session.execute(stmt)
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+    else:
+        await session.execute(stmt)
+
+
+async def get_user_language(
+    chat_id: int | None, user_id: int, session: AsyncSession | None = None
+) -> str:
+    if session is None:
+        async with _get_session() as session:
+            return await get_user_language(chat_id, user_id, session=session)
+    if chat_id is not None:
+        result = await session.execute(
+            select(VerifiedUser.language).where(
+                VerifiedUser.chat_id == chat_id, VerifiedUser.user_id == user_id
+            )
+        )
+        lang = result.scalar_one_or_none()
+        if lang:
+            return lang
+    result = await session.execute(
+        select(VerifiedUser.language)
+        .where(VerifiedUser.user_id == user_id)
+        .order_by(VerifiedUser.verified_at.desc())
+        .limit(1)
+    )
+    lang = result.scalar_one_or_none()
+    return lang or "ru"
+
+
+async def set_user_language(
+    user_id: int, lang: str, chat_id: int | None = None, session: AsyncSession | None = None
+) -> None:
+    if lang not in {"ru", "en", "uk"}:
+        lang = "ru"
+    stmt = (
+        update(VerifiedUser)
+        .where(VerifiedUser.user_id == user_id)
+        .values(language=lang)
     )
     if session is None:
         async with _get_session() as session:

@@ -57,6 +57,7 @@ from db import (
     get_week_leaderboard,
 )
 from riverrace_import import get_last_completed_weeks
+from i18n import DEFAULT_LANG, t
 
 NAME_WIDTH = 20
 HEADER_LINE = "══════════════════════════════"
@@ -92,8 +93,8 @@ def _filter_protected(entries: Iterable[dict[str, object]]) -> list[dict[str, ob
     return filtered
 
 
-def _format_name(raw_name: object) -> str:
-    name = str(raw_name) if raw_name else "Unknown"
+def _format_name(raw_name: object, lang: str = DEFAULT_LANG) -> str:
+    name = str(raw_name) if raw_name else t("unknown", lang)
     if len(name) > NAME_WIDTH:
         name = f"{name[:NAME_WIDTH - 1]}…"
     return name.ljust(NAME_WIDTH)
@@ -102,10 +103,12 @@ def _format_name(raw_name: object) -> str:
 def _format_entries(
     entries: Iterable[dict[str, object]],
     donations_wtd: dict[str, dict[str, int | None]] | None = None,
+    *,
+    lang: str = DEFAULT_LANG,
 ) -> list[str]:
     rows = list(entries)
     if not rows:
-        return ["No data available."]
+        return [t("report_no_data", lang)]
 
     decks_width = max(len(str(int(row.get("decks_used", 0)))) for row in rows)
     fame_width = max(len(str(int(row.get("fame", 0)))) for row in rows)
@@ -114,14 +117,26 @@ def _format_entries(
 
     lines: list[str] = []
     for index, row in enumerate(rows, 1):
-        name = _format_name(row.get("player_name"))
+        name = _format_name(row.get("player_name"), lang)
         decks_used = int(row.get("decks_used", 0))
         fame = int(row.get("fame", 0))
         suffix = ""
         if donations_wtd is not None:
-            suffix = _format_donation_suffix(row.get("player_tag"), donations_wtd)
+            suffix = _format_donation_suffix(
+                row.get("player_tag"), donations_wtd, lang=lang
+            )
         lines.append(
-            f"{index:>2}) {name} — decks: {decks_used:>{decks_width}} | fame: {fame:>{fame_width}}{suffix}"
+            t(
+                "report_entry_line",
+                lang,
+                index=index,
+                name=name,
+                decks=decks_used,
+                decks_width=decks_width,
+                fame=fame,
+                fame_width=fame_width,
+                suffix=suffix,
+            )
         )
     return lines
 
@@ -129,13 +144,17 @@ def _format_entries(
 def _format_donation_suffix(
     player_tag: object,
     donations_wtd: dict[str, dict[str, int | None]] | None,
+    *,
+    lang: str = DEFAULT_LANG,
 ) -> str:
     tag = _normalize_tag(player_tag)
     wtd_value: int | None = None
     if donations_wtd and tag in donations_wtd:
         wtd_value = donations_wtd[tag].get("donations")
-    wtd_text = f"donate: {wtd_value}" if wtd_value is not None else "donate: n/a"
-    return f" | {wtd_text}"
+    wtd_text = (
+        str(wtd_value) if wtd_value is not None else t("na", lang)
+    )
+    return t("report_donate_suffix", lang, value=wtd_text)
 
 
 async def _collect_wtd_donations(
@@ -148,32 +167,52 @@ async def _collect_wtd_donations(
     return await get_current_wtd_donations(clan_tag, player_tags=normalized_tags)
 
 
-async def _build_top_donors_wtd_block(clan_tag: str) -> list[str]:
+async def _build_top_donors_wtd_block(
+    clan_tag: str, *, lang: str = DEFAULT_LANG
+) -> list[str]:
     donors = await get_top_donors_wtd(clan_tag, limit=10)
     donors = _filter_protected(donors)[:5]
-    lines = ["🤝 Top donors this week"]
+    lines = [t("donors_wtd_header", lang)]
     if donors:
         for index, row in enumerate(donors, 1):
-            name = row.get("player_name") or row.get("player_tag") or "Unknown"
+            name = (
+                row.get("player_name")
+                or row.get("player_tag")
+                or t("unknown", lang)
+            )
             donations = row.get("donations")
-            donations_text = str(donations) if donations is not None else "n/a"
-            lines.append(f"{index}) {name} — {donations_text} donations")
+            donations_text = (
+                str(donations) if donations is not None else t("na", lang)
+            )
+            lines.append(
+                t(
+                    "donors_wtd_line",
+                    lang,
+                    index=index,
+                    name=name,
+                    donations=donations_text,
+                )
+            )
     else:
-        lines.append("No donation data yet.")
+        lines.append(t("donors_wtd_none", lang))
     return lines
 
 
 async def _build_top_donors_window_block(
-    clan_tag: str, window_weeks: int
+    clan_tag: str, window_weeks: int, *, lang: str = DEFAULT_LANG
 ) -> list[str]:
     donors = await get_top_donors_window(
         clan_tag, window_weeks=window_weeks, limit=10
     )
     donors = _filter_protected(donors)[:5]
-    lines = [f"🤝 Top donors (last {window_weeks} weeks)"]
+    lines = [t("donors_window_header", lang, weeks=window_weeks)]
     if donors:
         for index, row in enumerate(donors, 1):
-            name = row.get("player_name") or row.get("player_tag") or "Unknown"
+            name = (
+                row.get("player_name")
+                or row.get("player_tag")
+                or t("unknown", lang)
+            )
             donations_sum = row.get("donations_sum")
             weeks_present = row.get("weeks_present")
             donations_text = str(donations_sum) if donations_sum is not None else "0"
@@ -183,10 +222,17 @@ async def _build_top_donors_window_block(
                 else f"0/{window_weeks}"
             )
             lines.append(
-                f"{index}) {name} — {donations_text} donations ({weeks_text} weeks)"
+                t(
+                    "donors_window_line",
+                    lang,
+                    index=index,
+                    name=name,
+                    donations=donations_text,
+                    weeks=weeks_text,
+                )
             )
     else:
-        lines.append("No donation history yet.")
+        lines.append(t("donors_window_none", lang))
     return lines
 
 
@@ -201,9 +247,9 @@ def _format_avg(value: float) -> str:
     return f"{value:.1f}"
 
 
-def _format_median(values: list[int]) -> str:
+def _format_median(values: list[int], lang: str = DEFAULT_LANG) -> str:
     if not values:
-        return "n/a"
+        return t("na", lang)
     return f"{median(values):.1f}"
 
 
@@ -221,7 +267,7 @@ def _parse_last_seen_string(value: object) -> datetime | None:
     return None
 
 
-def _format_relative(delta: timedelta) -> str:
+def _format_relative(delta: timedelta, lang: str = DEFAULT_LANG) -> str:
     total_seconds = int(delta.total_seconds())
     if total_seconds < 0:
         total_seconds = 0
@@ -230,30 +276,30 @@ def _format_relative(delta: timedelta) -> str:
     minutes = (total_seconds % 3600) // 60
     if days > 0:
         if hours > 0:
-            return f"{days}d {hours}h ago"
-        return f"{days}d ago"
+            return t("relative_days_hours", lang, days=days, hours=hours)
+        return t("relative_days", lang, days=days)
     if hours > 0:
-        return f"{hours}h ago"
-    return f"{minutes}m ago"
+        return t("relative_hours", lang, hours=hours)
+    return t("relative_minutes", lang, minutes=minutes)
 
 
-def _compare_to_avg(value: float, avg: float) -> str:
+def _compare_to_avg(value: float, avg: float, lang: str = DEFAULT_LANG) -> str:
     if avg <= 0:
-        return "≈ Near"
+        return t("compare_near", lang)
     ratio = (value - avg) / avg
     if ratio >= 0.05:
-        return "✅ Above"
+        return t("compare_above", lang)
     if ratio <= -0.05:
-        return "⬇️ Below"
-    return "≈ Near"
+        return t("compare_below", lang)
+    return t("compare_near", lang)
 
 
-def _compare_simple(value: int, avg: int) -> str:
+def _compare_simple(value: int, avg: int, lang: str = DEFAULT_LANG) -> str:
     if value > avg:
-        return "✅ Above"
+        return t("compare_above", lang)
     if value < avg:
-        return "❌ Below"
-    return "➖ Equal"
+        return t("compare_below", lang)
+    return t("compare_equal", lang)
 
 
 def _days_absent(last_seen: datetime | None, now: datetime) -> int | None:
@@ -277,14 +323,14 @@ def _absence_flag(days_absent: int | None) -> str:
     return ""
 
 
-def _absence_label(days_absent: int | None) -> str:
+def _absence_label(days_absent: int | None, lang: str = DEFAULT_LANG) -> str:
     if days_absent is None:
-        return "⚠️ No data"
+        return t("absence_no_data", lang)
     if days_absent >= LAST_SEEN_RED_DAYS:
-        return "🔴 RED"
+        return t("absence_red", lang)
     if days_absent >= LAST_SEEN_YELLOW_DAYS:
-        return "🟡 YELLOW"
-    return "✅ OK"
+        return t("absence_yellow", lang)
+    return t("absence_ok", lang)
 
 
 async def _resolve_active_week_key(
@@ -302,7 +348,7 @@ async def _resolve_active_week_key(
     return None
 
 
-def _format_timestamp(value: object) -> str:
+def _format_timestamp(value: object, lang: str = DEFAULT_LANG) -> str:
     if isinstance(value, datetime):
         return value.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     if isinstance(value, str):
@@ -311,12 +357,16 @@ def _format_timestamp(value: object) -> str:
         try:
             return value.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
         except Exception:
-            return "Unknown"
-    return "Unknown"
+            return t("unknown", lang)
+    return t("unknown", lang)
 
 
 async def build_weekly_report(
-    season_id: int, section_index: int, clan_tag: str
+    season_id: int,
+    section_index: int,
+    clan_tag: str,
+    *,
+    lang: str = DEFAULT_LANG,
 ) -> str:
     inactive, active = await get_week_leaderboard(
         season_id=season_id,
@@ -327,25 +377,33 @@ async def build_weekly_report(
     member_count = len(await get_current_member_tags(clan_tag))
     lines = [
         HEADER_LINE,
-        f"🏁 WAR REPORT — Season {season_id} / Week {section_index + 1}",
+        t(
+            "weekly_report_title",
+            lang,
+            season=season_id,
+            week=section_index + 1,
+        ),
         HEADER_LINE,
-        f"Members considered: {member_count} (current clan members)",
+        t("weekly_report_members", lang, count=member_count),
         "",
-        "🧊 TOP 10 INACTIVE (lowest decks, then fame)",
-        *_format_entries(inactive),
+        t("weekly_report_inactive_header", lang),
+        *_format_entries(inactive, lang=lang),
         "",
         DIVIDER_LINE,
         "",
-        "🔥 TOP 10 ACTIVE (highest decks, then fame)",
-        *_format_entries(active),
+        t("weekly_report_active_header", lang),
+        *_format_entries(active, lang=lang),
     ]
     lines.extend(["", DIVIDER_LINE, ""])
-    lines.extend(await _build_top_donors_wtd_block(clan_tag))
+    lines.extend(await _build_top_donors_wtd_block(clan_tag, lang=lang))
     return "\n".join(lines)
 
 
 async def build_rolling_report(
-    weeks: list[tuple[int, int]], clan_tag: str
+    weeks: list[tuple[int, int]],
+    clan_tag: str,
+    *,
+    lang: str = DEFAULT_LANG,
 ) -> str:
     inactive, active = await get_rolling_leaderboard(
         weeks=weeks,
@@ -356,30 +414,39 @@ async def build_rolling_report(
     weeks_label = ", ".join(f"{season}/{section + 1}" for season, section in weeks)
     lines = [
         HEADER_LINE,
-        f"📊 ROLLING REPORT — Last {len(weeks)} weeks",
+        t("rolling_report_title", lang, weeks=len(weeks)),
         HEADER_LINE,
-        f"Members considered: {member_count} (current clan members)",
-        f"Weeks: {weeks_label}" if weeks_label else "Weeks: n/a",
+        t("rolling_report_members", lang, count=member_count),
+        t("rolling_report_weeks", lang, weeks=weeks_label)
+        if weeks_label
+        else t("rolling_report_weeks_na", lang),
         "",
-        "🧊 TOP 10 INACTIVE (sum of decks, then fame)",
-        *_format_entries(inactive),
+        t("rolling_report_inactive_header", lang),
+        *_format_entries(inactive, lang=lang),
         "",
         DIVIDER_LINE,
         "",
-        "🔥 TOP 10 ACTIVE (sum of decks, then fame)",
-        *_format_entries(active),
+        t("rolling_report_active_header", lang),
+        *_format_entries(active, lang=lang),
     ]
     if DONATION_WEEKS_WINDOW > 0:
         lines.extend(["", DIVIDER_LINE, ""])
         lines.extend(
-            await _build_top_donors_window_block(clan_tag, DONATION_WEEKS_WINDOW)
+            await _build_top_donors_window_block(
+                clan_tag, DONATION_WEEKS_WINDOW, lang=lang
+            )
         )
     return "\n".join(lines)
 
 
-async def build_donations_report(clan_tag: str, clan_name: str | None = None) -> str:
+async def build_donations_report(
+    clan_tag: str,
+    clan_name: str | None = None,
+    *,
+    lang: str = DEFAULT_LANG,
+) -> str:
     today_utc = datetime.now(timezone.utc).date().isoformat()
-    clan_label = clan_name or "Unknown"
+    clan_label = clan_name or t("unknown", lang)
 
     member_rows = await get_current_members_with_wtd_donations(clan_tag)
     member_rows = _filter_protected(member_rows)
@@ -397,34 +464,57 @@ async def build_donations_report(clan_tag: str, clan_name: str | None = None) ->
 
     lines = [
         HEADER_LINE,
-        "🤝 DONATIONS LEADERBOARD",
+        t("donations_title", lang),
         HEADER_LINE,
-        f"🏠 Clan: {clan_label} ({clan_tag})",
-        f"📅 Week: {today_utc} (donation week in progress)",
+        t("donations_clan_line", lang, clan=clan_label, tag=clan_tag),
+        t("donations_week_line", lang, date=today_utc),
         "",
         SEPARATOR_LINE,
-        "🔥 Top donors this week",
+        t("donations_top_header", lang),
     ]
 
     if top_rows:
         for index, row in enumerate(top_rows, 1):
-            name = row.get("player_name") or row.get("player_tag") or "Unknown"
+            name = (
+                row.get("player_name")
+                or row.get("player_tag")
+                or t("unknown", lang)
+            )
             donations = row.get("donations")
-            donations_text = str(donations) if donations is not None else "n/a"
-            lines.append(f"{index}) {name} — {donations_text} cards")
+            donations_text = (
+                str(donations) if donations is not None else t("na", lang)
+            )
+            lines.append(
+                t(
+                    "donations_top_line",
+                    lang,
+                    index=index,
+                    name=name,
+                    cards=donations_text,
+                )
+            )
         total_cards = sum(donation_values)
         avg_cards = total_cards / members_count if members_count else 0.0
         lines.extend(
             [
                 "",
-                "📌 Clan totals (this week):",
-                f"• total: {total_cards} cards",
-                f"• average per member: {avg_cards:.1f} cards ({members_count} members)",
-                f"• median: {_format_median(donation_values)} cards",
+                t("donations_totals_week_header", lang),
+                t("donations_totals_week_total", lang, cards=total_cards),
+                t(
+                    "donations_totals_week_avg",
+                    lang,
+                    cards=f"{avg_cards:.1f}",
+                    members=members_count,
+                ),
+                t(
+                    "donations_totals_week_median",
+                    lang,
+                    cards=_format_median(donation_values, lang=lang),
+                ),
             ]
         )
     else:
-        lines.append("No donation data yet.")
+        lines.append(t("donations_none", lang))
 
     if DONATION_WEEKS_WINDOW > 0:
         weekly_rows, coverage = await get_donation_weekly_sums_for_window(
@@ -440,14 +530,36 @@ async def build_donations_report(clan_tag: str, clan_name: str | None = None) ->
             ),
         )[:5]
 
-        lines.extend(["", SEPARATOR_LINE, f"🏁 Top donors (last {DONATION_WEEKS_WINDOW} weeks)"])
+        lines.extend(
+            [
+                "",
+                SEPARATOR_LINE,
+                t(
+                    "donations_window_header",
+                    lang,
+                    weeks=DONATION_WEEKS_WINDOW,
+                ),
+            ]
+        )
         if top_weekly:
             for index, row in enumerate(top_weekly, 1):
-                name = row.get("player_name") or row.get("player_tag") or "Unknown"
+                name = (
+                    row.get("player_name")
+                    or row.get("player_tag")
+                    or t("unknown", lang)
+                )
                 donations_sum = int(row.get("donations_sum", 0))
                 weeks_present = int(row.get("weeks_present", 0))
                 lines.append(
-                    f"{index}) {name} — {donations_sum} cards ({weeks_present}/{DONATION_WEEKS_WINDOW} weeks)"
+                    t(
+                        "donations_window_line",
+                        lang,
+                        index=index,
+                        name=name,
+                        cards=donations_sum,
+                        weeks=weeks_present,
+                        window=DONATION_WEEKS_WINDOW,
+                    )
                 )
 
             total_cards_8w = sum(int(row.get("donations_sum", 0)) for row in weekly_rows)
@@ -461,29 +573,49 @@ async def build_donations_report(clan_tag: str, clan_name: str | None = None) ->
             lines.extend(
                 [
                     "",
-                    f"📌 Clan totals (last {DONATION_WEEKS_WINDOW} weeks):",
-                    f"• total: {total_cards_8w} cards ({coverage}/{DONATION_WEEKS_WINDOW} weeks coverage)",
-                    f"• average per member: {avg_member_8w:.1f} cards",
-                    f"• average per week (clan): {avg_clan_per_week:.1f} cards/week",
-                    f"• average per member/week: {avg_member_per_week:.1f} cards/week",
+                    t(
+                        "donations_totals_window_header",
+                        lang,
+                        weeks=DONATION_WEEKS_WINDOW,
+                    ),
+                    t(
+                        "donations_totals_window_total",
+                        lang,
+                        cards=total_cards_8w,
+                        coverage=coverage,
+                        weeks=DONATION_WEEKS_WINDOW,
+                    ),
+                    t(
+                        "donations_totals_window_avg_member",
+                        lang,
+                        cards=f"{avg_member_8w:.1f}",
+                    ),
+                    t(
+                        "donations_totals_window_avg_week",
+                        lang,
+                        cards=f"{avg_clan_per_week:.1f}",
+                    ),
+                    t(
+                        "donations_totals_window_avg_member_week",
+                        lang,
+                        cards=f"{avg_member_per_week:.1f}",
+                    ),
                 ]
             )
         else:
-            lines.append("No donation history yet.")
+            lines.append(t("donations_window_none", lang))
 
     lines.extend(
         [
             "",
             SEPARATOR_LINE,
-            "ℹ️ Notes",
-            "• Only current clan members are included.",
-            "• \"This week\" updates live and resets on Sunday (UTC).",
+            t("donations_notes_header", lang),
+            t("donations_notes_members", lang),
+            t("donations_notes_week", lang),
         ]
     )
     if DONATION_WEEKS_WINDOW <= 0:
-        lines.append(
-            "• Last N weeks block is disabled (DONATION_WEEKS_WINDOW=0)."
-        )
+        lines.append(t("donations_notes_window_disabled", lang))
 
     return "\n".join(lines)
 
@@ -501,44 +633,46 @@ def _normalize_role(role: object) -> str:
     )
 
 
-async def build_clan_info_report(clan_tag: str) -> str:
+async def build_clan_info_report(
+    clan_tag: str, *, lang: str = DEFAULT_LANG
+) -> str:
     try:
         api_client = await get_api_client()
         clan = await api_client.get_clan(clan_tag)
         members = await api_client.get_clan_members(clan_tag)
     except ClashRoyaleAPIError as e:
         if e.status_code in (401, 403):
-            return "CR API access denied. Check token/IP allowlist."
-        return "Unable to fetch clan info right now. Please try again later."
+            return t("clan_info_access_denied", lang)
+        return t("clan_info_unavailable", lang)
     except Exception as e:
         logger.warning("Failed to fetch clan info: %s", e)
-        return "Unable to fetch clan info right now. Please try again later."
+        return t("clan_info_unavailable", lang)
 
     location = clan.get("location") or {}
     location_name = (
         location.get("localizedName")
         or location.get("name")
-        or "Unknown"
+        or t("unknown", lang)
     )
     clan_type = str(clan.get("type") or "").lower()
     type_map = {
-        "open": "Open",
-        "inviteonly": "Invite Only",
-        "closed": "Closed",
+        "open": t("clan_type_open", lang),
+        "inviteonly": t("clan_type_invite_only", lang),
+        "closed": t("clan_type_closed", lang),
     }
-    type_label = type_map.get(clan_type, "Unknown")
+    type_label = type_map.get(clan_type, t("unknown", lang))
 
     members_count = clan.get("members")
     if members_count is None:
         members_count = len(members) if isinstance(members, list) else None
     if members_count is None:
-        members_line = "👥 Members: unknown"
+        members_line = t("clan_info_members_unknown", lang)
     else:
-        members_line = f"👥 Members: {members_count}"
+        members_line = t("clan_info_members", lang, count=members_count)
 
     required_trophies = clan.get("requiredTrophies")
     required_text = (
-        str(required_trophies) if required_trophies is not None else "n/a"
+        str(required_trophies) if required_trophies is not None else t("na", lang)
     )
 
     clan_score = clan.get("clanScore")
@@ -559,33 +693,50 @@ async def build_clan_info_report(clan_tag: str) -> str:
             elders.append(member)
 
     if leader:
-        leader_name = leader.get("name", "Unknown")
+        leader_name = leader.get("name", t("unknown", lang))
         leader_trophies = leader.get("trophies")
         leader_trophies_text = (
-            str(leader_trophies) if leader_trophies is not None else "n/a"
+            str(leader_trophies) if leader_trophies is not None else t("na", lang)
         )
         last_seen = _parse_last_seen_string(leader.get("lastSeen"))
         if last_seen:
-            relative = _format_relative(now_utc - last_seen)
+            relative = _format_relative(now_utc - last_seen, lang)
         else:
-            relative = "unknown"
+            relative = t("unknown", lang)
         leader_line = (
-            f"• 👑 Leader: {leader_name} — {leader_trophies_text} trophies — last seen: {relative}"
+            t(
+                "clan_info_leader_line",
+                lang,
+                name=leader_name,
+                trophies=leader_trophies_text,
+                last_seen=relative,
+            )
         )
     else:
-        leader_line = "• 👑 Leader: unknown"
+        leader_line = t("clan_info_leader_unknown", lang)
 
     def _format_role_list(label: str, items: list[dict[str, object]]) -> str:
-        names = [m.get("name", "Unknown") for m in items]
+        names = [m.get("name", t("unknown", lang)) for m in items]
         total = len(names)
         if total == 0:
-            return f"• {label} (0): none"
+            return t("clan_info_role_none", lang, label=label)
         shown = names[:10]
         suffix = "…" if total > 10 else ""
-        return f"• {label} ({total}): {', '.join(shown)}{suffix}"
+        return t(
+            "clan_info_role_list",
+            lang,
+            label=label,
+            total=total,
+            names=", ".join(shown),
+            suffix=suffix,
+        )
 
-    co_leader_line = _format_role_list("🟣 Co-leaders", co_leaders)
-    elder_line = _format_role_list("🟡 Elders", elders)
+    co_leader_line = _format_role_list(
+        t("clan_info_co_leaders_label", lang), co_leaders
+    )
+    elder_line = _format_role_list(
+        t("clan_info_elders_label", lang), elders
+    )
 
     donors_sorted = sorted(
         members,
@@ -600,7 +751,7 @@ async def build_clan_info_report(clan_tag: str) -> str:
     for member in members:
         seen = _parse_last_seen_string(member.get("lastSeen"))
         if seen:
-            parsed_seen.append((member.get("name", "Unknown"), seen))
+            parsed_seen.append((member.get("name", t("unknown", lang)), seen))
 
     bucket_green = 0
     bucket_yellow = 0
@@ -620,58 +771,92 @@ async def build_clan_info_report(clan_tag: str) -> str:
 
     lines = [
         HEADER_LINE,
-        f"🏰 CLAN INFO — {clan.get('name', 'Unknown')}",
+        t(
+            "clan_info_title",
+            lang,
+            name=clan.get("name", t("unknown", lang)),
+        ),
         HEADER_LINE,
-        f"🏷 Tag: {clan.get('tag', clan_tag)}",
-        f"🌍 Location: {location_name}",
-        f"🔓 Type: {type_label}",
+        t("clan_info_tag", lang, tag=clan.get("tag", clan_tag)),
+        t("clan_info_location", lang, location=location_name),
+        t("clan_info_type", lang, clan_type=type_label),
         members_line,
-        f"🎯 Required trophies: {required_text}",
+        t("clan_info_required_trophies", lang, trophies=required_text),
         "",
-        f"🏆 Clan trophies: {clan_score}",
-        f"⚔️ War trophies: {war_trophies}",
-        f"🤝 Donations this week (clan): {donations_per_week}",
+        t("clan_info_clan_trophies", lang, trophies=clan_score),
+        t("clan_info_war_trophies", lang, trophies=war_trophies),
+        t(
+            "clan_info_donations_week",
+            lang,
+            donations=donations_per_week,
+        ),
         "",
         DIVIDER_LINE,
-        "👑 Leadership",
+        t("clan_info_leadership_header", lang),
         leader_line,
         co_leader_line,
         elder_line,
         "",
         DIVIDER_LINE,
-        "🎁 Top donors this week (Top 5)",
+        t("clan_info_top_donors_header", lang),
     ]
 
     for index, member in enumerate(donors_sorted, 1):
         lines.append(
-            f"{index}) {member.get('name', 'Unknown')} — {member.get('donations', 0)} cards"
+            t(
+                "clan_info_top_donor_line",
+                lang,
+                index=index,
+                name=member.get("name", t("unknown", lang)),
+                cards=member.get("donations", 0),
+            )
         )
 
     lines.extend(
         [
             "",
             DIVIDER_LINE,
-            "🏆 Top trophies (Top 5)",
+            t("clan_info_top_trophies_header", lang),
         ]
     )
     for index, member in enumerate(trophies_sorted, 1):
         lines.append(
-            f"{index}) {member.get('name', 'Unknown')} — {member.get('trophies', 0)}"
+            t(
+                "clan_info_top_trophies_line",
+                lang,
+                index=index,
+                name=member.get("name", t("unknown", lang)),
+                trophies=member.get("trophies", 0),
+            )
         )
 
     lines.extend(
         [
             "",
             DIVIDER_LINE,
-            "⏱ Activity snapshot (lastSeen)",
-            f"🟢 <24h: {bucket_green} | 🟡 1–3d: {bucket_yellow} | 🔴 3d+: {bucket_red}",
+            t("clan_info_activity_header", lang),
+            t(
+                "clan_info_activity_counts",
+                lang,
+                green=bucket_green,
+                yellow=bucket_yellow,
+                red=bucket_red,
+            ),
             "",
-            "🚨 Longest missing (Top 5)",
+            t("clan_info_longest_missing_header", lang),
         ]
     )
     for index, (name, seen) in enumerate(longest_missing, 1):
-        relative = _format_relative(now_utc - seen)
-        lines.append(f"{index}) {name} — last seen: {relative}")
+        relative = _format_relative(now_utc - seen, lang)
+        lines.append(
+            t(
+                "clan_info_longest_missing_line",
+                lang,
+                index=index,
+                name=name,
+                last_seen=relative,
+            )
+        )
 
     lines.append(HEADER_LINE)
     return "\n".join(lines)
@@ -683,7 +868,9 @@ def _min_max_norm(value: float, min_value: float, max_value: float) -> float:
     return (value - min_value) / (max_value - min_value)
 
 
-async def build_promotion_candidates_report(clan_tag: str) -> str:
+async def build_promotion_candidates_report(
+    clan_tag: str, *, lang: str = DEFAULT_LANG
+) -> str:
     window_weeks = 8
     weeks = await get_last_completed_weeks(window_weeks, clan_tag)
     season_id = weeks[0][0] if weeks else 0
@@ -695,7 +882,7 @@ async def build_promotion_candidates_report(clan_tag: str) -> str:
         tag = _normalize_tag(row.get("player_tag"))
         if not tag or tag in PROTECTED_TAGS_NORMALIZED:
             continue
-        name = row.get("player_name") or "Unknown"
+        name = row.get("player_name") or t("unknown", lang)
         members[tag] = name
         role_value = row.get("role")
         role_text = str(role_value).strip().lower() if role_value else ""
@@ -837,72 +1024,90 @@ async def build_promotion_candidates_report(clan_tag: str) -> str:
 
     lines = [
         HEADER_LINE,
-        "🏅 PROMOTION RECOMMENDATIONS",
-        f"Season {season_id} • After COLOSSEUM",
+        t("promotion_title", lang),
+        t("promotion_season_line", lang, season=season_id),
         HEADER_LINE,
-        "Based on last 8 weeks: war + donations + consistency",
-        "(Recommendation only. Leader decides.)",
+        t("promotion_based_on", lang),
+        t("promotion_note", lang),
         "",
-        f"🎖 Suggested for Elder ({len(elder_candidates)}):",
+        t("promotion_elder_header", lang, count=len(elder_candidates)),
     ]
 
     if elder_candidates:
         for index, row in enumerate(elder_candidates, 1):
             lines.append(
-                f"{index}) {row['player_name']} — {row['player_tag']}"
-            )
-            lines.append(
-                "   • War: %s/8 active weeks | avg %s decks | avg %s fame"
-                % (
-                    row.get("active_weeks", 0),
-                    _format_avg(float(row.get("avg_decks", 0.0))),
-                    _format_avg(float(row.get("avg_fame", 0.0))),
+                t(
+                    "promotion_candidate_line",
+                    lang,
+                    index=index,
+                    name=row["player_name"],
+                    tag=row["player_tag"],
                 )
             )
             lines.append(
-                "   • Donations: %s cards | avg %s / week (%s/8)"
-                % (
-                    row.get("donations_sum", 0),
-                    _format_avg(float(row.get("donations_avg", 0.0))),
-                    row.get("donations_weeks", 0),
+                t(
+                    "promotion_war_line",
+                    lang,
+                    active_weeks=row.get("active_weeks", 0),
+                    avg_decks=_format_avg(float(row.get("avg_decks", 0.0))),
+                    avg_fame=_format_avg(float(row.get("avg_fame", 0.0))),
+                )
+            )
+            lines.append(
+                t(
+                    "promotion_donations_line",
+                    lang,
+                    donations=row.get("donations_sum", 0),
+                    avg_donations=_format_avg(float(row.get("donations_avg", 0.0))),
+                    donation_weeks=row.get("donations_weeks", 0),
                 )
             )
     else:
-        lines.append("No clear candidates.")
+        lines.append(t("promotion_no_candidates", lang))
 
-    lines.extend(["", DIVIDER_LINE, "🛡 Suggested for Co-leader (rare):"])
+    lines.extend(
+        ["", DIVIDER_LINE, t("promotion_co_leader_header", lang)]
+    )
     if co_candidates:
         for index, row in enumerate(co_candidates, 1):
             lines.append(
-                f"{index}) {row['player_name']} — {row['player_tag']}"
-            )
-            lines.append(
-                "   • War: %s/8 active weeks | avg %s decks | avg %s fame"
-                % (
-                    row.get("active_weeks", 0),
-                    _format_avg(float(row.get("avg_decks", 0.0))),
-                    _format_avg(float(row.get("avg_fame", 0.0))),
+                t(
+                    "promotion_candidate_line",
+                    lang,
+                    index=index,
+                    name=row["player_name"],
+                    tag=row["player_tag"],
                 )
             )
             lines.append(
-                "   • Donations: %s cards | avg %s / week (%s/8)"
-                % (
-                    row.get("donations_sum", 0),
-                    _format_avg(float(row.get("donations_avg", 0.0))),
-                    row.get("donations_weeks", 0),
+                t(
+                    "promotion_war_line",
+                    lang,
+                    active_weeks=row.get("active_weeks", 0),
+                    avg_decks=_format_avg(float(row.get("avg_decks", 0.0))),
+                    avg_fame=_format_avg(float(row.get("avg_fame", 0.0))),
+                )
+            )
+            lines.append(
+                t(
+                    "promotion_donations_line",
+                    lang,
+                    donations=row.get("donations_sum", 0),
+                    avg_donations=_format_avg(float(row.get("donations_avg", 0.0))),
+                    donation_weeks=row.get("donations_weeks", 0),
                 )
             )
     else:
-        lines.append("No clear candidate this month.")
+        lines.append(t("promotion_no_candidate_month", lang))
 
     lines.extend(
         [
             "",
             DIVIDER_LINE,
-            "📝 Notes:",
-            "• Only current clan members are considered.",
-            "• New/low-history members are excluded automatically.",
-            "• Protected tags are excluded.",
+            t("promotion_notes_header", lang),
+            t("promotion_notes_members", lang),
+            t("promotion_notes_new_members", lang),
+            t("promotion_notes_protected", lang),
             HEADER_LINE,
         ]
     )
@@ -913,16 +1118,22 @@ async def build_kick_shortlist_report(
     weeks: list[tuple[int, int]],
     last_week: tuple[int, int] | None,
     clan_tag: str,
+    *,
+    lang: str = DEFAULT_LANG,
 ) -> str:
     lines = [
         HEADER_LINE,
-        "🚪 KICK SHORTLIST — based on last 8 weeks",
+        t("kick_shortlist_title", lang),
         HEADER_LINE,
-        "Rules: top-10 inactive (8w) • exclude protected • exclude weeks<=%s • revived>=%s in warnings"
-        % (NEW_MEMBER_WEEKS_PLAYED, REVIVED_DECKS_THRESHOLD),
+        t(
+            "kick_shortlist_rules",
+            lang,
+            weeks=NEW_MEMBER_WEEKS_PLAYED,
+            revived=REVIVED_DECKS_THRESHOLD,
+        ),
     ]
     if not weeks or not last_week:
-        lines.append("No clear kick candidates.")
+        lines.append(t("kick_shortlist_none", lang))
         return "\n".join(lines)
 
     async with get_session() as session:
@@ -932,7 +1143,7 @@ async def build_kick_shortlist_report(
             session=session,
         )
         if not inactive:
-            lines.append("No clear kick candidates.")
+            lines.append(t("kick_shortlist_none", lang))
             return "\n".join(lines)
 
         inactive = _filter_protected(inactive)
@@ -942,7 +1153,7 @@ async def build_kick_shortlist_report(
             if row.get("player_tag")
         }
         if not inactive_tags:
-            lines.append("No clear kick candidates.")
+            lines.append(t("kick_shortlist_none", lang))
             return "\n".join(lines)
 
         history_counts = await get_participation_week_counts(
@@ -979,7 +1190,7 @@ async def build_kick_shortlist_report(
             if last_decks < REVIVED_DECKS_THRESHOLD:
                 new_members.append(
                     {
-                        "player_name": row.get("player_name") or "Unknown",
+                        "player_name": row.get("player_name") or t("unknown", lang),
                         "player_tag": normalized_tag,
                         "decks_used": int(row.get("decks_used", 0)),
                         "fame": int(row.get("fame", 0)),
@@ -989,7 +1200,7 @@ async def build_kick_shortlist_report(
             continue
         entry = {
             "player_tag": normalized_tag,
-            "player_name": row.get("player_name") or "Unknown",
+            "player_name": row.get("player_name") or t("unknown", lang),
             "decks_used": int(row.get("decks_used", 0)),
             "fame": int(row.get("fame", 0)),
             "last_week_decks": last_decks,
@@ -1012,7 +1223,7 @@ async def build_kick_shortlist_report(
 
     shortlist = candidates[: max(KICK_SHORTLIST_LIMIT, 0)]
     if shortlist:
-        lines.append("Kick candidates:")
+        lines.append(t("kick_candidates_header", lang))
         for index, row in enumerate(shortlist, 1):
             days_absent = row.get("days_absent")
             wtd_donations = row.get("donations_wtd")
@@ -1027,55 +1238,79 @@ async def build_kick_shortlist_report(
                 flags.append("📦")
             prefix = f"{' '.join(flags)} " if flags else ""
             display_name = f"{prefix}{row.get('player_name')}"
-            name = _format_name(display_name)
+            name = _format_name(display_name, lang)
             donation_suffix = _format_donation_suffix(
                 row.get("player_tag"),
                 donations_wtd,
+                lang=lang,
             )
             lines.append(
-                f"{index}) {name} — 8w decks: {row.get('decks_used', 0)} | "
-                f"8w fame: {row.get('fame', 0)} | last week: {row.get('last_week_decks', 0)}"
-                f"{donation_suffix}"
+                t(
+                    "kick_candidate_line",
+                    lang,
+                    index=index,
+                    name=name,
+                    decks=row.get("decks_used", 0),
+                    fame=row.get("fame", 0),
+                    last_week=row.get("last_week_decks", 0),
+                    donation_suffix=donation_suffix,
+                )
             )
     else:
-        lines.append("No clear kick candidates.")
+        lines.append(t("kick_shortlist_none", lang))
 
     if warnings:
         lines.extend(
             [
                 "",
-                "Warnings: inactive overall, but revived last week — keep for now",
+                t("kick_warnings_revived_header", lang),
             ]
         )
         for index, row in enumerate(warnings, 1):
-            name = _format_name(row.get("player_name"))
+            name = _format_name(row.get("player_name"), lang)
             donation_suffix = _format_donation_suffix(
                 row.get("player_tag"),
                 donations_wtd,
+                lang=lang,
             )
             lines.append(
-                f"{index}) {name} — 8w decks: {row.get('decks_used', 0)} | "
-                f"8w fame: {row.get('fame', 0)} | last week: {row.get('last_week_decks', 0)}"
-                f"{donation_suffix}"
+                t(
+                    "kick_candidate_line",
+                    lang,
+                    index=index,
+                    name=name,
+                    decks=row.get("decks_used", 0),
+                    fame=row.get("fame", 0),
+                    last_week=row.get("last_week_decks", 0),
+                    donation_suffix=donation_suffix,
+                )
             )
 
     if donation_warnings:
         lines.extend(
             [
                 "",
-                "Warnings: inactive overall, but donating - consider keeping",
+                t("kick_warnings_donating_header", lang),
             ]
         )
         for index, row in enumerate(donation_warnings, 1):
-            name = _format_name(row.get("player_name"))
+            name = _format_name(row.get("player_name"), lang)
             donation_suffix = _format_donation_suffix(
                 row.get("player_tag"),
                 donations_wtd,
+                lang=lang,
             )
             lines.append(
-                f"{index}) {name} — 8w decks: {row.get('decks_used', 0)} | "
-                f"8w fame: {row.get('fame', 0)} | last week: {row.get('last_week_decks', 0)}"
-                f"{donation_suffix}"
+                t(
+                    "kick_candidate_line",
+                    lang,
+                    index=index,
+                    name=name,
+                    decks=row.get("decks_used", 0),
+                    fame=row.get("fame", 0),
+                    last_week=row.get("last_week_decks", 0),
+                    donation_suffix=donation_suffix,
+                )
             )
 
     if LAST_SEEN_FLAG_LIMIT > 0:
@@ -1089,7 +1324,7 @@ async def build_kick_shortlist_report(
             flagged_rows.append(
                 {
                     "player_tag": row.get("player_tag"),
-                    "player_name": row.get("player_name") or "Unknown",
+                    "player_name": row.get("player_name") or t("unknown", lang),
                     "days_absent": days_absent,
                     "flag": flag,
                 }
@@ -1109,34 +1344,57 @@ async def build_kick_shortlist_report(
         )
         combined = (red_rows + yellow_rows)[:LAST_SEEN_FLAG_LIMIT]
         if combined:
-            lines.extend(["", "🕒 Last seen flags (current members)"])
+            lines.extend(["", t("kick_last_seen_header", lang)])
             for index, row in enumerate(combined, 1):
-                name = row.get("player_name") or "Unknown"
+                name = row.get("player_name") or t("unknown", lang)
                 days_absent = row.get("days_absent")
-                days_text = f"{days_absent}d ago" if days_absent is not None else "n/a"
+                days_text = (
+                    t("inactive_days_ago", lang, days=days_absent)
+                    if days_absent is not None
+                    else t("na", lang)
+                )
                 lines.append(
-                    f"{index}) {row.get('flag')} {name} — last seen {days_text}"
+                    t(
+                        "kick_last_seen_line",
+                        lang,
+                        index=index,
+                        flag=row.get("flag"),
+                        name=name,
+                        days_text=days_text,
+                    )
                 )
 
     if new_members:
         lines.extend(
             [
                 "",
-                "Attention: new members (under %s CW weeks in clan)"
-                % NEW_MEMBER_WEEKS_PLAYED,
+                t(
+                    "kick_new_members_header",
+                    lang,
+                    weeks=NEW_MEMBER_WEEKS_PLAYED,
+                ),
             ]
         )
         for index, row in enumerate(new_members, 1):
-            name = _format_name(row.get("player_name"))
+            name = _format_name(row.get("player_name"), lang)
             lines.append(
-                f"{index}) {name} — 8w decks: {row.get('decks_used', 0)} | "
-                f"8w fame: {row.get('fame', 0)} | weeks played: {row.get('weeks_played', 0)}"
+                t(
+                    "kick_new_member_line",
+                    lang,
+                    index=index,
+                    name=name,
+                    decks=row.get("decks_used", 0),
+                    fame=row.get("fame", 0),
+                    weeks_played=row.get("weeks_played", 0),
+                )
             )
 
     return "\n".join(lines)
 
 
-async def build_current_war_report(clan_tag: str) -> str:
+async def build_current_war_report(
+    clan_tag: str, *, lang: str = DEFAULT_LANG
+) -> str:
     active_week = await _resolve_active_week_key(clan_tag)
     state = None
     if active_week:
@@ -1157,32 +1415,53 @@ async def build_current_war_report(clan_tag: str) -> str:
     period_type = (state.get("period_type") if state else None) or None
     period_type_upper = period_type.upper() if isinstance(period_type, str) else None
     period_index = _coerce_int(state.get("period_index")) if state else None
-    last_update = _format_timestamp(state.get("updated_at") if state else None)
-
-    if period_type_upper == "WAR_DAY" and period_index is not None:
-        day_display = f"{period_index + 1} / 4"
-    elif period_type_upper == "COLOSSEUM":
-        day_display = "1 / 1"
-    elif period_type_upper == "TRAINING":
-        day_display = "Training"
-    else:
-        day_display = "?"
-
-    if period_type_upper == "WAR_DAY" and period_index is not None:
-        remaining_display = f"{max(0, 4 - (period_index + 1))} war day(s) + Colosseum"
-    elif period_type_upper == "COLOSSEUM":
-        remaining_display = "0"
-    elif period_type_upper == "TRAINING":
-        remaining_display = "War starts soon"
-    else:
-        remaining_display = "?"
-
-    phase_line = (
-        f"🗓 Phase: {period_type_upper} (Day {day_display})"
-        if period_type_upper
-        else "🗓 Phase: Unknown"
+    last_update = _format_timestamp(
+        state.get("updated_at") if state else None, lang
     )
-    colosseum_label = "COLOSSEUM" if is_colosseum else "RIVER RACE"
+
+    period_type_label = t("unknown", lang)
+    if period_type_upper == "WAR_DAY":
+        period_type_label = t("period_type_war_day", lang)
+    elif period_type_upper == "COLOSSEUM":
+        period_type_label = t("period_type_colosseum", lang)
+    elif period_type_upper == "TRAINING":
+        period_type_label = t("period_type_training", lang)
+
+    if period_type_upper == "WAR_DAY" and period_index is not None:
+        day_display = t(
+            "current_war_day_count", lang, day=period_index + 1, total=4
+        )
+    elif period_type_upper == "COLOSSEUM":
+        day_display = t("current_war_day_count", lang, day=1, total=1)
+    elif period_type_upper == "TRAINING":
+        day_display = t("current_war_day_training", lang)
+    else:
+        day_display = t("unknown", lang)
+
+    if period_type_upper == "WAR_DAY" and period_index is not None:
+        remaining_display = t(
+            "current_war_remaining_war_days",
+            lang,
+            days=max(0, 4 - (period_index + 1)),
+        )
+    elif period_type_upper == "COLOSSEUM":
+        remaining_display = t("current_war_remaining_none", lang)
+    elif period_type_upper == "TRAINING":
+        remaining_display = t("current_war_remaining_training", lang)
+    else:
+        remaining_display = t("unknown", lang)
+
+    phase_line = t(
+        "current_war_phase_line",
+        lang,
+        phase=period_type_label,
+        day=day_display,
+    )
+    colosseum_label = (
+        t("current_war_colosseum", lang)
+        if is_colosseum
+        else t("current_war_river_race", lang)
+    )
 
     member_tags = await get_current_member_tags(clan_tag)
     total_decks = 0
@@ -1258,59 +1537,86 @@ async def build_current_war_report(clan_tag: str) -> str:
     ][:5]
 
     lines = [
-        "⚔️ Current War Snapshot (LIVE)",
-        f"🏠 Clan: {clan_tag}",
-        "⚠️ Data may change while the war is ongoing.",
-        f"🕒 Last DB update: {last_update}",
+        t("current_war_title", lang),
+        t("current_war_clan_line", lang, clan=clan_tag),
+        t("current_war_data_notice", lang),
+        t("current_war_last_update", lang, last_update=last_update),
         "",
         SEPARATOR_LINE,
-        f"📅 Week: S{season_id} • W{section_index} • {colosseum_label}",
+        t(
+            "current_war_week_line",
+            lang,
+            season=season_id,
+            week=section_index,
+            war_type=colosseum_label,
+        ),
         phase_line,
-        f"⏳ Remaining: {remaining_display}",
+        t("current_war_remaining_line", lang, remaining=remaining_display),
         "",
-        "🧭 Week structure:",
-        "• Training → War Days → Colosseum",
-        "• Note: for simplicity we treat Colosseum as Week 4 of the cycle (but actual COLOSSEUM is detected by DB state).",
-        "",
-        SEPARATOR_LINE,
-        "📊 Clan totals (this week so far)",
-        f"🃏 Total decks used: {total_decks}",
-        f"🏆 Total fame: {total_fame}",
-        f"👥 Members counted: {member_count}",
+        t("current_war_structure_header", lang),
+        t("current_war_structure_line", lang),
+        t("current_war_structure_note", lang),
         "",
         SEPARATOR_LINE,
-        "🥇 Top 5 active (decks • fame)",
+        t("current_war_totals_header", lang),
+        t("current_war_total_decks", lang, decks=total_decks),
+        t("current_war_total_fame", lang, fame=total_fame),
+        t("current_war_members_count", lang, members=member_count),
+        "",
+        SEPARATOR_LINE,
+        t("current_war_top_header", lang),
     ]
     if top_rows:
         for index, row in enumerate(top_rows, 1):
-            name = row.get("player_name") or row.get("player_tag") or "Unknown"
+            name = row.get("player_name") or row.get("player_tag") or t(
+                "unknown", lang
+            )
             lines.append(
-                f"{index}) {name} — {row.get('decks_used', 0)} • {row.get('fame', 0)}"
+                t(
+                    "current_war_entry_line",
+                    lang,
+                    index=index,
+                    name=name,
+                    decks=row.get("decks_used", 0),
+                    fame=row.get("fame", 0),
+                )
             )
     else:
-        lines.append("No data available.")
+        lines.append(t("report_no_data", lang))
 
     lines.extend(
         [
             "",
             SEPARATOR_LINE,
-            "🚫 Bottom 5 (risk) (decks • fame)",
+            t("current_war_bottom_header", lang),
         ]
     )
     if filtered_bottom:
         for index, row in enumerate(filtered_bottom, 1):
-            name = row.get("player_name") or row.get("player_tag") or "Unknown"
+            name = row.get("player_name") or row.get("player_tag") or t(
+                "unknown", lang
+            )
             lines.append(
-                f"{index}) {name} — {row.get('decks_used', 0)} • {row.get('fame', 0)}"
+                t(
+                    "current_war_entry_line",
+                    lang,
+                    index=index,
+                    name=name,
+                    decks=row.get("decks_used", 0),
+                    fame=row.get("fame", 0),
+                )
             )
     else:
-        lines.append("No data available.")
+        lines.append(t("report_no_data", lang))
 
     return "\n".join(lines)
 
 
 async def build_my_activity_report(
-    player_tag: str, player_name: str, clan_tag: str
+    player_tag: str,
+    player_name: str,
+    clan_tag: str,
+    lang: str = DEFAULT_LANG,
 ) -> str:
     active_week = await _resolve_active_week_key(clan_tag)
     state = None
@@ -1329,15 +1635,19 @@ async def build_my_activity_report(
         season_id, section_index = 0, 0
 
     is_colosseum = bool(state.get("is_colosseum")) if state else False
-    colosseum_label = "COLOSSEUM" if is_colosseum else "RIVER RACE"
+    colosseum_label = (
+        t("current_war_colosseum", lang)
+        if is_colosseum
+        else t("current_war_river_race", lang)
+    )
 
     member_tags = await get_current_member_tags(clan_tag)
     member_count = len(member_tags)
 
     current_decks = 0
     current_fame = 0
-    rank_decks: str | int = "N/A"
-    rank_fame: str | int = "N/A"
+    rank_decks: str | int = t("na", lang)
+    rank_fame: str | int = t("na", lang)
 
     async with get_session() as session:
         week_rows: list[dict[str, object]] = []
@@ -1402,8 +1712,8 @@ async def build_my_activity_report(
             if row:
                 current_decks = int(row.decks_used or 0)
                 current_fame = int(row.fame or 0)
-                rank_decks = "N/A"
-                rank_fame = "N/A"
+                rank_decks = t("na", lang)
+                rank_fame = t("na", lang)
 
         weeks = await get_last_weeks_from_db(clan_tag, limit=8)
         user_rows: list[tuple[int, int]] = []
@@ -1458,8 +1768,8 @@ async def build_my_activity_report(
                 clan_avg_decks = total_decks / denominator
                 clan_avg_fame = total_fame / denominator
 
-    decks_comp = _compare_to_avg(avg_user_decks, clan_avg_decks)
-    fame_comp = _compare_to_avg(avg_user_fame, clan_avg_fame)
+    decks_comp = _compare_to_avg(avg_user_decks, clan_avg_decks, lang)
+    fame_comp = _compare_to_avg(avg_user_fame, clan_avg_fame, lang)
 
     donations_wtd_map = await get_current_wtd_donations(
         clan_tag, player_tags={_normalize_tag(player_tag)}
@@ -1477,11 +1787,15 @@ async def build_my_activity_report(
         last_seen_ts = last_seen.astimezone(timezone.utc).strftime(
             "%Y-%m-%d %H:%M UTC"
         )
-        last_seen_line = (
-            f"👀 Last seen: {last_seen_ts} ({days_absent}d ago) {_absence_label(days_absent)}"
+        last_seen_line = t(
+            "my_activity_last_seen",
+            lang,
+            last_seen=last_seen_ts,
+            days=days_absent,
+            absence=_absence_label(days_absent, lang),
         )
     else:
-        last_seen_line = "👀 Last seen: n/a"
+        last_seen_line = t("my_activity_last_seen_na", lang)
     tag_key = _normalize_tag(player_tag)
     wtd_entry = donations_wtd_map.get(tag_key, {})
     wtd_donations = wtd_entry.get("donations")
@@ -1494,78 +1808,133 @@ async def build_my_activity_report(
         donation_weeks = int(donations_8w_map[tag_key].get("weeks_present", 0))
 
     if current_decks == 0:
-        status_label = "🔴 DANGER"
-        reason_line = "Reason: 0 decks this week."
+        status_label = t("my_activity_status_danger", lang)
+        reason_line = t("my_activity_reason_zero_decks", lang)
     elif avg_user_decks < clan_avg_decks and avg_user_fame < clan_avg_fame:
-        status_label = "🟡 AT RISK"
-        reason_line = "Reason: below clan average over last 8 weeks."
+        status_label = t("my_activity_status_risk", lang)
+        reason_line = t("my_activity_reason_below_avg", lang)
     else:
-        status_label = "✅ SAFE"
-        reason_line = "Reason: solid activity."
+        status_label = t("my_activity_status_safe", lang)
+        reason_line = t("my_activity_reason_solid", lang)
 
     avg_user_decks_str = _format_avg(avg_user_decks)
     avg_user_fame_str = _format_avg(avg_user_fame)
     clan_avg_decks_str = _format_avg(clan_avg_decks)
     clan_avg_fame_str = _format_avg(clan_avg_fame)
-    wtd_donations_text = str(wtd_donations) if wtd_donations is not None else "n/a"
-    wtd_received_text = str(wtd_received) if wtd_received is not None else "n/a"
+    wtd_donations_text = (
+        str(wtd_donations) if wtd_donations is not None else t("na", lang)
+    )
+    wtd_received_text = (
+        str(wtd_received) if wtd_received is not None else t("na", lang)
+    )
     if wtd_donations is None or clan_avg_wtd is None:
-        donation_compare_line = "🤝 You: n/a | Clan avg: n/a → ⚠️ No data"
+        donation_compare_line = t("my_activity_donations_compare_na", lang)
     else:
-        donation_compare_line = (
-            f"🤝 You: {wtd_donations} cards | Clan avg: {clan_avg_wtd} cards → "
-            f"{_compare_simple(int(wtd_donations), int(clan_avg_wtd))}"
+        donation_compare_line = t(
+            "my_activity_donations_compare",
+            lang,
+            you=wtd_donations,
+            clan=clan_avg_wtd,
+            compare=_compare_simple(int(wtd_donations), int(clan_avg_wtd), lang),
         )
     donation_lines = [
-        "🤝 Donations",
-        f"• this donation week (WTD): {wtd_donations_text} | received: {wtd_received_text}",
+        t("my_activity_donations_header", lang),
+        t(
+            "my_activity_donations_wtd",
+            lang,
+            donations=wtd_donations_text,
+            received=wtd_received_text,
+        ),
     ]
     if DONATION_WEEKS_WINDOW > 0:
         donation_lines.append(
-            f"• last {DONATION_WEEKS_WINDOW} donation weeks: {donation_sum} ({donation_weeks}/{DONATION_WEEKS_WINDOW})"
+            t(
+                "my_activity_donations_window",
+                lang,
+                window=DONATION_WEEKS_WINDOW,
+                total=donation_sum,
+                weeks=donation_weeks,
+            )
         )
     if DONATION_WEEKS_WINDOW > 0:
         if donation_weeks > 0:
             avg_donations = donation_sum / donation_weeks
             donation_lines.append(
-                f"• average per active week: {avg_donations:.1f}"
+                t(
+                    "my_activity_donations_avg",
+                    lang,
+                    avg=f"{avg_donations:.1f}",
+                )
             )
 
     lines = [
-        "👤 My War Activity",
-        f"🧾 Player: {player_name}",
-        f"🏷 Tag: {player_tag}",
-        f"🏠 Clan: {clan_tag}",
+        t("my_activity_title", lang),
+        t("my_activity_player_line", lang, player=player_name),
+        t("my_activity_tag_line", lang, tag=player_tag),
+        t("my_activity_clan_line", lang, clan=clan_tag),
         "",
         SEPARATOR_LINE,
-        f"📅 Current week: S{season_id} • W{section_index} • {colosseum_label}",
-        f"🃏 Decks used: {current_decks} / 16",
-        f"🏆 Fame: {current_fame}",
+        t(
+            "my_activity_current_week_line",
+            lang,
+            season=season_id,
+            week=section_index,
+            war_type=colosseum_label,
+        ),
+        t("my_activity_decks_used_line", lang, decks=current_decks),
+        t("my_activity_fame_line", lang, fame=current_fame),
         last_seen_line,
         "",
-        f"📈 Rank (decks): {rank_decks} / {member_count}",
-        f"📈 Rank (fame):  {rank_fame}  / {member_count}",
+        t(
+            "my_activity_rank_decks_line",
+            lang,
+            rank=rank_decks,
+            members=member_count,
+        ),
+        t(
+            "my_activity_rank_fame_line",
+            lang,
+            rank=rank_fame,
+            members=member_count,
+        ),
         "",
         SEPARATOR_LINE,
-        "🗓 Last 8 weeks summary (current members view)",
-        f"✅ Active weeks (>=8 decks): {active_weeks} / {weeks_available}",
-        f"🟡 Low weeks (1–7 decks):    {low_weeks}",
-        f"🔴 Zero weeks (0 decks):      {zero_weeks}",
+        t("my_activity_summary_header", lang),
+        t(
+            "my_activity_summary_active",
+            lang,
+            active=active_weeks,
+            total=weeks_available,
+        ),
+        t("my_activity_summary_low", lang, count=low_weeks),
+        t("my_activity_summary_zero", lang, count=zero_weeks),
         "",
-        f"🃏 Avg decks / week: {avg_user_decks_str}",
-        f"🏆 Avg fame / week:  {avg_user_fame_str}",
+        t("my_activity_avg_decks_line", lang, avg=avg_user_decks_str),
+        t("my_activity_avg_fame_line", lang, avg=avg_user_fame_str),
         "",
         SEPARATOR_LINE,
-        "🏁 Compared to clan average (last 8 weeks)",
-        f"🃏 You: {avg_user_decks_str} decks | Clan avg: {clan_avg_decks_str} decks → {decks_comp}",
-        f"🏆 You: {avg_user_fame_str} fame points | Clan avg: {clan_avg_fame_str} fame points → {fame_comp}",
+        t("my_activity_compare_header", lang),
+        t(
+            "my_activity_compare_decks_line",
+            lang,
+            you=avg_user_decks_str,
+            clan=clan_avg_decks_str,
+            compare=decks_comp,
+        ),
+        t(
+            "my_activity_compare_fame_line",
+            lang,
+            you=avg_user_fame_str,
+            clan=clan_avg_fame_str,
+            compare=fame_comp,
+        ),
         donation_compare_line,
         "",
         SEPARATOR_LINE,
         *donation_lines,
         "",
         SEPARATOR_LINE,
-        f"🚦 Status: {status_label}",
+        t("my_activity_status_line", lang, status=status_label),
         reason_line,
     ]
 

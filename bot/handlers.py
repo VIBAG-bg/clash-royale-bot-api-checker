@@ -49,6 +49,7 @@ from config import (
     WARN_RESET_AFTER_MUTE,
     WELCOME_RULES_MESSAGE_LINK,
 )
+from i18n import DEFAULT_LANG, t
 from cr_api import ClashRoyaleAPIError, get_api_client
 from db import (
     count_pending_applications,
@@ -63,6 +64,7 @@ from db import (
     get_application_by_id,
     get_captcha_question,
     get_current_member_tags,
+    get_user_language,
     get_first_seen_time,
     get_last_rejected_time_for_user,
     get_latest_challenge,
@@ -94,6 +96,7 @@ from db import (
     set_user_penalty,
     clear_user_penalty,
     set_user_verified,
+    set_user_language,
     touch_last_reminded_at,
     update_application_tag,
     mark_application_invited,
@@ -128,7 +131,7 @@ from moderation_middleware import ModerationPolicyMiddleware
 
 moderation_router.message.middleware(ModerationPolicyMiddleware())
 
-HEADER_LINE = "══════════════════════════════"
+HEADER_LINE = "\u2550" * 30
 DIVIDER_LINE = "---------------------------"
 _FLOOD_RATE_CACHE: dict[tuple[int, int], dict[str, object]] = {}
 
@@ -140,6 +143,41 @@ def _format_help_commands(commands: list[dict[str, object]]) -> list[str]:
         lines.append(f"{index}) {cmd['name']} — {cmd['what']}")
         lines.append(f"   Usage: {usage}")
     return lines
+
+
+async def _get_lang_for_message(message: Message) -> str:
+    if message.from_user is None:
+        return DEFAULT_LANG
+    chat_id = message.chat.id if message.chat else None
+    return await get_user_language(chat_id, message.from_user.id)
+
+
+async def _get_lang_for_query(query: CallbackQuery) -> str:
+    if query.from_user is None:
+        return DEFAULT_LANG
+    chat_id = query.message.chat.id if query.message else None
+    return await get_user_language(chat_id, query.from_user.id)
+
+
+def _build_language_keyboard(target_user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=t("lang_button_uk", DEFAULT_LANG),
+                    callback_data=f"lang_select:{target_user_id}:uk",
+                ),
+                InlineKeyboardButton(
+                    text=t("lang_button_ru", DEFAULT_LANG),
+                    callback_data=f"lang_select:{target_user_id}:ru",
+                ),
+                InlineKeyboardButton(
+                    text=t("lang_button_en", DEFAULT_LANG),
+                    callback_data=f"lang_select:{target_user_id}:en",
+                ),
+            ]
+        ]
+    )
 
 
 def _require_clan_tag() -> str | None:
@@ -205,9 +243,9 @@ def _format_dt(value: datetime | None) -> str:
     return value.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
-def _format_user_label(user: object) -> str:
+def _format_user_label(user: object, lang: str = DEFAULT_LANG) -> str:
     if not hasattr(user, "full_name"):
-        return "Unknown"
+        return t("unknown", lang)
     label = user.full_name
     username = getattr(user, "username", None)
     if username:
@@ -215,10 +253,10 @@ def _format_user_label(user: object) -> str:
     return label
 
 
-def _format_user(user: object) -> str:
+def _format_user(user: object, lang: str = DEFAULT_LANG) -> str:
     username = getattr(user, "username", None)
     user_id = getattr(user, "id", None)
-    full_name = getattr(user, "full_name", "Unknown")
+    full_name = getattr(user, "full_name", t("unknown", lang))
     if username and user_id:
         return f"@{username} ({user_id})"
     if user_id:
@@ -237,21 +275,32 @@ def _warn_suffix(total: int) -> str:
     return f" (total: {total})" if total > WARN_THRESHOLD else ""
 
 
-def _build_user_mention(user: object) -> str:
+def _build_user_mention(user: object, lang: str = DEFAULT_LANG) -> str:
     username = getattr(user, "username", None)
     if username:
         return f"@{username}"
     user_id = getattr(user, "id", None)
     if user_id:
         return f"tg://user?id={user_id}"
-    return "user"
+    return t("user_generic", lang)
 
 
-def _format_application_summary(app: dict[str, object]) -> str:
-    tag = app.get("player_tag") or "n/a"
-    user_display = app.get("telegram_username") or app.get("telegram_display_name") or "user"
+def _format_application_summary(app: dict[str, object], lang: str) -> str:
+    tag = app.get("player_tag") or t("na", lang)
+    user_display = (
+        app.get("telegram_username")
+        or app.get("telegram_display_name")
+        or t("user_label", lang)
+    )
     created_at = _format_dt(app.get("created_at"))
-    return f"{app.get('player_name')} | {tag} | {user_display} | {created_at}"
+    return t(
+        "app_summary_line",
+        lang,
+        name=app.get("player_name"),
+        tag=tag,
+        user=user_display,
+        created_at=created_at,
+    )
 
 
 def _parse_optional_tag(value: str) -> tuple[bool, str | None]:
@@ -430,6 +479,8 @@ async def apply_moderation_decision(
         now = datetime.now(timezone.utc)
     if message.from_user is None or message.from_user.is_bot:
         return
+    lang = await _get_lang_for_message(message)
+    user_label = _format_user(message.from_user, lang)
     if not decision.get("should_check"):
         return
     violation = decision.get("violation")
@@ -444,8 +495,13 @@ async def apply_moderation_decision(
             message.chat.id, message.from_user.id, now=now
         )
         await message.answer(
-            f"⚠️ Warning {_warn_step(warn_count)}/3{_warn_suffix(warn_count)} — "
-            f"links are not allowed here. User: {_format_user(message.from_user)}",
+            t(
+                "mod_warn_link",
+                lang,
+                step=_warn_step(warn_count),
+                suffix=_warn_suffix(warn_count),
+                user=user_label,
+            ),
             parse_mode=None,
             disable_web_page_preview=True,
         )
@@ -459,8 +515,13 @@ async def apply_moderation_decision(
         )
         await send_modlog(
             message.bot,
-            f"[MOD] link blocked: chat={message.chat.id} "
-            f"user={message.from_user.id} warnings={warn_count}",
+            t(
+                "modlog_link_blocked",
+                DEFAULT_LANG,
+                chat_id=message.chat.id,
+                user_id=message.from_user.id,
+                warnings=warn_count,
+            ),
         )
         if warn_count >= 3:
             await _mute_user(
@@ -470,9 +531,12 @@ async def apply_moderation_decision(
                 reason="link warnings",
             )
             await message.answer(
-                f"🔇 Auto-mute for links — 3/3 warnings. "
-                f"Muted: {_format_user(message.from_user)}. "
-                f"Duration: {flood_mute} min. Reason: link warnings.",
+                t(
+                    "mod_auto_mute_link",
+                    lang,
+                    user=user_label,
+                    minutes=flood_mute,
+                ),
                 parse_mode=None,
                 disable_web_page_preview=True,
             )
@@ -532,13 +596,24 @@ async def apply_moderation_decision(
         )
         await send_modlog(
             message.bot,
-            f"[MOD] flood: chat={message.chat.id} "
-            f"user={message.from_user.id} count={count}",
+            t(
+                "modlog_flood",
+                DEFAULT_LANG,
+                chat_id=message.chat.id,
+                user_id=message.from_user.id,
+                count=count,
+            ),
         )
         await message.answer(
-            f"⚠️ Warning {_warn_step(warn_count)}/3{_warn_suffix(warn_count)} — "
-            f"flood/spam detected (>{flood_max} msgs/{flood_window}s). "
-            f"User: {_format_user(message.from_user)}.",
+            t(
+                "mod_warn_flood",
+                lang,
+                step=_warn_step(warn_count),
+                suffix=_warn_suffix(warn_count),
+                flood_max=flood_max,
+                flood_window=flood_window,
+                user=user_label,
+            ),
             parse_mode=None,
             disable_web_page_preview=True,
         )
@@ -550,9 +625,12 @@ async def apply_moderation_decision(
                 reason="flood warnings",
             )
             await message.answer(
-                f"🔇 Auto-mute for flood — 3/3 warnings. "
-                f"Muted: {_format_user(message.from_user)}. "
-                f"Duration: {flood_mute} min. Reason: flood warnings.",
+                t(
+                    "mod_auto_mute_flood",
+                    lang,
+                    user=user_label,
+                    minutes=flood_mute,
+                ),
                 parse_mode=None,
                 disable_web_page_preview=True,
             )
@@ -647,9 +725,16 @@ async def _delete_message_safe(message: Message) -> None:
         )
         await send_modlog(
             message.bot,
-            f"[MOD] ERROR: delete failed: chat={message.chat.id} "
-            f"user={message.from_user.id if message.from_user else 'n/a'} "
-            f"msg_id={message.message_id} err={e}",
+            t(
+                "modlog_delete_failed",
+                DEFAULT_LANG,
+                chat_id=message.chat.id,
+                user_id=(
+                    message.from_user.id if message.from_user else t("na", DEFAULT_LANG)
+                ),
+                message_id=message.message_id,
+                error=e,
+            ),
         )
 
 
@@ -680,8 +765,13 @@ async def _mute_user(
         logger.warning("Failed to mute user: %s", e, exc_info=True)
         await send_modlog(
             message.bot,
-            f"[MOD] ERROR: mute failed: chat={message.chat.id} "
-            f"user={user_id} err={e}",
+            t(
+                "modlog_mute_failed",
+                DEFAULT_LANG,
+                chat_id=message.chat.id,
+                user_id=user_id,
+                error=e,
+            ),
         )
         return
     await set_user_penalty(
@@ -708,8 +798,14 @@ async def _mute_user(
     )
     await send_modlog(
         message.bot,
-        f"[MOD] mute: chat={message.chat.id} user={user_id} "
-        f"until={until.isoformat()} reason={reason}",
+        t(
+            "modlog_mute",
+            DEFAULT_LANG,
+            chat_id=message.chat.id,
+            user_id=user_id,
+            until=until.isoformat(),
+            reason=reason,
+        ),
     )
 
 async def send_modlog(bot: Bot, text: str) -> None:
@@ -773,9 +869,7 @@ async def _send_captcha_message(
     prefix = f"{mention}\n" if mention else ""
     text = (
         f"{prefix}"
-        "🛡 Please verify to chat.\n"
-        f"{question.get('question_text')}\n"
-        "Choose the correct answer:"
+        f"{t('captcha_prompt', DEFAULT_LANG, question=question.get('question_text'))}"
     )
     keyboard = _build_captcha_keyboard(challenge_id, question)
     try:
@@ -799,18 +893,18 @@ async def _send_welcome_message(
     buttons: list[list[InlineKeyboardButton]] = []
     if WELCOME_RULES_MESSAGE_LINK:
         buttons.append(
-            [InlineKeyboardButton(text="📌 Rules", url=WELCOME_RULES_MESSAGE_LINK)]
+            [InlineKeyboardButton(text=t("btn_rules", DEFAULT_LANG), url=WELCOME_RULES_MESSAGE_LINK)]
         )
     if BOT_USERNAME:
         username = BOT_USERNAME.lstrip("@")
         buttons.append(
             [
                 InlineKeyboardButton(
-                    text="🔗 Link account",
+                    text=t("btn_link_account", DEFAULT_LANG),
                     url=f"https://t.me/{username}?start=link",
                 ),
                 InlineKeyboardButton(
-                    text="📝 Apply",
+                    text=t("btn_apply", DEFAULT_LANG),
                     url=f"https://t.me/{username}?start=apply",
                 ),
             ]
@@ -820,7 +914,7 @@ async def _send_welcome_message(
     )
     await bot.send_message(
         chat_id,
-        f"Welcome, {user_display}! You can now chat.",
+        t("welcome_message", DEFAULT_LANG, user=user_display),
         reply_markup=keyboard,
         parse_mode=None,
     )
@@ -846,19 +940,21 @@ async def _is_admin_user(message: Message, user_id: int) -> bool:
 
 
 async def _send_link_button(message: Message) -> None:
+    lang = await _get_lang_for_message(message)
     username = await _get_bot_username(message)
     if not username:
-        await message.answer("Unable to generate link right now.", parse_mode=None)
+        await message.answer(t("link_unavailable", lang), parse_mode=None)
         return
     url = f"https://t.me/{username}?start=link"
     keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="🔗 Link my account", url=url)]]
+        inline_keyboard=[[InlineKeyboardButton(text=t("btn_link_my_account", lang), url=url)]]
     )
     prefix = ""
     if message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
-        prefix = "Open bot in private to link.\n"
+        prefix = t("link_open_private", lang) + "\n"
+    text = prefix + t("link_tap_button", lang)
     await message.answer(
-        f"{prefix}Tap the button below to link your account.",
+        text,
         reply_markup=keyboard,
         parse_mode=None,
     )
@@ -872,16 +968,17 @@ async def _handle_link_candidates(
     source: str,
     origin_chat_id: int | None,
 ) -> None:
+    lang = await _get_lang_for_message(message)
     clan_tag = _require_clan_tag()
     if not clan_tag:
-        await message.answer("CLAN_TAG is not configured.", parse_mode=None)
+        await message.answer(t("clan_tag_not_configured", lang), parse_mode=None)
         return
 
     candidates = await search_player_candidates(clan_tag, nickname)
 
     if not candidates:
         await message.answer(
-            "No player found with that nickname in clan data. Please check spelling and send again.",
+            t("link_no_player_found", lang),
             parse_mode=None,
         )
         return
@@ -896,20 +993,44 @@ async def _handle_link_candidates(
         )
         await delete_user_link_request(target_user_id)
         await message.answer(
-            f"✅ Linked: {candidate['player_name']} ({_normalize_tag(candidate['player_tag'])}). Now use /my_activity.",
+            t(
+                "link_success",
+                lang,
+                name=candidate["player_name"],
+                tag=_normalize_tag(candidate["player_tag"]),
+            ),
             parse_mode=None,
         )
         return
 
     buttons: list[list[InlineKeyboardButton]] = []
-    lines = ["Multiple matches found. Choose yours:"]
+    lines = [t("link_multiple_found", lang)]
     for candidate in candidates:
         tag = _normalize_tag(candidate["player_tag"])
-        status = "IN CLAN" if candidate.get("in_clan") else "NOT IN CLAN"
-        label = f"{candidate['player_name']} - {tag} - {status}"
+        status = (
+            t("status_in_clan", lang)
+            if candidate.get("in_clan")
+            else t("status_not_in_clan", lang)
+        )
+        label = t(
+            "link_candidate_label",
+            lang,
+            name=candidate["player_name"],
+            tag=tag,
+            status=status,
+        )
         data = f"link_select:{target_user_id}:{tag.lstrip('#')}"
         buttons.append([InlineKeyboardButton(text=label, callback_data=data)])
-        lines.append(f"{len(buttons)}) {candidate['player_name']} — {tag} — {status}")
+        lines.append(
+            t(
+                "link_candidate_line",
+                lang,
+                index=len(buttons),
+                name=candidate["player_name"],
+                tag=tag,
+                status=status,
+            )
+        )
 
     await upsert_user_link_request(
         telegram_user_id=target_user_id,
@@ -931,17 +1052,25 @@ async def cmd_start(message: Message) -> None:
         parts = message.text.split(maxsplit=1)
         if len(parts) > 1:
             args = parts[1].strip().lower()
+    lang = await _get_lang_for_message(message)
     if args == "link":
         if message.chat.type != ChatType.PRIVATE:
             await _send_link_button(message)
             return
         if message.from_user is None:
-            await message.answer("Unable to identify your account.", parse_mode=None)
+            await message.answer(
+                t("unable_identify_account", lang), parse_mode=None
+            )
             return
         existing = await get_user_link(message.from_user.id)
         if existing:
             await message.answer(
-                f"You are already linked to {existing['player_name']} ({existing['player_tag']}). Use /my_activity.",
+                t(
+                    "already_linked",
+                    lang,
+                    name=existing["player_name"],
+                    tag=existing["player_tag"],
+                ),
                 parse_mode=None,
             )
             return
@@ -951,33 +1080,38 @@ async def cmd_start(message: Message) -> None:
             origin_chat_id=None,
         )
         await message.answer(
-            "Send your in-game nickname exactly as it appears.",
+            t("send_nickname_exact", lang),
             parse_mode=None,
         )
         return
 
     if args == "apply":
         if message.chat.type != ChatType.PRIVATE:
-            await message.answer("Please open bot in DM to apply.", parse_mode=None)
+            await message.answer(t("apply_open_dm", lang), parse_mode=None)
             return
         if not APPLY_ENABLED:
             await message.answer(
-                "Applications are disabled right now.", parse_mode=None
+                t("apply_disabled", lang), parse_mode=None
             )
             return
         if message.from_user is None:
-            await message.answer("Unable to identify your account.", parse_mode=None)
+            await message.answer(
+                t("unable_identify_account", lang), parse_mode=None
+            )
             return
         clan_tag = _require_clan_tag()
         if not clan_tag:
-            await message.answer("CLAN_TAG is not configured.", parse_mode=None)
+            await message.answer(t("clan_tag_not_configured", lang), parse_mode=None)
             return
 
         pending_app = await get_pending_application_for_user(message.from_user.id)
         if pending_app:
             await message.answer(
-                "You already have a pending application:\n"
-                f"{_format_application_summary(pending_app)}",
+                t(
+                    "apply_already_pending",
+                    lang,
+                    summary=_format_application_summary(pending_app, lang),
+                ),
                 parse_mode=None,
             )
             return
@@ -991,7 +1125,12 @@ async def cmd_start(message: Message) -> None:
                 hours = int(remaining.total_seconds() // 3600)
                 minutes = int((remaining.total_seconds() % 3600) // 60)
                 await message.answer(
-                    f"Please wait {hours}h {minutes}m before applying again.",
+                    t(
+                        "apply_wait_before",
+                        lang,
+                        hours=hours,
+                        minutes=minutes,
+                    ),
                     parse_mode=None,
                 )
                 return
@@ -999,7 +1138,7 @@ async def cmd_start(message: Message) -> None:
         pending_count = await count_pending_applications()
         if pending_count >= APPLY_MAX_PENDING:
             await message.answer(
-                "Application queue is full right now. Please try later.",
+                t("apply_queue_full", lang),
                 parse_mode=None,
             )
             return
@@ -1013,7 +1152,7 @@ async def cmd_start(message: Message) -> None:
             )
             if isinstance(members, int) and members < int(max_members or 50):
                 await message.answer(
-                    f"Clan has free slots now. Join using clan tag {clan_tag}.",
+                    t("apply_free_slots", lang, clan_tag=clan_tag),
                     parse_mode=None,
                 )
                 return
@@ -1026,7 +1165,7 @@ async def cmd_start(message: Message) -> None:
         state = await get_app_state(state_key)
         if state and state.get("status") == "awaiting_tag":
             await message.answer(
-                "Please send your player tag (or 'skip').", parse_mode=None
+                t("apply_send_tag", lang), parse_mode=None
             )
             return
 
@@ -1035,33 +1174,33 @@ async def cmd_start(message: Message) -> None:
             {"status": "awaiting_name", "started_at": datetime.now(timezone.utc).isoformat()},
         )
         await message.answer(
-            "Send your in-game nickname exactly as it appears.",
+            t("send_nickname_exact", lang),
             parse_mode=None,
         )
         return
 
-    welcome_text = (
-        "Welcome to the Clash Royale Clan Monitor Bot!\n\n"
-        "This bot monitors your clan's River Race participation "
-        "and tracks player activity.\n\n"
-        "Available commands:\n"
-        "/start - Show this welcome message\n"
-        "/ping - Check if the bot is responsive\n"
-        "/inactive - Show players with low River Race participation\n"
-        "/war - Weekly war report\n"
-        "/war8 - Rolling 8-week report\n"
-        "/list_for_kick - Kick shortlist\n"
-        "/current_war - Current war snapshot\n"
-        "/my_activity - Your activity report\n"
-        "/activity - Show activity by nickname or @username\n"
-        "/donations - Donations leaderboard"
+    await message.answer(t("start_welcome", lang), parse_mode=None)
+
+
+@router.message(Command("language"))
+async def cmd_language(message: Message) -> None:
+    if message.from_user is None:
+        lang = DEFAULT_LANG
+        await message.answer(
+            t("unable_identify_account", lang), parse_mode=None
+        )
+        return
+    await message.answer(
+        t("language_prompt", DEFAULT_LANG),
+        reply_markup=_build_language_keyboard(message.from_user.id),
+        parse_mode=None,
     )
-    await message.answer(welcome_text, parse_mode=None)
 
 
 @router.message(Command("help"))
 async def cmd_help(message: Message) -> None:
     """Show help for available commands."""
+    lang = await _get_lang_for_message(message)
     is_admin = False
     if message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
         if message.from_user is not None:
@@ -1077,61 +1216,62 @@ async def cmd_help(message: Message) -> None:
                 is_admin = False
 
     general_lines = [
-        "/help - show this help",
-        "/start - welcome (/start link, /start apply)",
-        "/ping - health check",
-        "/war - weekly report",
-        "/war8 - last 8 weeks report",
-        "/war_all - war + war8 + kick list",
-        "/current_war - current week snapshot",
-        "/my_activity - your activity",
-        "/activity <nickname>|@username|reply - activity by name/@/reply",
-        "/donations - donations leaderboard",
-        "/list_for_kick - kick shortlist",
-        "/inactive - last seen list",
-        "/promote_candidates - promotions",
-        "/info - clan info",
+        t("help_cmd_help", lang),
+        t("help_cmd_start", lang),
+        t("help_cmd_ping", lang),
+        t("help_cmd_war", lang),
+        t("help_cmd_war8", lang),
+        t("help_cmd_war_all", lang),
+        t("help_cmd_current_war", lang),
+        t("help_cmd_my_activity", lang),
+        t("help_cmd_activity", lang),
+        t("help_cmd_donations", lang),
+        t("help_cmd_list_for_kick", lang),
+        t("help_cmd_inactive", lang),
+        t("help_cmd_promote_candidates", lang),
+        t("help_cmd_info", lang),
+        t("help_cmd_language", lang),
     ]
 
     admin_lines = [
-        "/bind - bind this chat",
-        "/admin_link_name <nickname> - link user (reply)",
-        "/unlink - unlink user (reply)",
-        "/apps [N] - list applications",
-        "/app <id> - application details",
-        "/app_approve <id> - approve",
-        "/app_reject <id> <reason> - reject",
-        "/app_notify <id> - notify slot",
-        "/captcha_send - send captcha (reply)",
-        "/captcha_status - captcha status (reply)",
-        "/captcha_reset - reset captcha (reply)",
-        "/captcha_verify - verify user (reply)",
-        "/captcha_unverify - remove verify (reply)",
-        "/riverside <day> - test war reminder",
-        "/coliseum <day> - test colosseum reminder",
-        "/modlog_test - test modlog",
+        t("help_admin_bind", lang),
+        t("help_admin_admin_link_name", lang),
+        t("help_admin_unlink", lang),
+        t("help_admin_apps", lang),
+        t("help_admin_app", lang),
+        t("help_admin_app_approve", lang),
+        t("help_admin_app_reject", lang),
+        t("help_admin_app_notify", lang),
+        t("help_admin_captcha_send", lang),
+        t("help_admin_captcha_status", lang),
+        t("help_admin_captcha_reset", lang),
+        t("help_admin_captcha_verify", lang),
+        t("help_admin_captcha_unverify", lang),
+        t("help_admin_riverside", lang),
+        t("help_admin_coliseum", lang),
+        t("help_admin_modlog_test", lang),
     ]
 
     moderation_lines = [
-        "/warn <reason> - warn user (reply)",
-        "/warns [N] - last warnings (reply)",
-        "/mute <min> <reason> - mute user (reply)",
-        "/unmute - unmute user (reply)",
-        "/ban <reason> - ban user (reply)",
-        "/unban <id> - unban by id",
-        "/purge <N> - delete last N messages",
-        "/raid_on - enable raid mode",
-        "/raid_off - disable raid mode",
-        "/raid_status - show raid settings",
-        "/modlog [N] - recent mod actions",
+        t("help_mod_warn", lang),
+        t("help_mod_warns", lang),
+        t("help_mod_mute", lang),
+        t("help_mod_unmute", lang),
+        t("help_mod_ban", lang),
+        t("help_mod_unban", lang),
+        t("help_mod_purge", lang),
+        t("help_mod_raid_on", lang),
+        t("help_mod_raid_off", lang),
+        t("help_mod_raid_status", lang),
+        t("help_mod_modlog", lang),
     ]
 
     lines = [
 
         HEADER_LINE,
-        "🤖 Black Poison Bot - Help",
+        t("help_title", lang),
         HEADER_LINE,
-        "📌 GENERAL COMMANDS",
+        t("help_general_header", lang),
         DIVIDER_LINE,
         *general_lines,
     ]
@@ -1139,11 +1279,11 @@ async def cmd_help(message: Message) -> None:
         lines.extend(
             [
                 "",
-                "🛡 ADMIN COMMANDS",
+                t("help_admin_header", lang),
                 DIVIDER_LINE,
                 *admin_lines,
                 "",
-                "🧰 MODERATION COMMANDS",
+                t("help_moderation_header", lang),
                 DIVIDER_LINE,
                 *moderation_lines,
             ]
@@ -1151,7 +1291,7 @@ async def cmd_help(message: Message) -> None:
     lines.extend(
         [
             HEADER_LINE,
-            "ℹ️ Tip: Use /my_activity in DM to link your account.",
+            t("help_tip", lang),
             HEADER_LINE,
         ]
     )
@@ -1159,8 +1299,9 @@ async def cmd_help(message: Message) -> None:
 
 @router.message(Command("apps"))
 async def cmd_apps(message: Message) -> None:
+    lang = await _get_lang_for_message(message)
     if message.from_user is None or not _is_debug_admin(message.from_user.id):
-        await message.answer("Not allowed.", parse_mode=None)
+        await message.answer(t("not_allowed", lang), parse_mode=None)
         return
     limit = 10
     if message.text:
@@ -1192,190 +1333,239 @@ async def cmd_apps(message: Message) -> None:
 
     if not apps and not invited:
         await message.answer(
-            "No pending applications or active invites.", parse_mode=None
+            t("apps_none", lang), parse_mode=None
         )
         return
 
     lines = []
     if apps:
-        lines.append(f"Pending applications (latest {len(apps)}):")
+        lines.append(t("apps_pending_header", lang, count=len(apps)))
         for app in apps:
-            tag = app.get("player_tag") or "n/a"
-            user = app.get("telegram_username") or app.get("telegram_display_name") or "user"
+            tag = app.get("player_tag") or t("na", lang)
+            user = app.get("telegram_username") or app.get("telegram_display_name") or t("user_label", lang)
             created_at = _format_dt(app.get("created_at"))
             lines.append(
-                f"{app.get('id')}) {app.get('player_name')} | {tag} | {user} | {created_at}"
+                t(
+                    "apps_pending_line",
+                    lang,
+                    app_id=app.get("id"),
+                    name=app.get("player_name"),
+                    tag=tag,
+                    user=user,
+                    created_at=created_at,
+                )
             )
     if invited:
         if lines:
             lines.append("")
-        lines.append(f"Active invites (latest {len(invited)}):")
+        lines.append(t("apps_invited_header", lang, count=len(invited)))
         for app in invited:
-            tag = app.get("player_tag") or "n/a"
-            user = app.get("telegram_username") or app.get("telegram_display_name") or "user"
+            tag = app.get("player_tag") or t("na", lang)
+            user = app.get("telegram_username") or app.get("telegram_display_name") or t("user_label", lang)
             notified_at = _format_dt(app.get("last_notified_at"))
             expires_at = _format_dt(app.get("invite_expires_at"))
             lines.append(
-                f"{app.get('id')}) {app.get('player_name')} | {tag} | {user} | "
-                f"notified={notified_at} | expires={expires_at}"
+                t(
+                    "apps_invited_line",
+                    lang,
+                    app_id=app.get("id"),
+                    name=app.get("player_name"),
+                    tag=tag,
+                    user=user,
+                    notified_at=notified_at,
+                    expires_at=expires_at,
+                )
             )
-    lines.append(
-        "Note: auto-invite moves applications from \"pending\" to \"invited\", so they may disappear from the pending list."
-    )
+    lines.append(t("apps_note", lang))
     await message.answer("\n".join(lines), parse_mode=None)
 
 
 @router.message(Command("app"))
 async def cmd_app(message: Message) -> None:
+    lang = await _get_lang_for_message(message)
     if message.from_user is None or not _is_debug_admin(message.from_user.id):
-        await message.answer("Not allowed.", parse_mode=None)
+        await message.answer(t("not_allowed", lang), parse_mode=None)
         return
     if not message.text:
-        await message.answer("Usage: /app <id>", parse_mode=None)
+        await message.answer(t("usage_app", lang), parse_mode=None)
         return
     parts = message.text.split(maxsplit=1)
     if len(parts) < 2:
-        await message.answer("Usage: /app <id>", parse_mode=None)
+        await message.answer(t("usage_app", lang), parse_mode=None)
         return
     try:
         app_id = int(parts[1])
     except ValueError:
-        await message.answer("Invalid application id.", parse_mode=None)
+        await message.answer(t("invalid_application_id", lang), parse_mode=None)
         return
     app = await get_application_by_id(app_id)
     if not app:
-        await message.answer("Application not found.", parse_mode=None)
+        await message.answer(t("application_not_found", lang), parse_mode=None)
         return
     username = app.get("telegram_username")
-    username_display = f"@{username}" if username else "n/a"
+    username_display = f"@{username}" if username else t("na", lang)
+    user_display = app.get("telegram_display_name") or t("user_label", lang)
     lines = [
-        f"Application {app_id}",
-        f"Status: {app.get('status')}",
-        f"Player: {app.get('player_name')}",
-        f"Tag: {app.get('player_tag') or 'n/a'}",
-        (
-            "User: "
-            f"{app.get('telegram_display_name') or 'user'} "
-            f"({username_display}) id={app.get('telegram_user_id')}"
+        t("app_detail_header", lang, app_id=app_id),
+        t("app_detail_status", lang, status=app.get("status")),
+        t("app_detail_player", lang, name=app.get("player_name")),
+        t("app_detail_tag", lang, tag=app.get("player_tag") or t("na", lang)),
+        t(
+            "app_detail_user",
+            lang,
+            user=user_display,
+            username=username_display,
+            user_id=app.get("telegram_user_id"),
         ),
-        f"Created: {_format_dt(app.get('created_at'))}",
-        f"Updated: {_format_dt(app.get('updated_at'))}",
+        t(
+            "app_detail_created",
+            lang,
+            created_at=_format_dt(app.get("created_at")),
+        ),
+        t(
+            "app_detail_updated",
+            lang,
+            updated_at=_format_dt(app.get("updated_at")),
+        ),
     ]
     await message.answer("\n".join(lines), parse_mode=None)
 
 
 @router.message(Command("app_approve"))
 async def cmd_app_approve(message: Message) -> None:
+    lang = await _get_lang_for_message(message)
     if message.from_user is None or not _is_debug_admin(message.from_user.id):
-        await message.answer("Not allowed.", parse_mode=None)
+        await message.answer(t("not_allowed", lang), parse_mode=None)
         return
     if not message.text:
-        await message.answer("Usage: /app_approve <id>", parse_mode=None)
+        await message.answer(t("usage_app_approve", lang), parse_mode=None)
         return
     parts = message.text.split(maxsplit=1)
     if len(parts) < 2:
-        await message.answer("Usage: /app_approve <id>", parse_mode=None)
+        await message.answer(t("usage_app_approve", lang), parse_mode=None)
         return
     try:
         app_id = int(parts[1])
     except ValueError:
-        await message.answer("Invalid application id.", parse_mode=None)
+        await message.answer(t("invalid_application_id", lang), parse_mode=None)
         return
     app = await get_application_by_id(app_id)
     if not app:
-        await message.answer("Application not found.", parse_mode=None)
+        await message.answer(t("application_not_found", lang), parse_mode=None)
         return
     if app.get("status") == "approved":
-        await message.answer("Application already approved.", parse_mode=None)
+        await message.answer(t("application_already_approved", lang), parse_mode=None)
         return
     updated = await set_application_status(app_id, "approved")
     if not updated:
-        await message.answer("Unable to approve application.", parse_mode=None)
+        await message.answer(t("unable_approve_application", lang), parse_mode=None)
         return
-    await message.answer("Application approved.", parse_mode=None)
+    await message.answer(t("application_approved", lang), parse_mode=None)
     try:
-        await message.bot.send_message(
-            app["telegram_user_id"],
-            "✅ Your application was approved.",
-            parse_mode=None,
-        )
+        target_user_id = app.get("telegram_user_id")
+        if target_user_id:
+            target_lang = await get_user_language(None, int(target_user_id))
+            await message.bot.send_message(
+                target_user_id,
+                t("application_user_approved", target_lang),
+                parse_mode=None,
+            )
     except Exception as e:
         logger.warning("Failed to notify applicant: %s", e)
     await _notify_application(
         message.bot,
-        f"Application {app_id} approved by admin {message.from_user.id}.",
+        t(
+            "app_admin_notify_approved",
+            DEFAULT_LANG,
+            app_id=app_id,
+            admin_id=message.from_user.id,
+        ),
     )
 
 
 @router.message(Command("app_reject"))
 async def cmd_app_reject(message: Message) -> None:
+    lang = await _get_lang_for_message(message)
     if message.from_user is None or not _is_debug_admin(message.from_user.id):
-        await message.answer("Not allowed.", parse_mode=None)
+        await message.answer(t("not_allowed", lang), parse_mode=None)
         return
     if not message.text:
-        await message.answer("Usage: /app_reject <id> [reason]", parse_mode=None)
+        await message.answer(t("usage_app_reject", lang), parse_mode=None)
         return
     parts = message.text.split(maxsplit=2)
     if len(parts) < 2:
-        await message.answer("Usage: /app_reject <id> [reason]", parse_mode=None)
+        await message.answer(t("usage_app_reject", lang), parse_mode=None)
         return
     try:
         app_id = int(parts[1])
     except ValueError:
-        await message.answer("Invalid application id.", parse_mode=None)
+        await message.answer(t("invalid_application_id", lang), parse_mode=None)
         return
     reason = parts[2].strip() if len(parts) > 2 else ""
     app = await get_application_by_id(app_id)
     if not app:
-        await message.answer("Application not found.", parse_mode=None)
+        await message.answer(t("application_not_found", lang), parse_mode=None)
         return
     if app.get("status") == "rejected":
-        await message.answer("Application already rejected.", parse_mode=None)
+        await message.answer(t("application_already_rejected", lang), parse_mode=None)
         return
     updated = await set_application_status(app_id, "rejected")
     if not updated:
-        await message.answer("Unable to reject application.", parse_mode=None)
+        await message.answer(t("unable_reject_application", lang), parse_mode=None)
         return
-    await message.answer("Application rejected.", parse_mode=None)
+    await message.answer(t("application_rejected", lang), parse_mode=None)
     try:
-        text = "Your application was rejected."
-        if reason:
-            text = f"{text}\nReason: {reason}"
-        await message.bot.send_message(
-            app["telegram_user_id"],
-            text,
-            parse_mode=None,
-        )
+        target_user_id = app.get("telegram_user_id")
+        if target_user_id:
+            target_lang = await get_user_language(None, int(target_user_id))
+            text = t("application_user_rejected", target_lang)
+            if reason:
+                text = text + "\n" + t(
+                    "application_user_rejected_reason",
+                    target_lang,
+                    reason=reason,
+                )
+            await message.bot.send_message(
+                target_user_id,
+                text,
+                parse_mode=None,
+            )
     except Exception as e:
         logger.warning("Failed to notify applicant: %s", e)
     await _notify_application(
         message.bot,
-        f"Application {app_id} rejected by admin {message.from_user.id}.",
+        t(
+            "app_admin_notify_rejected",
+            DEFAULT_LANG,
+            app_id=app_id,
+            admin_id=message.from_user.id,
+        ),
     )
 
 
 @router.message(Command("app_notify"))
 async def cmd_app_notify(message: Message) -> None:
+    lang = await _get_lang_for_message(message)
     if message.from_user is None or not _is_debug_admin(message.from_user.id):
-        await message.answer("Not allowed.", parse_mode=None)
+        await message.answer(t("not_allowed", lang), parse_mode=None)
         return
     if not message.text:
-        await message.answer("Usage: /app_notify <id> [reason]", parse_mode=None)
+        await message.answer(t("usage_app_notify", lang), parse_mode=None)
         return
     parts = message.text.split(maxsplit=2)
     if len(parts) < 2:
-        await message.answer("Usage: /app_notify <id> [reason]", parse_mode=None)
+        await message.answer(t("usage_app_notify", lang), parse_mode=None)
         return
     try:
         app_id = int(parts[1])
     except ValueError:
-        await message.answer("Invalid application id.", parse_mode=None)
+        await message.answer(t("invalid_application_id", lang), parse_mode=None)
         return
     reason = parts[2].strip() if len(parts) > 2 else ""
 
     app = await get_application_by_id(app_id)
     if not app:
-        await message.answer("Application not found.", parse_mode=None)
+        await message.answer(t("application_not_found", lang), parse_mode=None)
         await log_mod_action(
             chat_id=message.chat.id,
             target_user_id=0,
@@ -1385,11 +1575,16 @@ async def cmd_app_notify(message: Message) -> None:
         )
         await send_modlog(
             message.bot,
-            f"[APP_NOTIFY] not found: id={app_id} admin={message.from_user.id}",
+            t(
+                "modlog_app_notify_not_found",
+                DEFAULT_LANG,
+                app_id=app_id,
+                admin_id=message.from_user.id,
+            ),
         )
         return
     if app.get("status") != "pending":
-        await message.answer("Application is not pending.", parse_mode=None)
+        await message.answer(t("application_not_pending", lang), parse_mode=None)
         await log_mod_action(
             chat_id=message.chat.id,
             target_user_id=int(app.get("telegram_user_id") or 0),
@@ -1399,13 +1594,19 @@ async def cmd_app_notify(message: Message) -> None:
         )
         await send_modlog(
             message.bot,
-            f"[APP_NOTIFY] not pending: id={app_id} status={app.get('status')} admin={message.from_user.id}",
+            t(
+                "modlog_app_notify_not_pending",
+                DEFAULT_LANG,
+                app_id=app_id,
+                status=app.get("status"),
+                admin_id=message.from_user.id,
+            ),
         )
         return
 
     clan_tag = _require_clan_tag()
     if not clan_tag:
-        await message.answer("CLAN_TAG is not configured.", parse_mode=None)
+        await message.answer(t("clan_tag_not_configured", lang), parse_mode=None)
         return
     clan_tag = _normalize_tag(clan_tag)
 
@@ -1421,7 +1622,12 @@ async def cmd_app_notify(message: Message) -> None:
             hours = int(remaining.total_seconds() // 3600)
             minutes = int((remaining.total_seconds() % 3600) // 60)
             await message.answer(
-                f"Already notified recently. Try again in {hours}h {minutes}m.",
+                t(
+                    "application_notify_cooldown",
+                    lang,
+                    hours=hours,
+                    minutes=minutes,
+                ),
                 parse_mode=None,
             )
             await log_mod_action(
@@ -1433,13 +1639,20 @@ async def cmd_app_notify(message: Message) -> None:
             )
             await send_modlog(
                 message.bot,
-                f"[APP_NOTIFY] cooldown: id={app_id} user={app.get('telegram_user_id')} remaining={hours}h{minutes}m",
+                t(
+                    "modlog_app_notify_cooldown",
+                    DEFAULT_LANG,
+                    app_id=app_id,
+                    user_id=app.get("telegram_user_id"),
+                    hours=hours,
+                    minutes=minutes,
+                ),
             )
             return
 
     telegram_user_id = app.get("telegram_user_id")
     if not telegram_user_id:
-        await message.answer("No telegram_user_id on application.", parse_mode=None)
+        await message.answer(t("application_no_user_id", lang), parse_mode=None)
         await log_mod_action(
             chat_id=message.chat.id,
             target_user_id=0,
@@ -1449,15 +1662,15 @@ async def cmd_app_notify(message: Message) -> None:
         )
         await send_modlog(
             message.bot,
-            f"[APP_NOTIFY] failed: id={app_id} reason=no_user_id",
+            t(
+                "modlog_app_notify_failed_no_user",
+                DEFAULT_LANG,
+                app_id=app_id,
+            ),
         )
         return
 
-    text = (
-        "Hi! A slot has opened in Black Poison.\n"
-        f"You can join now using clan tag: {clan_tag}\n"
-        "Please join as soon as possible."
-    )
+    text = t("application_invite_message", lang, clan_tag=clan_tag)
     try:
         await message.bot.send_message(
             int(telegram_user_id),
@@ -1467,7 +1680,7 @@ async def cmd_app_notify(message: Message) -> None:
     except Exception as e:
         logger.warning("Failed to notify applicant %s: %s", app_id, e)
         await message.answer(
-            "⚠️ Failed to notify user (DM unavailable).",
+            t("application_notify_failed_dm", lang),
             parse_mode=None,
         )
         await log_mod_action(
@@ -1479,7 +1692,13 @@ async def cmd_app_notify(message: Message) -> None:
         )
         await send_modlog(
             message.bot,
-            f"[APP_NOTIFY] failed: id={app_id} user={telegram_user_id} error={type(e).__name__}",
+            t(
+                "modlog_app_notify_failed",
+                DEFAULT_LANG,
+                app_id=app_id,
+                user_id=telegram_user_id,
+                error=type(e).__name__,
+            ),
         )
         return
 
@@ -1498,7 +1717,7 @@ async def cmd_app_notify(message: Message) -> None:
             e,
         )
         await message.answer(
-            "⚠️ DM sent, but DB update failed (application may remain pending).",
+            t("application_notify_db_failed", lang),
             parse_mode=None,
         )
         await log_mod_action(
@@ -1510,7 +1729,13 @@ async def cmd_app_notify(message: Message) -> None:
         )
         await send_modlog(
             message.bot,
-            f"[APP_NOTIFY] db_failed: id={app_id} user={telegram_user_id} error={type(e).__name__}",
+            t(
+                "modlog_app_notify_db_failed",
+                DEFAULT_LANG,
+                app_id=app_id,
+                user_id=telegram_user_id,
+                error=type(e).__name__,
+            ),
         )
         return
     await log_mod_action(
@@ -1522,30 +1747,39 @@ async def cmd_app_notify(message: Message) -> None:
     )
     await send_modlog(
         message.bot,
-        f"[APP_NOTIFY] sent: id={app_id} user={telegram_user_id} "
-        f"tag={app.get('player_tag') or 'n/a'} admin={message.from_user.id}",
+        t(
+            "modlog_app_notify_sent",
+            DEFAULT_LANG,
+            app_id=app_id,
+            user_id=telegram_user_id,
+            tag=app.get("player_tag") or t("na", DEFAULT_LANG),
+            admin_id=message.from_user.id,
+        ),
     )
-    await message.answer("✅ Applicant notified successfully.", parse_mode=None)
+    await message.answer(
+        t("application_notify_sent", lang), parse_mode=None
+    )
 
 
 @router.message(Command("warn"))
 async def cmd_warn(message: Message) -> None:
+    lang = await _get_lang_for_message(message)
     if message.from_user is None:
-        await message.answer("Unable to verify permissions.", parse_mode=None)
+        await message.answer(t("unable_verify_permissions", lang), parse_mode=None)
         return
     if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
-        await message.answer("Use this command in a group.", parse_mode=None)
+        await message.answer(t("use_command_in_group", lang), parse_mode=None)
         return
     if message.reply_to_message is None or message.reply_to_message.from_user is None:
-        await message.answer("Reply to a user's message.", parse_mode=None)
+        await message.answer(t("reply_to_user_message", lang), parse_mode=None)
         return
     try:
         if not await _is_admin_user(message, message.from_user.id):
-            await message.answer("Not allowed.", parse_mode=None)
+            await message.answer(t("not_allowed", lang), parse_mode=None)
             return
     except Exception as e:
         logger.error("Failed to check admin status: %s", e, exc_info=True)
-        await message.answer("Unable to verify admin status.", parse_mode=None)
+        await message.answer(t("unable_verify_admin_status", lang), parse_mode=None)
         return
 
     target = message.reply_to_message.from_user
@@ -1569,8 +1803,14 @@ async def cmd_warn(message: Message) -> None:
     )
     await send_modlog(
         message.bot,
-        f"[MOD] warn: chat={message.chat.id} user={target.id} "
-        f"count={warn_count} reason={reason or 'n/a'}",
+        t(
+            "modlog_warn",
+            DEFAULT_LANG,
+            chat_id=message.chat.id,
+            user_id=target.id,
+            count=warn_count,
+            reason=reason or t("na", DEFAULT_LANG),
+        ),
     )
     if warn_count >= WARN_MUTE_AFTER:
         until = datetime.now(timezone.utc) + timedelta(minutes=WARN_MUTE_MINUTES)
@@ -1590,11 +1830,16 @@ async def cmd_warn(message: Message) -> None:
             logger.warning("Failed to auto-mute user: %s", e, exc_info=True)
             await send_modlog(
                 message.bot,
-                f"[MOD] auto_mute failed: chat={message.chat.id} "
-                f"user={target.id} err={e}",
+                t(
+                    "modlog_auto_mute_failed",
+                    DEFAULT_LANG,
+                    chat_id=message.chat.id,
+                    user_id=target.id,
+                    error=e,
+                ),
             )
             await message.answer(
-                f"Warning issued. Total warnings: {warn_count}.",
+                t("warn_issued", lang, count=warn_count),
                 parse_mode=None,
             )
             return
@@ -1623,40 +1868,47 @@ async def cmd_warn(message: Message) -> None:
         )
         await send_modlog(
             message.bot,
-            f"[MOD] auto_mute_warn_threshold: chat={message.chat.id} "
-            f"user={target.id} until={until.isoformat()} warns={warn_count}",
+            t(
+                "modlog_auto_mute_warn_threshold",
+                DEFAULT_LANG,
+                chat_id=message.chat.id,
+                user_id=target.id,
+                until=until.isoformat(),
+                count=warn_count,
+            ),
         )
         if WARN_RESET_AFTER_MUTE:
             await reset_user_warnings(message.chat.id, target.id)
         await message.answer(
-            f"Warning issued. Total warnings: {warn_count}. Auto-muted.",
+            t("warn_issued_auto_mute", lang, count=warn_count),
             parse_mode=None,
         )
         return
 
     await message.answer(
-        f"Warning issued. Total warnings: {warn_count}.", parse_mode=None
+        t("warn_issued", lang, count=warn_count), parse_mode=None
     )
 
 
 @router.message(Command("warns"))
 async def cmd_warns(message: Message) -> None:
+    lang = await _get_lang_for_message(message)
     if message.from_user is None:
-        await message.answer("Unable to verify permissions.", parse_mode=None)
+        await message.answer(t("unable_verify_permissions", lang), parse_mode=None)
         return
     if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
-        await message.answer("Use this command in a group.", parse_mode=None)
+        await message.answer(t("use_command_in_group", lang), parse_mode=None)
         return
     if message.reply_to_message is None or message.reply_to_message.from_user is None:
-        await message.answer("Reply to a user's message.", parse_mode=None)
+        await message.answer(t("reply_to_user_message", lang), parse_mode=None)
         return
     try:
         if not await _is_admin_user(message, message.from_user.id):
-            await message.answer("Not allowed.", parse_mode=None)
+            await message.answer(t("not_allowed", lang), parse_mode=None)
             return
     except Exception as e:
         logger.error("Failed to check admin status: %s", e, exc_info=True)
-        await message.answer("Unable to verify admin status.", parse_mode=None)
+        await message.answer(t("unable_verify_admin_status", lang), parse_mode=None)
         return
 
     limit = 5
@@ -1680,49 +1932,59 @@ async def cmd_warns(message: Message) -> None:
         limit=limit,
     )
     if not actions:
-        await message.answer("No warnings found.", parse_mode=None)
+        await message.answer(t("warns_none", lang), parse_mode=None)
         return
-    lines = [f"Last {len(actions)} warnings for {target.full_name}:"]
+    lines = [
+        t("warns_header", lang, count=len(actions), user=target.full_name)
+    ]
     for action in actions:
         created_at = _format_dt(action.get("created_at"))
-        reason = action.get("reason") or "n/a"
+        reason = action.get("reason") or t("na", lang)
         lines.append(
-            f"{action.get('action')} at {created_at} by {action.get('admin_user_id')} - {reason}"
+            t(
+                "warns_line",
+                lang,
+                action=action.get("action"),
+                created_at=created_at,
+                admin_id=action.get("admin_user_id"),
+                reason=reason,
+            )
         )
     await message.answer("\n".join(lines), parse_mode=None)
 
 
 @router.message(Command("mute"))
 async def cmd_mute(message: Message) -> None:
+    lang = await _get_lang_for_message(message)
     if message.from_user is None:
-        await message.answer("Unable to verify permissions.", parse_mode=None)
+        await message.answer(t("unable_verify_permissions", lang), parse_mode=None)
         return
     if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
-        await message.answer("Use this command in a group.", parse_mode=None)
+        await message.answer(t("use_command_in_group", lang), parse_mode=None)
         return
     if message.reply_to_message is None or message.reply_to_message.from_user is None:
-        await message.answer("Reply to a user's message.", parse_mode=None)
+        await message.answer(t("reply_to_user_message", lang), parse_mode=None)
         return
     try:
         if not await _is_admin_user(message, message.from_user.id):
-            await message.answer("Not allowed.", parse_mode=None)
+            await message.answer(t("not_allowed", lang), parse_mode=None)
             return
     except Exception as e:
         logger.error("Failed to check admin status: %s", e, exc_info=True)
-        await message.answer("Unable to verify admin status.", parse_mode=None)
+        await message.answer(t("unable_verify_admin_status", lang), parse_mode=None)
         return
 
     parts = (message.text or "").split(maxsplit=2)
     if len(parts) < 2:
-        await message.answer("Usage: /mute <minutes> [reason]", parse_mode=None)
+        await message.answer(t("usage_mute", lang), parse_mode=None)
         return
     try:
         minutes = int(parts[1])
     except ValueError:
-        await message.answer("Invalid minutes.", parse_mode=None)
+        await message.answer(t("invalid_minutes", lang), parse_mode=None)
         return
     if minutes <= 0:
-        await message.answer("Minutes must be positive.", parse_mode=None)
+        await message.answer(t("minutes_positive", lang), parse_mode=None)
         return
     reason = parts[2].strip() if len(parts) > 2 else ""
     target = message.reply_to_message.from_user
@@ -1742,7 +2004,7 @@ async def cmd_mute(message: Message) -> None:
         )
     except Exception as e:
         logger.warning("Failed to mute user: %s", e, exc_info=True)
-        await message.answer("Failed to mute user.", parse_mode=None)
+        await message.answer(t("mute_failed", lang), parse_mode=None)
         return
 
     await set_user_penalty(message.chat.id, target.id, "mute", until=until)
@@ -1756,30 +2018,37 @@ async def cmd_mute(message: Message) -> None:
     )
     await send_modlog(
         message.bot,
-        f"[MOD] mute: chat={message.chat.id} user={target.id} "
-        f"until={until.isoformat()} reason={reason or 'n/a'}",
+        t(
+            "modlog_mute",
+            DEFAULT_LANG,
+            chat_id=message.chat.id,
+            user_id=target.id,
+            until=until.isoformat(),
+            reason=reason or t("na", DEFAULT_LANG),
+        ),
     )
-    await message.answer("User muted.", parse_mode=None)
+    await message.answer(t("mute_done", lang), parse_mode=None)
 
 
 @router.message(Command("unmute"))
 async def cmd_unmute(message: Message) -> None:
+    lang = await _get_lang_for_message(message)
     if message.from_user is None:
-        await message.answer("Unable to verify permissions.", parse_mode=None)
+        await message.answer(t("unable_verify_permissions", lang), parse_mode=None)
         return
     if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
-        await message.answer("Use this command in a group.", parse_mode=None)
+        await message.answer(t("use_command_in_group", lang), parse_mode=None)
         return
     if message.reply_to_message is None or message.reply_to_message.from_user is None:
-        await message.answer("Reply to a user's message.", parse_mode=None)
+        await message.answer(t("reply_to_user_message", lang), parse_mode=None)
         return
     try:
         if not await _is_admin_user(message, message.from_user.id):
-            await message.answer("Not allowed.", parse_mode=None)
+            await message.answer(t("not_allowed", lang), parse_mode=None)
             return
     except Exception as e:
         logger.error("Failed to check admin status: %s", e, exc_info=True)
-        await message.answer("Unable to verify admin status.", parse_mode=None)
+        await message.answer(t("unable_verify_admin_status", lang), parse_mode=None)
         return
 
     target = message.reply_to_message.from_user
@@ -1796,7 +2065,7 @@ async def cmd_unmute(message: Message) -> None:
         )
     except Exception as e:
         logger.warning("Failed to unmute user: %s", e, exc_info=True)
-        await message.answer("Failed to unmute user.", parse_mode=None)
+        await message.answer(t("unmute_failed", lang), parse_mode=None)
         return
 
     await clear_user_penalty(message.chat.id, target.id, "mute")
@@ -1810,29 +2079,35 @@ async def cmd_unmute(message: Message) -> None:
     )
     await send_modlog(
         message.bot,
-        f"[MOD] unmute: chat={message.chat.id} user={target.id}",
+        t(
+            "modlog_unmute",
+            DEFAULT_LANG,
+            chat_id=message.chat.id,
+            user_id=target.id,
+        ),
     )
-    await message.answer("User unmuted.", parse_mode=None)
+    await message.answer(t("unmute_done", lang), parse_mode=None)
 
 
 @router.message(Command("ban"))
 async def cmd_ban(message: Message) -> None:
+    lang = await _get_lang_for_message(message)
     if message.from_user is None:
-        await message.answer("Unable to verify permissions.", parse_mode=None)
+        await message.answer(t("unable_verify_permissions", lang), parse_mode=None)
         return
     if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
-        await message.answer("Use this command in a group.", parse_mode=None)
+        await message.answer(t("use_command_in_group", lang), parse_mode=None)
         return
     if message.reply_to_message is None or message.reply_to_message.from_user is None:
-        await message.answer("Reply to a user's message.", parse_mode=None)
+        await message.answer(t("reply_to_user_message", lang), parse_mode=None)
         return
     try:
         if not await _is_admin_user(message, message.from_user.id):
-            await message.answer("Not allowed.", parse_mode=None)
+            await message.answer(t("not_allowed", lang), parse_mode=None)
             return
     except Exception as e:
         logger.error("Failed to check admin status: %s", e, exc_info=True)
-        await message.answer("Unable to verify admin status.", parse_mode=None)
+        await message.answer(t("unable_verify_admin_status", lang), parse_mode=None)
         return
 
     reason = ""
@@ -1846,7 +2121,7 @@ async def cmd_ban(message: Message) -> None:
         await message.bot.ban_chat_member(message.chat.id, target.id)
     except Exception as e:
         logger.warning("Failed to ban user: %s", e, exc_info=True)
-        await message.answer("Failed to ban user.", parse_mode=None)
+        await message.answer(t("ban_failed", lang), parse_mode=None)
         return
 
     await set_user_penalty(message.chat.id, target.id, "ban", until=None)
@@ -1860,44 +2135,50 @@ async def cmd_ban(message: Message) -> None:
     )
     await send_modlog(
         message.bot,
-        f"[MOD] ban: chat={message.chat.id} user={target.id} "
-        f"reason={reason or 'n/a'}",
+        t(
+            "modlog_ban",
+            DEFAULT_LANG,
+            chat_id=message.chat.id,
+            user_id=target.id,
+            reason=reason or t("na", DEFAULT_LANG),
+        ),
     )
-    await message.answer("User banned.", parse_mode=None)
+    await message.answer(t("ban_done", lang), parse_mode=None)
 
 
 @router.message(Command("unban"))
 async def cmd_unban(message: Message) -> None:
+    lang = await _get_lang_for_message(message)
     if message.from_user is None:
-        await message.answer("Unable to verify permissions.", parse_mode=None)
+        await message.answer(t("unable_verify_permissions", lang), parse_mode=None)
         return
     if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
-        await message.answer("Use this command in a group.", parse_mode=None)
+        await message.answer(t("use_command_in_group", lang), parse_mode=None)
         return
     try:
         if not await _is_admin_user(message, message.from_user.id):
-            await message.answer("Not allowed.", parse_mode=None)
+            await message.answer(t("not_allowed", lang), parse_mode=None)
             return
     except Exception as e:
         logger.error("Failed to check admin status: %s", e, exc_info=True)
-        await message.answer("Unable to verify admin status.", parse_mode=None)
+        await message.answer(t("unable_verify_admin_status", lang), parse_mode=None)
         return
 
     parts = (message.text or "").split(maxsplit=1)
     if len(parts) < 2:
-        await message.answer("Usage: /unban <user_id>", parse_mode=None)
+        await message.answer(t("usage_unban", lang), parse_mode=None)
         return
     try:
         user_id = int(parts[1])
     except ValueError:
-        await message.answer("Invalid user id.", parse_mode=None)
+        await message.answer(t("invalid_user_id", lang), parse_mode=None)
         return
 
     try:
         await message.bot.unban_chat_member(message.chat.id, user_id)
     except Exception as e:
         logger.warning("Failed to unban user: %s", e, exc_info=True)
-        await message.answer("Failed to unban user.", parse_mode=None)
+        await message.answer(t("unban_failed", lang), parse_mode=None)
         return
 
     await clear_user_penalty(message.chat.id, user_id, "ban")
@@ -1911,39 +2192,45 @@ async def cmd_unban(message: Message) -> None:
     )
     await send_modlog(
         message.bot,
-        f"[MOD] unban: chat={message.chat.id} user={user_id}",
+        t(
+            "modlog_unban",
+            DEFAULT_LANG,
+            chat_id=message.chat.id,
+            user_id=user_id,
+        ),
     )
-    await message.answer("User unbanned.", parse_mode=None)
+    await message.answer(t("unban_done", lang), parse_mode=None)
 
 
 @router.message(Command("purge"))
 async def cmd_purge(message: Message) -> None:
+    lang = await _get_lang_for_message(message)
     if message.from_user is None:
-        await message.answer("Unable to verify permissions.", parse_mode=None)
+        await message.answer(t("unable_verify_permissions", lang), parse_mode=None)
         return
     if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
-        await message.answer("Use this command in a group.", parse_mode=None)
+        await message.answer(t("use_command_in_group", lang), parse_mode=None)
         return
     try:
         if not await _is_admin_user(message, message.from_user.id):
-            await message.answer("Not allowed.", parse_mode=None)
+            await message.answer(t("not_allowed", lang), parse_mode=None)
             return
     except Exception as e:
         logger.error("Failed to check admin status: %s", e, exc_info=True)
-        await message.answer("Unable to verify admin status.", parse_mode=None)
+        await message.answer(t("unable_verify_admin_status", lang), parse_mode=None)
         return
 
     parts = (message.text or "").split(maxsplit=1)
     if len(parts) < 2:
-        await message.answer("Usage: /purge <N>", parse_mode=None)
+        await message.answer(t("usage_purge", lang), parse_mode=None)
         return
     try:
         count = int(parts[1])
     except ValueError:
-        await message.answer("Invalid number.", parse_mode=None)
+        await message.answer(t("invalid_number", lang), parse_mode=None)
         return
     if count < 1:
-        await message.answer("Number must be positive.", parse_mode=None)
+        await message.answer(t("number_positive", lang), parse_mode=None)
         return
     if count > 100:
         count = 100
@@ -1967,27 +2254,33 @@ async def cmd_purge(message: Message) -> None:
     )
     await send_modlog(
         message.bot,
-        f"[MOD] purge: chat={message.chat.id} "
-        f"admin={message.from_user.id} deleted={deleted}",
+        t(
+            "modlog_purge",
+            DEFAULT_LANG,
+            chat_id=message.chat.id,
+            admin_id=message.from_user.id,
+            deleted=deleted,
+        ),
     )
-    await message.answer(f"Purged {deleted} messages.", parse_mode=None)
+    await message.answer(t("purge_done", lang, count=deleted), parse_mode=None)
 
 
 @router.message(Command("raid_on"))
 async def cmd_raid_on(message: Message) -> None:
+    lang = await _get_lang_for_message(message)
     if message.from_user is None:
-        await message.answer("Unable to verify permissions.", parse_mode=None)
+        await message.answer(t("unable_verify_permissions", lang), parse_mode=None)
         return
     if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
-        await message.answer("Use this command in a group.", parse_mode=None)
+        await message.answer(t("use_command_in_group", lang), parse_mode=None)
         return
     try:
         if not await _is_admin_user(message, message.from_user.id):
-            await message.answer("Not allowed.", parse_mode=None)
+            await message.answer(t("not_allowed", lang), parse_mode=None)
             return
     except Exception as e:
         logger.error("Failed to check admin status: %s", e, exc_info=True)
-        await message.answer("Unable to verify admin status.", parse_mode=None)
+        await message.answer(t("unable_verify_admin_status", lang), parse_mode=None)
         return
 
     await set_chat_raid_mode(message.chat.id, True)
@@ -2001,26 +2294,32 @@ async def cmd_raid_on(message: Message) -> None:
     )
     await send_modlog(
         message.bot,
-        f"[MOD] raid_on: chat={message.chat.id} admin={message.from_user.id}",
+        t(
+            "modlog_raid_on",
+            DEFAULT_LANG,
+            chat_id=message.chat.id,
+            admin_id=message.from_user.id,
+        ),
     )
-    await message.answer("Raid mode enabled.", parse_mode=None)
+    await message.answer(t("raid_mode_enabled", lang), parse_mode=None)
 
 
 @router.message(Command("raid_off"))
 async def cmd_raid_off(message: Message) -> None:
+    lang = await _get_lang_for_message(message)
     if message.from_user is None:
-        await message.answer("Unable to verify permissions.", parse_mode=None)
+        await message.answer(t("unable_verify_permissions", lang), parse_mode=None)
         return
     if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
-        await message.answer("Use this command in a group.", parse_mode=None)
+        await message.answer(t("use_command_in_group", lang), parse_mode=None)
         return
     try:
         if not await _is_admin_user(message, message.from_user.id):
-            await message.answer("Not allowed.", parse_mode=None)
+            await message.answer(t("not_allowed", lang), parse_mode=None)
             return
     except Exception as e:
         logger.error("Failed to check admin status: %s", e, exc_info=True)
-        await message.answer("Unable to verify admin status.", parse_mode=None)
+        await message.answer(t("unable_verify_admin_status", lang), parse_mode=None)
         return
 
     await set_chat_raid_mode(message.chat.id, False)
@@ -2034,26 +2333,32 @@ async def cmd_raid_off(message: Message) -> None:
     )
     await send_modlog(
         message.bot,
-        f"[MOD] raid_off: chat={message.chat.id} admin={message.from_user.id}",
+        t(
+            "modlog_raid_off",
+            DEFAULT_LANG,
+            chat_id=message.chat.id,
+            admin_id=message.from_user.id,
+        ),
     )
-    await message.answer("Raid mode disabled.", parse_mode=None)
+    await message.answer(t("raid_mode_disabled", lang), parse_mode=None)
 
 
 @router.message(Command("raid_status"))
 async def cmd_raid_status(message: Message) -> None:
+    lang = await _get_lang_for_message(message)
     if message.from_user is None:
-        await message.answer("Unable to verify permissions.", parse_mode=None)
+        await message.answer(t("unable_verify_permissions", lang), parse_mode=None)
         return
     if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
-        await message.answer("Use this command in a group.", parse_mode=None)
+        await message.answer(t("use_command_in_group", lang), parse_mode=None)
         return
     try:
         if not await _is_admin_user(message, message.from_user.id):
-            await message.answer("Not allowed.", parse_mode=None)
+            await message.answer(t("not_allowed", lang), parse_mode=None)
             return
     except Exception as e:
         logger.error("Failed to check admin status: %s", e, exc_info=True)
-        await message.answer("Unable to verify admin status.", parse_mode=None)
+        await message.answer(t("unable_verify_admin_status", lang), parse_mode=None)
         return
 
     settings = await get_chat_settings(
@@ -2067,76 +2372,99 @@ async def cmd_raid_status(message: Message) -> None:
         },
     )
     lines = [
-        "Raid status",
-        f"raid_mode: {settings.get('raid_mode')}",
-        f"flood_window_seconds: {settings.get('flood_window_seconds')}",
-        f"flood_max_messages: {settings.get('flood_max_messages')}",
-        f"flood_mute_minutes: {settings.get('flood_mute_minutes')}",
-        f"new_user_link_block_hours: {settings.get('new_user_link_block_hours')}",
+        t("raid_status_title", lang),
+        t(
+            "raid_status_raid_mode",
+            lang,
+            value=settings.get("raid_mode"),
+        ),
+        t(
+            "raid_status_flood_window",
+            lang,
+            value=settings.get("flood_window_seconds"),
+        ),
+        t(
+            "raid_status_flood_max",
+            lang,
+            value=settings.get("flood_max_messages"),
+        ),
+        t(
+            "raid_status_flood_mute",
+            lang,
+            value=settings.get("flood_mute_minutes"),
+        ),
+        t(
+            "raid_status_link_block",
+            lang,
+            value=settings.get("new_user_link_block_hours"),
+        ),
     ]
     await message.answer("\n".join(lines), parse_mode=None)
 
 
 @router.message(Command("mod_debug_on"))
 async def cmd_mod_debug_on(message: Message) -> None:
+    lang = await _get_lang_for_message(message)
     if message.from_user is None:
-        await message.answer("Unable to verify permissions.", parse_mode=None)
+        await message.answer(t("unable_verify_permissions", lang), parse_mode=None)
         return
     if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
-        await message.answer("Use this command in a group.", parse_mode=None)
+        await message.answer(t("use_command_in_group", lang), parse_mode=None)
         return
     try:
         if not await _is_admin_user(message, message.from_user.id):
-            await message.answer("Not allowed.", parse_mode=None)
+            await message.answer(t("not_allowed", lang), parse_mode=None)
             return
     except Exception as e:
         logger.error("Failed to check admin status: %s", e, exc_info=True)
-        await message.answer("Unable to verify admin status.", parse_mode=None)
+        await message.answer(t("unable_verify_admin_status", lang), parse_mode=None)
         return
 
     await set_app_state(
         _mod_debug_state_key(message.chat.id),
         {"enabled": True, "updated_at": datetime.now(timezone.utc).isoformat()},
     )
-    await message.answer("Mod debug enabled for this chat.", parse_mode=None)
+    await message.answer(t("mod_debug_enabled", lang), parse_mode=None)
 
 
 @router.message(Command("mod_debug_off"))
 async def cmd_mod_debug_off(message: Message) -> None:
+    lang = await _get_lang_for_message(message)
     if message.from_user is None:
-        await message.answer("Unable to verify permissions.", parse_mode=None)
+        await message.answer(t("unable_verify_permissions", lang), parse_mode=None)
         return
     if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
-        await message.answer("Use this command in a group.", parse_mode=None)
+        await message.answer(t("use_command_in_group", lang), parse_mode=None)
         return
     try:
         if not await _is_admin_user(message, message.from_user.id):
-            await message.answer("Not allowed.", parse_mode=None)
+            await message.answer(t("not_allowed", lang), parse_mode=None)
             return
     except Exception as e:
         logger.error("Failed to check admin status: %s", e, exc_info=True)
-        await message.answer("Unable to verify admin status.", parse_mode=None)
+        await message.answer(t("unable_verify_admin_status", lang), parse_mode=None)
         return
 
     await delete_app_state(_mod_debug_state_key(message.chat.id))
-    await message.answer("Mod debug disabled for this chat.", parse_mode=None)
+    await message.answer(t("mod_debug_disabled", lang), parse_mode=None)
 
 
 @router.message(Command("modlog"))
 async def cmd_modlog(message: Message) -> None:
+    lang = await _get_lang_for_message(message)
     if message.from_user is None:
-        await message.answer("Unable to verify permissions.", parse_mode=None)
+        await message.answer(t("unable_verify_permissions", lang), parse_mode=None)
         return
     if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
-        await message.answer("Use this command in a group.", parse_mode=None)
+        await message.answer(t("use_command_in_group", lang), parse_mode=None)
         return
     try:
         if not await _is_admin_user(message, message.from_user.id):
-            await message.answer("Not allowed.", parse_mode=None)
+            await message.answer(t("not_allowed", lang), parse_mode=None)
             return
     except Exception as e:
         logger.error("Failed to check admin status: %s", e, exc_info=True)
-        await message.answer("Unable to verify admin status.", parse_mode=None)
+        await message.answer(t("unable_verify_admin_status", lang), parse_mode=None)
         return
 
     limit = 10
@@ -2153,16 +2481,23 @@ async def cmd_modlog(message: Message) -> None:
         limit = 50
     actions = await list_mod_actions(message.chat.id, limit=limit)
     if not actions:
-        await message.answer("No moderation actions found.", parse_mode=None)
+        await message.answer(t("modlog_none", lang), parse_mode=None)
         return
-    lines = [f"Last {len(actions)} moderation actions:"]
+    lines = [
+        t("modlog_header", lang, count=len(actions))
+    ]
     for entry in actions:
         created_at = _format_dt(entry.get("created_at"))
         lines.append(
-            f"{entry.get('id')}) {entry.get('action')} "
-            f"user={entry.get('target_user_id')} "
-            f"admin={entry.get('admin_user_id')} "
-            f"at {created_at}"
+            t(
+                "modlog_line",
+                lang,
+                entry_id=entry.get("id"),
+                action=entry.get("action"),
+                user_id=entry.get("target_user_id"),
+                admin_id=entry.get("admin_user_id"),
+                created_at=created_at,
+            )
         )
     await message.answer("\n".join(lines), parse_mode=None)
 
@@ -2251,8 +2586,13 @@ async def handle_member_join(event: ChatMemberUpdated) -> None:
         logger.error("Failed to restrict member %s: %s", user.id, e, exc_info=True)
         await send_modlog(
             event.bot,
-            f"[CAPTCHA] ERROR: restrict failed: chat={event.chat.id} "
-            f"user={user.id} err={e}",
+            t(
+                "modlog_captcha_restrict_failed",
+                DEFAULT_LANG,
+                chat_id=event.chat.id,
+                user_id=user.id,
+                error=e,
+            ),
         )
         return
 
@@ -2269,17 +2609,23 @@ async def handle_member_join(event: ChatMemberUpdated) -> None:
     if challenge.get("status") == "failed":
         await event.bot.send_message(
             event.chat.id,
-            "Too many attempts, try again later.",
+            t("captcha_too_many_attempts", DEFAULT_LANG),
             parse_mode=None,
         )
-        username = f"@{user.username}" if user.username else "n/a"
+        username = f"@{user.username}" if user.username else t("na", DEFAULT_LANG)
         await send_modlog(
             event.bot,
-            "[CAPTCHA] join gate: "
-            f"chat={event.chat.id} user={user.id} {username} "
-            f"name={user.full_name} status_old={old_status} "
-            f"status_new={new_status} -> restricted, "
-            f"captcha_failed challenge={challenge.get('id')}",
+            t(
+                "modlog_captcha_join_gate_failed",
+                DEFAULT_LANG,
+                chat_id=event.chat.id,
+                user_id=user.id,
+                username=username,
+                name=user.full_name,
+                status_old=old_status,
+                status_new=new_status,
+                challenge_id=challenge.get("id"),
+            ),
         )
         return
     if not question:
@@ -2315,24 +2661,37 @@ async def handle_member_join(event: ChatMemberUpdated) -> None:
         logger.info(
             "Captcha sent to user %s in chat %s", user.id, event.chat.id
         )
-        username = f"@{user.username}" if user.username else "n/a"
+        username = f"@{user.username}" if user.username else t("na", DEFAULT_LANG)
         await send_modlog(
             event.bot,
-            "[CAPTCHA] join gate: "
-            f"chat={event.chat.id} user={user.id} {username} "
-            f"name={user.full_name} status_old={old_status} "
-            f"status_new={new_status} -> restricted, "
-            f"captcha_sent challenge={challenge['id']} msg={message_id}",
+            t(
+                "modlog_captcha_join_gate_sent",
+                DEFAULT_LANG,
+                chat_id=event.chat.id,
+                user_id=user.id,
+                username=username,
+                name=user.full_name,
+                status_old=old_status,
+                status_new=new_status,
+                challenge_id=challenge["id"],
+                message_id=message_id,
+            ),
         )
     else:
-        username = f"@{user.username}" if user.username else "n/a"
+        username = f"@{user.username}" if user.username else t("na", DEFAULT_LANG)
         await send_modlog(
             event.bot,
-            "[CAPTCHA] join gate: "
-            f"chat={event.chat.id} user={user.id} {username} "
-            f"name={user.full_name} status_old={old_status} "
-            f"status_new={new_status} -> restricted, "
-            f"captcha_sent=no challenge={challenge['id']}",
+            t(
+                "modlog_captcha_join_gate_send_failed",
+                DEFAULT_LANG,
+                chat_id=event.chat.id,
+                user_id=user.id,
+                username=username,
+                name=user.full_name,
+                status_old=old_status,
+                status_new=new_status,
+                challenge_id=challenge["id"],
+            ),
         )
 
 
@@ -2374,8 +2733,14 @@ async def handle_pending_user_message(message: Message) -> None:
         logger.warning("Failed to delete message: %s", e, exc_info=True)
         await send_modlog(
             message.bot,
-            f"[CAPTCHA] ERROR: delete failed: chat={message.chat.id} "
-            f"user={message.from_user.id} msg_id={message.message_id} err={e}",
+            t(
+                "modlog_captcha_delete_failed",
+                DEFAULT_LANG,
+                chat_id=message.chat.id,
+                user_id=message.from_user.id,
+                message_id=message.message_id,
+                error=e,
+            ),
         )
 
     now = datetime.now(timezone.utc)
@@ -2384,8 +2749,8 @@ async def handle_pending_user_message(message: Message) -> None:
         if (now - last_reminded_at).total_seconds() < CAPTCHA_REMIND_COOLDOWN_SECONDS:
             return
 
-    reminder_text = (
-        f"{message.from_user.full_name}, please solve the captcha to chat."
+    reminder_text = t(
+        "captcha_reminder", DEFAULT_LANG, user=message.from_user.full_name
     )
     await message.bot.send_message(
         message.chat.id, reminder_text, parse_mode=None
@@ -2393,8 +2758,13 @@ async def handle_pending_user_message(message: Message) -> None:
     await touch_last_reminded_at(challenge["id"], now)
     await send_modlog(
         message.bot,
-        f"[CAPTCHA] pending msg deleted: chat={message.chat.id} "
-        f"user={message.from_user.id} msg_id={message.message_id}",
+        t(
+            "modlog_captcha_pending_deleted",
+            DEFAULT_LANG,
+            chat_id=message.chat.id,
+            user_id=message.from_user.id,
+            message_id=message.message_id,
+        ),
     )
 
     if not challenge.get("message_id"):
@@ -2440,43 +2810,44 @@ async def handle_moderation_message(message: Message) -> None:
 
 @moderation_router.callback_query(F.data.startswith("cap:"))
 async def handle_captcha_callback(query: CallbackQuery) -> None:
+    lang = DEFAULT_LANG
     data = query.data or ""
     parts = data.split(":")
     if len(parts) != 3:
-        await query.answer("Invalid captcha.", show_alert=False)
+        await query.answer(t("captcha_invalid", lang), show_alert=False)
         return
     try:
         challenge_id = int(parts[1])
         choice = int(parts[2])
     except ValueError:
-        await query.answer("Invalid captcha.", show_alert=False)
+        await query.answer(t("captcha_invalid", lang), show_alert=False)
         return
 
     challenge = await get_challenge_by_id(challenge_id)
     if not challenge:
-        await query.answer("Captcha not found.", show_alert=False)
+        await query.answer(t("captcha_not_found", lang), show_alert=False)
         return
     if query.from_user is None:
-        await query.answer("Not allowed.", show_alert=False)
+        await query.answer(t("not_allowed", lang), show_alert=False)
         return
     if challenge["user_id"] != query.from_user.id:
-        await query.answer("Not for you.", show_alert=False)
+        await query.answer(t("captcha_not_for_you", lang), show_alert=False)
         return
 
     now = datetime.now(timezone.utc)
     expires_at = challenge.get("expires_at")
     if isinstance(expires_at, datetime) and expires_at < now:
         await mark_challenge_expired(challenge_id)
-        await query.answer("Captcha expired. Please try again.", show_alert=False)
+        await query.answer(t("captcha_expired", lang), show_alert=False)
         return
 
     if challenge["status"] != "pending":
-        await query.answer("Captcha not active.", show_alert=False)
+        await query.answer(t("captcha_not_active", lang), show_alert=False)
         return
 
     question = await get_captcha_question(challenge["question_id"])
     if not question:
-        await query.answer("Captcha missing.", show_alert=False)
+        await query.answer(t("captcha_missing", lang), show_alert=False)
         return
 
     if int(choice) == int(question["correct_option"]):
@@ -2497,8 +2868,13 @@ async def handle_captcha_callback(query: CallbackQuery) -> None:
             logger.error("Failed to unrestrict member: %s", e, exc_info=True)
             await send_modlog(
                 query.bot,
-                f"[CAPTCHA] ERROR: unrestrict failed: chat={challenge['chat_id']} "
-                f"user={challenge['user_id']} err={e}",
+                t(
+                    "modlog_captcha_unrestrict_failed",
+                    DEFAULT_LANG,
+                    chat_id=challenge["chat_id"],
+                    user_id=challenge["user_id"],
+                    error=e,
+                ),
             )
 
         if query.message:
@@ -2511,7 +2887,13 @@ async def handle_captcha_callback(query: CallbackQuery) -> None:
             challenge["chat_id"],
             query.from_user.full_name,
         )
-        await query.answer("✅ Verified", show_alert=False)
+        await query.bot.send_message(
+            challenge["chat_id"],
+            t("language_prompt", DEFAULT_LANG),
+            reply_markup=_build_language_keyboard(challenge["user_id"]),
+            parse_mode=None,
+        )
+        await query.answer(t("captcha_verified", lang), show_alert=False)
         logger.info(
             "Captcha passed for user %s in chat %s",
             challenge["user_id"],
@@ -2519,8 +2901,13 @@ async def handle_captcha_callback(query: CallbackQuery) -> None:
         )
         await send_modlog(
             query.bot,
-            f"[CAPTCHA] passed: chat={challenge['chat_id']} "
-            f"user={challenge['user_id']} challenge={challenge_id} -> unrestrict ok",
+            t(
+                "modlog_captcha_passed",
+                DEFAULT_LANG,
+                chat_id=challenge["chat_id"],
+                user_id=challenge["user_id"],
+                challenge_id=challenge_id,
+            ),
         )
         return
 
@@ -2533,7 +2920,7 @@ async def handle_captcha_callback(query: CallbackQuery) -> None:
         )
         if query.message:
             await query.message.answer(
-                "Неправильно. Другая капча 👇", parse_mode=None
+                t("captcha_wrong_new", lang), parse_mode=None
             )
         new_challenge, new_question = await create_fresh_captcha_challenge(
             challenge["chat_id"],
@@ -2553,7 +2940,7 @@ async def handle_captcha_callback(query: CallbackQuery) -> None:
                     new_challenge["id"], message_id
                 )
                 await touch_last_reminded_at(new_challenge["id"], now)
-        await query.answer("Неправильно.", show_alert=False)
+        await query.answer(t("captcha_wrong_short", lang), show_alert=False)
         logger.info(
             "Captcha failed for user %s in chat %s (new challenge created)",
             challenge["user_id"],
@@ -2561,17 +2948,28 @@ async def handle_captcha_callback(query: CallbackQuery) -> None:
         )
         await send_modlog(
             query.bot,
-            f"[CAPTCHA] failed: chat={challenge['chat_id']} "
-            f"user={challenge['user_id']} challenge={challenge_id} "
-            f"expires_at={_format_dt(now + timedelta(seconds=30))}",
+            t(
+                "modlog_captcha_failed",
+                DEFAULT_LANG,
+                chat_id=challenge["chat_id"],
+                user_id=challenge["user_id"],
+                challenge_id=challenge_id,
+                expires_at=_format_dt(now + timedelta(seconds=30)),
+            ),
         )
         return
 
-    await query.answer("Wrong answer. Try again.", show_alert=False)
+    await query.answer(t("captcha_wrong_try_again", lang), show_alert=False)
     await send_modlog(
         query.bot,
-        f"[CAPTCHA] wrong: chat={challenge['chat_id']} "
-        f"user={challenge['user_id']} challenge={challenge_id} attempts={attempts}",
+        t(
+            "modlog_captcha_wrong",
+            DEFAULT_LANG,
+            chat_id=challenge["chat_id"],
+            user_id=challenge["user_id"],
+            challenge_id=challenge_id,
+            attempts=attempts,
+        ),
     )
 
 async def _send_debug_reminder(
@@ -2582,13 +2980,16 @@ async def _send_debug_reminder(
     banner_url: str,
     banner_url_day4: str,
     templates: dict[int, str],
+    lang: str,
 ) -> None:
     caption = templates.get(day)
     if not caption:
-        await message.answer("Unable to build reminder message.", parse_mode=None)
+        await message.answer(
+            t("debug_reminder_unavailable", lang), parse_mode=None
+        )
         return
     await message.answer(
-        f"Debug: sending {war_type} Day {day} to this chat only.",
+        t("debug_reminder_sending", lang, war_type=war_type, day=day),
         parse_mode=None,
     )
     if day in (1, 4):
@@ -2631,10 +3032,11 @@ async def _send_debug_reminder(
 @router.message(Command("ping"))
 async def cmd_ping(message: Message) -> None:
     """Handle /ping command - Check bot responsiveness and API status."""
+    lang = await _get_lang_for_message(message)
     start_time = datetime.now(timezone.utc)
 
-    api_status = "✅ Connected"
-    clan_name = "Unknown"
+    api_status = t("ping_api_connected", lang)
+    clan_name = t("unknown", lang)
 
     try:
         api_client = await get_api_client()
@@ -2643,22 +3045,25 @@ async def cmd_ping(message: Message) -> None:
             raise ValueError("CLAN_TAG is not configured")
         clan_data = await api_client.get_clan(clan_tag)
         if isinstance(clan_data, dict):
-            clan_name = clan_data.get("name", "Unknown")
+            clan_name = clan_data.get("name", t("unknown", lang))
     except ClashRoyaleAPIError as e:
-        api_status = f"⚠️ Error: {e.message}"
+        api_status = t("ping_api_error", lang, error=e.message)
         logger.warning("API check failed: %s", e)
     except Exception as e:
-        api_status = f"⚠️ Error: {e}"
+        api_status = t("ping_api_error", lang, error=e)
         logger.error("Unexpected error during API check: %s", e)
 
     response_time = (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
+    response_time_text = f"{response_time:.0f}"
+    server_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
-    response_text = (
-        "Pong!\n\n"
-        f"Response time: {response_time:.0f}ms\n"
-        f"Clash Royale API: {api_status}\n"
-        f"Monitoring clan: {clan_name}\n"
-        f"Server time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC"
+    response_text = t(
+        "ping_response",
+        lang,
+        response_time=response_time_text,
+        api_status=api_status,
+        clan_name=clan_name,
+        server_time=server_time,
     )
 
     await message.answer(response_text, parse_mode=None)
@@ -2667,13 +3072,16 @@ async def cmd_ping(message: Message) -> None:
 @router.message(Command("bind"))
 async def cmd_bind(message: Message) -> None:
     """Bind the current group chat for weekly war reports."""
+    lang = await _get_lang_for_message(message)
     if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
         await message.answer(
-            "This command can only be used in a group chat.", parse_mode=None
+            t("bind_group_only", lang), parse_mode=None
         )
         return
     if message.from_user is None:
-        await message.answer("Unable to verify permissions for this user.", parse_mode=None)
+        await message.answer(
+            t("unable_verify_permissions_user", lang), parse_mode=None
+        )
         return
     try:
         member = await message.bot.get_chat_member(
@@ -2681,68 +3089,79 @@ async def cmd_bind(message: Message) -> None:
         )
     except Exception as e:
         logger.error("Failed to verify chat member: %s", e, exc_info=True)
-        await message.answer("Unable to verify permissions right now.", parse_mode=None)
+        await message.answer(
+            t("unable_verify_permissions_now", lang), parse_mode=None
+        )
         return
     if member.status not in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR):
-        await message.answer("Only chat admins can bind this group.", parse_mode=None)
+        await message.answer(t("bind_admin_only", lang), parse_mode=None)
         return
     clan_tag = _require_clan_tag()
     if not clan_tag:
-        await message.answer("CLAN_TAG is not configured.", parse_mode=None)
+        await message.answer(t("clan_tag_not_configured", lang), parse_mode=None)
         return
     await upsert_clan_chat(clan_tag, message.chat.id, enabled=True)
-    await message.answer("Chat bound for weekly war reports.", parse_mode=None)
+    await message.answer(t("bind_success", lang), parse_mode=None)
 
 
 @router.message(Command("war"))
 async def cmd_war(message: Message) -> None:
     """Show the weekly war report for the last completed week."""
+    lang = await _get_lang_for_message(message)
     clan_tag = _require_clan_tag()
     if not clan_tag:
-        await message.answer("CLAN_TAG is not configured.", parse_mode=None)
+        await message.answer(t("clan_tag_not_configured", lang), parse_mode=None)
         return
     week = await get_last_completed_week(clan_tag)
     if not week:
-        await message.answer("No completed war weeks found yet.", parse_mode=None)
+        await message.answer(t("war_no_completed_weeks", lang), parse_mode=None)
         return
     season_id, section_index = week
-    report = await build_weekly_report(season_id, section_index, clan_tag)
+    report = await build_weekly_report(
+        season_id, section_index, clan_tag, lang=lang
+    )
     await message.answer(report, parse_mode=None)
 
 
 @router.message(Command("war8"))
 async def cmd_war8(message: Message) -> None:
     """Show the rolling war report for the last 8 completed weeks."""
+    lang = await _get_lang_for_message(message)
     clan_tag = _require_clan_tag()
     if not clan_tag:
-        await message.answer("CLAN_TAG is not configured.", parse_mode=None)
+        await message.answer(t("clan_tag_not_configured", lang), parse_mode=None)
         return
     weeks = await get_last_completed_weeks(8, clan_tag)
     if not weeks:
-        await message.answer("No completed war weeks found yet.", parse_mode=None)
+        await message.answer(t("war_no_completed_weeks", lang), parse_mode=None)
         return
-    report = await build_rolling_report(weeks, clan_tag)
+    report = await build_rolling_report(weeks, clan_tag, lang=lang)
     await message.answer(report, parse_mode=None)
 
 
 @router.message(Command("war_all"))
 async def cmd_war_all(message: Message) -> None:
     """Send weekly, rolling, and kick shortlist reports together."""
+    lang = await _get_lang_for_message(message)
     clan_tag = _require_clan_tag()
     if not clan_tag:
-        await message.answer("CLAN_TAG is not configured.", parse_mode=None)
+        await message.answer(t("clan_tag_not_configured", lang), parse_mode=None)
         return
     last_week = await get_last_completed_week(clan_tag)
     if not last_week:
-        await message.answer("No completed war weeks found yet.", parse_mode=None)
+        await message.answer(t("war_no_completed_weeks", lang), parse_mode=None)
         return
     weeks = await get_last_completed_weeks(8, clan_tag)
     if not weeks:
         weeks = [last_week]
 
-    weekly_report = await build_weekly_report(last_week[0], last_week[1], clan_tag)
-    rolling_report = await build_rolling_report(weeks, clan_tag)
-    kick_report = await build_kick_shortlist_report(weeks, last_week, clan_tag)
+    weekly_report = await build_weekly_report(
+        last_week[0], last_week[1], clan_tag, lang=lang
+    )
+    rolling_report = await build_rolling_report(weeks, clan_tag, lang=lang)
+    kick_report = await build_kick_shortlist_report(
+        weeks, last_week, clan_tag, lang=lang
+    )
 
     await message.answer(weekly_report, parse_mode=None)
     await message.answer(rolling_report, parse_mode=None)
@@ -2752,32 +3171,35 @@ async def cmd_war_all(message: Message) -> None:
 @router.message(Command("list_for_kick"))
 async def cmd_list_for_kick(message: Message) -> None:
     """Show kick shortlist based on the last 8 completed weeks."""
+    lang = await _get_lang_for_message(message)
     clan_tag = _require_clan_tag()
     if not clan_tag:
-        await message.answer("CLAN_TAG is not configured.", parse_mode=None)
+        await message.answer(t("clan_tag_not_configured", lang), parse_mode=None)
         return
     weeks = await get_last_completed_weeks(8, clan_tag)
     last_week = await get_last_completed_week(clan_tag)
     if not weeks or not last_week:
-        await message.answer("No completed war weeks found yet.", parse_mode=None)
+        await message.answer(t("war_no_completed_weeks", lang), parse_mode=None)
         return
-    report = await build_kick_shortlist_report(weeks, last_week, clan_tag)
+    report = await build_kick_shortlist_report(
+        weeks, last_week, clan_tag, lang=lang
+    )
     await message.answer(report, parse_mode=None)
 
 
 @router.message(Command("inactive"))
 async def cmd_inactive(message: Message) -> None:
     """Handle /inactive command - Show players with low River Race participation."""
+    lang = await _get_lang_for_message(message)
     clan_tag = _require_clan_tag()
     if not clan_tag:
-        await message.answer("CLAN_TAG is not configured.", parse_mode=None)
+        await message.answer(t("clan_tag_not_configured", lang), parse_mode=None)
         return
     try:
         current_members = await get_current_member_tags(clan_tag)
         if not current_members:
             await message.answer(
-                "No clan membership snapshot available yet.\n"
-                "Please wait for the next update cycle.",
+                t("inactive_no_snapshot", lang),
                 parse_mode=None,
             )
             return
@@ -2787,21 +3209,20 @@ async def cmd_inactive(message: Message) -> None:
         )
         if not absent_members:
             await message.answer(
-                "No member activity data available yet.\n"
-                "Please wait for the next update cycle.",
+                t("inactive_no_activity", lang),
                 parse_mode=None,
             )
             return
 
-        response_lines = ["😴 INACTIVITY — last seen in-game", ""]
+        response_lines = [t("inactive_header", lang), ""]
         for index, member in enumerate(absent_members, 1):
-            name = member.get("player_name") or "Unknown"
+            name = member.get("player_name") or t("unknown", lang)
             days_absent = member.get("days_absent")
             if days_absent is None:
-                days_text = "n/a"
+                days_text = t("na", lang)
                 flag = ""
             else:
-                days_text = f"{days_absent}d ago"
+                days_text = t("inactive_days_ago", lang, days=days_absent)
                 if days_absent >= LAST_SEEN_RED_DAYS:
                     flag = "🔴"
                 elif days_absent >= LAST_SEEN_YELLOW_DAYS:
@@ -2810,15 +3231,21 @@ async def cmd_inactive(message: Message) -> None:
                     flag = ""
             prefix = f"{flag} " if flag else ""
             response_lines.append(
-                f"{index}) {prefix}{name} — last seen {days_text}"
+                t(
+                    "inactive_line",
+                    lang,
+                    index=index,
+                    prefix=prefix,
+                    name=name,
+                    days_text=days_text,
+                )
             )
 
         await message.answer("\n".join(response_lines), parse_mode=None)
     except Exception as e:
         logger.error("Error in /inactive command: %s", e, exc_info=True)
         await message.answer(
-            "An error occurred while fetching inactive players.\n"
-            "Please try again later.",
+            t("inactive_error", lang),
             parse_mode=None,
         )
 
@@ -2826,89 +3253,98 @@ async def cmd_inactive(message: Message) -> None:
 @router.message(Command("current_war"))
 async def cmd_current_war(message: Message) -> None:
     """Show current war snapshot from the database."""
+    lang = await _get_lang_for_message(message)
     clan_tag = _require_clan_tag()
     if not clan_tag:
-        await message.answer("CLAN_TAG is not configured.", parse_mode=None)
+        await message.answer(t("clan_tag_not_configured", lang), parse_mode=None)
         return
-    report = await build_current_war_report(clan_tag)
+    report = await build_current_war_report(clan_tag, lang=lang)
     await message.answer(report, parse_mode=None)
 
 
 @router.message(Command("info"))
 async def cmd_info(message: Message) -> None:
     """Show clan info from the official Clash Royale API."""
+    lang = await _get_lang_for_message(message)
     clan_tag = _require_clan_tag()
     if not clan_tag:
-        await message.answer("CLAN_TAG is not configured.", parse_mode=None)
+        await message.answer(t("clan_tag_not_configured", lang), parse_mode=None)
         return
-    report = await build_clan_info_report(clan_tag)
+    report = await build_clan_info_report(clan_tag, lang=lang)
     await message.answer(report, parse_mode=None)
 
 
 @router.message(Command("riverside"))
 async def cmd_riverside(message: Message) -> None:
     """Debug: send Clan War reminder to this chat only."""
+    lang = await _get_lang_for_message(message)
     if message.from_user is None or not _is_debug_admin(message.from_user.id):
-        await message.answer("Not allowed.", parse_mode=None)
+        await message.answer(t("not_allowed", lang), parse_mode=None)
         return
     day = _parse_debug_day(message.text)
     templates = {
-        1: "🏁 Clan War has begun!\nDay 1 is live.\n⚔️ Use your attacks and bring fame to the clan.",
-        2: "⏳ Clan War – Day 2\nNew war day is open.\n💪 Don’t forget to play your battles.",
-        3: "🔥 Clan War – Day 3\nWe’re close to the finish.\n⚔️ Every attack matters.",
-        4: "🚨 Final Day of Clan War!\n⚔️ Finish your attacks today.\n📊 Results and activity report after war ends.",
+        1: t("riverside_day1", lang),
+        2: t("riverside_day2", lang),
+        3: t("riverside_day3", lang),
+        4: t("riverside_day4", lang),
     }
     await _send_debug_reminder(
         message,
-        war_type="Riverside",
+        war_type=t("debug_war_type_riverside", lang),
         day=day,
         banner_url="https://i.ibb.co/VyGjscj/image.png",
         banner_url_day4="https://i.ibb.co/0jvgVSgq/image-1.jpg",
         templates=templates,
+        lang=lang,
     )
 
 
 @router.message(Command("coliseum"))
 async def cmd_coliseum(message: Message) -> None:
     """Debug: send Colosseum reminder to this chat only."""
+    lang = await _get_lang_for_message(message)
     if message.from_user is None or not _is_debug_admin(message.from_user.id):
-        await message.answer("Not allowed.", parse_mode=None)
+        await message.answer(t("not_allowed", lang), parse_mode=None)
         return
     day = _parse_debug_day(message.text)
     templates = {
-        1: "🏛 COLISEUM WAR HAS STARTED\nDay 1 is live.\n❗ Participation is mandatory.\n⚔️ Play your attacks.",
-        2: "🏛 Coliseum – Day 2\n⚔️ All attacks matter.\n❗ Participation is mandatory.",
-        3: "🏛 Coliseum – Day 3\n🔥 Stay active.\n❗ Participation is mandatory.",
-        4: "🚨 FINAL DAY – COLISEUM\n⚔️ Finish your attacks today.\n📊 Inactive players will be reviewed after war.",
+        1: t("coliseum_day1", lang),
+        2: t("coliseum_day2", lang),
+        3: t("coliseum_day3", lang),
+        4: t("coliseum_day4", lang),
     }
     await _send_debug_reminder(
         message,
-        war_type="Coliseum",
+        war_type=t("debug_war_type_coliseum", lang),
         day=day,
         banner_url="https://i.ibb.co/Cs4Sjpzw/image.png",
         banner_url_day4="https://i.ibb.co/R4YLyPzR/image.jpg",
         templates=templates,
+        lang=lang,
     )
 
 
 @router.message(Command("captcha_send"))
 async def cmd_captcha_send(message: Message) -> None:
+    lang = await _get_lang_for_message(message)
     if message.from_user is None or not _is_debug_admin(message.from_user.id):
-        await message.answer("Not allowed.", parse_mode=None)
+        await message.answer(t("not_allowed", lang), parse_mode=None)
         return
     if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
-        await message.answer("Reply to a user's message in a group.", parse_mode=None)
+        await message.answer(
+            t("reply_to_user_message_in_group", lang), parse_mode=None
+        )
         return
     if message.reply_to_message is None or message.reply_to_message.from_user is None:
-        await message.answer("Reply to a user's message.", parse_mode=None)
+        await message.answer(t("reply_to_user_message", lang), parse_mode=None)
         return
 
     target = message.reply_to_message.from_user
     if target.is_bot:
-        await message.answer("Cannot send captcha to a bot.", parse_mode=None)
+        await message.answer(t("captcha_send_bot", lang), parse_mode=None)
         return
     if _is_debug_admin(target.id):
-        await message.answer("Cannot send captcha to an admin.", parse_mode=None)
+        await message.answer(t("captcha_send_admin", lang), parse_mode=None)
         return
 
     try:
@@ -2918,7 +3354,7 @@ async def cmd_captcha_send(message: Message) -> None:
             ChatMemberStatus.CREATOR,
         ):
             await message.answer(
-                "Cannot send captcha to a chat admin.", parse_mode=None
+                t("captcha_send_chat_admin", lang), parse_mode=None
             )
             return
     except Exception:
@@ -2927,12 +3363,18 @@ async def cmd_captcha_send(message: Message) -> None:
     chat_id = message.chat.id
     await send_modlog(
         message.bot,
-        f"[ADMIN] captcha_send by {message.from_user.id} -> target {target.id} chat={chat_id}",
+        t(
+            "modlog_captcha_send",
+            DEFAULT_LANG,
+            admin_id=message.from_user.id,
+            user_id=target.id,
+            chat_id=chat_id,
+        ),
     )
     try:
         if await is_user_verified(chat_id, target.id):
             await message.answer(
-                "User is already verified. Use /captcha_unverify first.",
+                t("captcha_user_already_verified", lang),
                 parse_mode=None,
             )
             return
@@ -2954,8 +3396,13 @@ async def cmd_captcha_send(message: Message) -> None:
         logger.warning("Failed to restrict user: %s", e, exc_info=True)
         await send_modlog(
             message.bot,
-            f"[CAPTCHA] ERROR: restrict failed: chat={chat_id} "
-            f"user={target.id} err={e}",
+            t(
+                "modlog_captcha_restrict_failed",
+                DEFAULT_LANG,
+                chat_id=chat_id,
+                user_id=target.id,
+                error=e,
+            ),
         )
 
     try:
@@ -2964,16 +3411,18 @@ async def cmd_captcha_send(message: Message) -> None:
         )
     except Exception as e:
         logger.error("Failed to create captcha challenge: %s", e, exc_info=True)
-        await message.answer("Unable to create a captcha.", parse_mode=None)
+        await message.answer(t("captcha_create_failed", lang), parse_mode=None)
         return
 
     if not challenge:
-        await message.answer("Unable to create a captcha.", parse_mode=None)
+        await message.answer(t("captcha_create_failed", lang), parse_mode=None)
         return
     if not question:
         question = await get_captcha_question(challenge["question_id"])
     if not question:
-        await message.answer("Captcha question unavailable.", parse_mode=None)
+        await message.answer(
+            t("captcha_question_unavailable", lang), parse_mode=None
+        )
         return
 
     message_id = await _send_captcha_message(
@@ -2987,33 +3436,47 @@ async def cmd_captcha_send(message: Message) -> None:
         await update_challenge_message_id(challenge["id"], message_id)
         await touch_last_reminded_at(challenge["id"], datetime.now(timezone.utc))
         await message.answer(
-            f"Captcha sent to {_format_user_label(target)} "
-            f"(challenge_id={challenge['id']}, msg_id={message_id}).",
+            t(
+                "captcha_sent",
+                lang,
+                user=_format_user_label(target),
+                challenge_id=challenge["id"],
+                message_id=message_id,
+            ),
             parse_mode=None,
         )
         return
 
     await message.answer(
-        "Captcha created, but failed to send message.", parse_mode=None
+        t("captcha_send_failed", lang), parse_mode=None
     )
 
 
 @router.message(Command("captcha_status"))
 async def cmd_captcha_status(message: Message) -> None:
+    lang = await _get_lang_for_message(message)
     if message.from_user is None or not _is_debug_admin(message.from_user.id):
-        await message.answer("Not allowed.", parse_mode=None)
+        await message.answer(t("not_allowed", lang), parse_mode=None)
         return
     if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
-        await message.answer("Reply to a user's message in a group.", parse_mode=None)
+        await message.answer(
+            t("reply_to_user_message_in_group", lang), parse_mode=None
+        )
         return
     if message.reply_to_message is None or message.reply_to_message.from_user is None:
-        await message.answer("Reply to a user's message.", parse_mode=None)
+        await message.answer(t("reply_to_user_message", lang), parse_mode=None)
         return
     target = message.reply_to_message.from_user
     chat_id = message.chat.id
     await send_modlog(
         message.bot,
-        f"[ADMIN] captcha_status by {message.from_user.id} -> target {target.id} chat={chat_id}",
+        t(
+            "modlog_captcha_status",
+            DEFAULT_LANG,
+            admin_id=message.from_user.id,
+            user_id=target.id,
+            chat_id=chat_id,
+        ),
     )
 
     try:
@@ -3030,40 +3493,53 @@ async def cmd_captcha_status(message: Message) -> None:
             if len(question_text) > 120:
                 question_text = f"{question_text[:117]}..."
         else:
-            question_text = "n/a"
+            question_text = t("na", lang)
     except Exception as e:
         logger.error("Failed to fetch captcha status: %s", e, exc_info=True)
-        await message.answer("Unable to fetch captcha status right now.", parse_mode=None)
+        await message.answer(
+            t("captcha_status_unavailable", lang), parse_mode=None
+        )
         return
 
     lines = [
-        "Captcha status",
-        f"Chat: {chat_id}",
-        f"User: {_format_user_label(target)} | id={target.id}",
-        f"Verified: {'yes' if is_verified else 'no'}",
+        t("captcha_status_title", lang),
+        t("captcha_status_chat", lang, chat_id=chat_id),
+        t(
+            "captcha_status_user",
+            lang,
+            user=_format_user_label(target),
+            user_id=target.id,
+        ),
+        t(
+            "captcha_status_verified",
+            lang,
+            status=t("yes" if is_verified else "no", lang),
+        ),
     ]
     if not challenge:
-        lines.append("Challenge: none")
+        lines.append(t("captcha_status_challenge_none", lang))
         await message.answer("\n".join(lines), parse_mode=None)
         return
 
     lines.extend(
         [
-            (
-                "Challenge: "
-                f"id={challenge.get('id')} "
-                f"status={challenge.get('status')} "
-                f"attempts={challenge.get('attempts')} "
-                f"created_at={_format_dt(challenge.get('created_at'))}"
+            t(
+                "captcha_status_challenge",
+                lang,
+                challenge_id=challenge.get("id"),
+                status=challenge.get("status"),
+                attempts=challenge.get("attempts"),
+                created_at=_format_dt(challenge.get("created_at")),
             ),
-            (
-                "Details: "
-                f"expires_at={_format_dt(challenge.get('expires_at'))} "
-                f"message_id={challenge.get('message_id') or 'n/a'} "
-                f"last_reminded_at={_format_dt(challenge.get('last_reminded_at'))} "
-                f"question_id={challenge.get('question_id')}"
+            t(
+                "captcha_status_details",
+                lang,
+                expires_at=_format_dt(challenge.get("expires_at")),
+                message_id=challenge.get("message_id") or t("na", lang),
+                last_reminded_at=_format_dt(challenge.get("last_reminded_at")),
+                question_id=challenge.get("question_id"),
             ),
-            f"Question: {question_text}",
+            t("captcha_status_question", lang, question=question_text),
         ]
     )
     await message.answer("\n".join(lines), parse_mode=None)
@@ -3071,20 +3547,29 @@ async def cmd_captcha_status(message: Message) -> None:
 
 @router.message(Command("captcha_reset"))
 async def cmd_captcha_reset(message: Message) -> None:
+    lang = await _get_lang_for_message(message)
     if message.from_user is None or not _is_debug_admin(message.from_user.id):
-        await message.answer("Not allowed.", parse_mode=None)
+        await message.answer(t("not_allowed", lang), parse_mode=None)
         return
     if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
-        await message.answer("Reply to a user's message in a group.", parse_mode=None)
+        await message.answer(
+            t("reply_to_user_message_in_group", lang), parse_mode=None
+        )
         return
     if message.reply_to_message is None or message.reply_to_message.from_user is None:
-        await message.answer("Reply to a user's message.", parse_mode=None)
+        await message.answer(t("reply_to_user_message", lang), parse_mode=None)
         return
     target = message.reply_to_message.from_user
     chat_id = message.chat.id
     await send_modlog(
         message.bot,
-        f"[ADMIN] captcha_reset by {message.from_user.id} -> target {target.id} chat={chat_id}",
+        t(
+            "modlog_captcha_reset",
+            DEFAULT_LANG,
+            admin_id=message.from_user.id,
+            user_id=target.id,
+            chat_id=chat_id,
+        ),
     )
 
     try:
@@ -3108,8 +3593,13 @@ async def cmd_captcha_reset(message: Message) -> None:
         logger.warning("Failed to restrict user: %s", e, exc_info=True)
         await send_modlog(
             message.bot,
-            f"[CAPTCHA] ERROR: restrict failed: chat={chat_id} "
-            f"user={target.id} err={e}",
+            t(
+                "modlog_captcha_restrict_failed",
+                DEFAULT_LANG,
+                chat_id=chat_id,
+                user_id=target.id,
+                error=e,
+            ),
         )
 
     try:
@@ -3118,11 +3608,11 @@ async def cmd_captcha_reset(message: Message) -> None:
         )
     except Exception as e:
         logger.error("Failed to create captcha challenge: %s", e, exc_info=True)
-        await message.answer("Unable to create a new captcha.", parse_mode=None)
+        await message.answer(t("captcha_create_new_failed", lang), parse_mode=None)
         return
 
     if not challenge:
-        await message.answer("Unable to create a new captcha.", parse_mode=None)
+        await message.answer(t("captcha_create_new_failed", lang), parse_mode=None)
         return
 
     if not question:
@@ -3139,31 +3629,40 @@ async def cmd_captcha_reset(message: Message) -> None:
     if message_id:
         await update_challenge_message_id(challenge["id"], message_id)
         await message.answer(
-            "Captcha reset done. New captcha sent.", parse_mode=None
+            t("captcha_reset_sent", lang), parse_mode=None
         )
         return
 
     await message.answer(
-        "Captcha reset done, but failed to send captcha.", parse_mode=None
+        t("captcha_reset_send_failed", lang), parse_mode=None
     )
 
 
 @router.message(Command("captcha_verify"))
 async def cmd_captcha_verify(message: Message) -> None:
+    lang = await _get_lang_for_message(message)
     if message.from_user is None or not _is_debug_admin(message.from_user.id):
-        await message.answer("Not allowed.", parse_mode=None)
+        await message.answer(t("not_allowed", lang), parse_mode=None)
         return
     if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
-        await message.answer("Reply to a user's message in a group.", parse_mode=None)
+        await message.answer(
+            t("reply_to_user_message_in_group", lang), parse_mode=None
+        )
         return
     if message.reply_to_message is None or message.reply_to_message.from_user is None:
-        await message.answer("Reply to a user's message.", parse_mode=None)
+        await message.answer(t("reply_to_user_message", lang), parse_mode=None)
         return
     target = message.reply_to_message.from_user
     chat_id = message.chat.id
     await send_modlog(
         message.bot,
-        f"[ADMIN] captcha_verify by {message.from_user.id} -> target {target.id} chat={chat_id}",
+        t(
+            "modlog_captcha_verify",
+            DEFAULT_LANG,
+            admin_id=message.from_user.id,
+            user_id=target.id,
+            chat_id=chat_id,
+        ),
     )
 
     try:
@@ -3171,7 +3670,7 @@ async def cmd_captcha_verify(message: Message) -> None:
         await mark_pending_challenges_passed(chat_id, target.id)
     except Exception as e:
         logger.error("Failed to mark user verified: %s", e, exc_info=True)
-        await message.answer("Unable to verify user right now.", parse_mode=None)
+        await message.answer(t("captcha_verify_failed", lang), parse_mode=None)
         return
 
     try:
@@ -3189,29 +3688,43 @@ async def cmd_captcha_verify(message: Message) -> None:
         logger.warning("Failed to unrestrict user: %s", e, exc_info=True)
         await send_modlog(
             message.bot,
-            f"[CAPTCHA] ERROR: unrestrict failed: chat={chat_id} "
-            f"user={target.id} err={e}",
+            t(
+                "modlog_captcha_unrestrict_failed",
+                DEFAULT_LANG,
+                chat_id=chat_id,
+                user_id=target.id,
+                error=e,
+            ),
         )
 
-    await message.answer("User verified by admin.", parse_mode=None)
+    await message.answer(t("captcha_verify_done", lang), parse_mode=None)
 
 
 @router.message(Command("captcha_unverify"))
 async def cmd_captcha_unverify(message: Message) -> None:
+    lang = await _get_lang_for_message(message)
     if message.from_user is None or not _is_debug_admin(message.from_user.id):
-        await message.answer("Not allowed.", parse_mode=None)
+        await message.answer(t("not_allowed", lang), parse_mode=None)
         return
     if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
-        await message.answer("Reply to a user's message in a group.", parse_mode=None)
+        await message.answer(
+            t("reply_to_user_message_in_group", lang), parse_mode=None
+        )
         return
     if message.reply_to_message is None or message.reply_to_message.from_user is None:
-        await message.answer("Reply to a user's message.", parse_mode=None)
+        await message.answer(t("reply_to_user_message", lang), parse_mode=None)
         return
     target = message.reply_to_message.from_user
     chat_id = message.chat.id
     await send_modlog(
         message.bot,
-        f"[ADMIN] captcha_unverify by {message.from_user.id} -> target {target.id} chat={chat_id}",
+        t(
+            "modlog_captcha_unverify",
+            DEFAULT_LANG,
+            admin_id=message.from_user.id,
+            user_id=target.id,
+            chat_id=chat_id,
+        ),
     )
 
     try:
@@ -3219,45 +3732,53 @@ async def cmd_captcha_unverify(message: Message) -> None:
     except Exception as e:
         logger.error("Failed to remove verified flag: %s", e, exc_info=True)
         await message.answer(
-            "Unable to remove verified flag right now.", parse_mode=None
+            t("captcha_unverify_failed", lang), parse_mode=None
         )
         return
 
-    await message.answer("Verified flag removed.", parse_mode=None)
+    await message.answer(t("captcha_unverify_done", lang), parse_mode=None)
 
 
 @router.message(Command("modlog_test"))
 async def cmd_modlog_test(message: Message) -> None:
+    lang = await _get_lang_for_message(message)
     if message.from_user is None or not _is_debug_admin(message.from_user.id):
-        await message.answer("Not allowed.", parse_mode=None)
+        await message.answer(t("not_allowed", lang), parse_mode=None)
         return
     if MODLOG_CHAT_ID == 0:
-        await message.answer("MODLOG_CHAT_ID is not set.", parse_mode=None)
+        await message.answer(t("modlog_not_configured", lang), parse_mode=None)
         return
     try:
         await message.bot.send_message(
             MODLOG_CHAT_ID,
-            "MODLOG TEST ok",
+            t("modlog_test_message", DEFAULT_LANG),
             parse_mode=None,
             disable_web_page_preview=True,
         )
     except Exception as e:
         await message.answer(
-            f"failed: {type(e).__name__}: {e}", parse_mode=None
+            t(
+                "modlog_test_failed",
+                lang,
+                error_type=type(e).__name__,
+                error=str(e),
+            ),
+            parse_mode=None,
         )
         return
 
-    await message.answer("sent ok", parse_mode=None)
+    await message.answer(t("modlog_test_sent", lang), parse_mode=None)
 
 
 @router.message(Command("donations"))
 async def cmd_donations(message: Message) -> None:
     """Show donation leaderboards for the clan."""
+    lang = await _get_lang_for_message(message)
     clan_tag = _require_clan_tag()
     if not clan_tag:
-        await message.answer("CLAN_TAG is not configured.", parse_mode=None)
+        await message.answer(t("clan_tag_not_configured", lang), parse_mode=None)
         return
-    clan_name = "Unknown"
+    clan_name = t("unknown", lang)
     try:
         api_client = await get_api_client()
         clan_data = await api_client.get_clan(clan_tag)
@@ -3267,31 +3788,35 @@ async def cmd_donations(message: Message) -> None:
         logger.warning("Failed to fetch clan name: %s", e)
     except Exception as e:
         logger.warning("Failed to fetch clan name: %s", e)
-    report = await build_donations_report(clan_tag, clan_name)
+    report = await build_donations_report(
+        clan_tag, clan_name, lang=lang
+    )
     await message.answer(report, parse_mode=None)
 
 
 @router.message(Command("promote_candidates"))
 async def cmd_promote_candidates(message: Message) -> None:
     """Show promotion recommendations."""
+    lang = await _get_lang_for_message(message)
     clan_tag = _require_clan_tag()
     if not clan_tag:
-        await message.answer("CLAN_TAG is not configured.", parse_mode=None)
+        await message.answer(t("clan_tag_not_configured", lang), parse_mode=None)
         return
-    report = await build_promotion_candidates_report(clan_tag)
+    report = await build_promotion_candidates_report(clan_tag, lang=lang)
     await message.answer(report, parse_mode=None)
 
 
 @router.message(Command("my_activity"))
 async def cmd_my_activity(message: Message) -> None:
     """Show the current user's war activity report."""
+    lang = await _get_lang_for_message(message)
     if message.from_user is None:
-        await message.answer("Unable to identify your account.", parse_mode=None)
+        await message.answer(t("unable_identify_account", lang), parse_mode=None)
         return
 
     clan_tag = _require_clan_tag()
     if not clan_tag:
-        await message.answer("CLAN_TAG is not configured.", parse_mode=None)
+        await message.answer(t("clan_tag_not_configured", lang), parse_mode=None)
         return
 
     args = ""
@@ -3303,11 +3828,19 @@ async def cmd_my_activity(message: Message) -> None:
     existing = await get_user_link(message.from_user.id)
     if existing:
         await message.answer(
-            f"✅ You are linked to: {existing['player_name']} ({existing['player_tag']})",
+            t(
+                "my_activity_linked",
+                lang,
+                name=existing["player_name"],
+                tag=existing["player_tag"],
+            ),
             parse_mode=None,
         )
         report = await build_my_activity_report(
-            existing["player_tag"], existing["player_name"], clan_tag
+            existing["player_tag"],
+            existing["player_name"],
+            clan_tag,
+            lang=lang,
         )
         await message.answer(report, parse_mode=None)
         return
@@ -3328,7 +3861,7 @@ async def cmd_my_activity(message: Message) -> None:
             )
         else:
             await message.answer(
-                "You are not linked yet. Send your in-game nickname exactly as it appears.",
+                t("my_activity_not_linked", lang),
                 parse_mode=None,
             )
         return
@@ -3339,9 +3872,10 @@ async def cmd_my_activity(message: Message) -> None:
 @router.message(Command("activity"))
 async def cmd_activity(message: Message) -> None:
     """Show a player's activity report by nickname, @username, or reply."""
+    lang = await _get_lang_for_message(message)
     clan_tag = _require_clan_tag()
     if not clan_tag:
-        await message.answer("CLAN_TAG is not configured.", parse_mode=None)
+        await message.answer(t("clan_tag_not_configured", lang), parse_mode=None)
         return
 
     args = ""
@@ -3357,19 +3891,19 @@ async def cmd_activity(message: Message) -> None:
             chat = None
         if not chat or chat.type != ChatType.PRIVATE:
             await message.answer(
-                "Unable to resolve that Telegram username.",
+                t("activity_username_not_found", lang),
                 parse_mode=None,
             )
             return
         link = await get_user_link(chat.id)
         if not link:
             await message.answer(
-                "That user is not linked. Ask them to use /my_activity to link.",
+                t("activity_user_not_linked", lang),
                 parse_mode=None,
             )
             return
         report = await build_my_activity_report(
-            link["player_tag"], link["player_name"], clan_tag
+            link["player_tag"], link["player_name"], clan_tag, lang=lang
         )
         await message.answer(report, parse_mode=None)
         return
@@ -3379,19 +3913,19 @@ async def cmd_activity(message: Message) -> None:
         link = await get_user_link(target_id)
         if not link:
             await message.answer(
-                "That user is not linked. Ask them to use /my_activity to link.",
+                t("activity_user_not_linked", lang),
                 parse_mode=None,
             )
             return
         report = await build_my_activity_report(
-            link["player_tag"], link["player_name"], clan_tag
+            link["player_tag"], link["player_name"], clan_tag, lang=lang
         )
         await message.answer(report, parse_mode=None)
         return
 
     if not args:
         await message.answer(
-            "Usage: /activity <in-game nickname> or /activity @username (or reply to a user).",
+            t("activity_usage", lang),
             parse_mode=None,
         )
         return
@@ -3399,17 +3933,30 @@ async def cmd_activity(message: Message) -> None:
     candidates = await search_player_candidates(clan_tag, args)
     if not candidates:
         await message.answer(
-            "No player found with that nickname in clan data. Please check spelling.",
+            t("activity_no_player_found", lang),
             parse_mode=None,
         )
         return
 
     if len(candidates) > 1:
-        lines = ["Multiple matches found. Please be more specific:"]
+        lines = [t("activity_multiple_found", lang)]
         for index, candidate in enumerate(candidates, 1):
             tag = _normalize_tag(candidate["player_tag"])
-            status = "IN CLAN" if candidate.get("in_clan") else "NOT IN CLAN"
-            lines.append(f"{index}) {candidate['player_name']} — {tag} — {status}")
+            status = (
+                t("status_in_clan", lang)
+                if candidate.get("in_clan")
+                else t("status_not_in_clan", lang)
+            )
+            lines.append(
+                t(
+                    "activity_candidate_line",
+                    lang,
+                    index=index,
+                    name=candidate["player_name"],
+                    tag=tag,
+                    status=status,
+                )
+            )
         await message.answer("\n".join(lines), parse_mode=None)
         return
 
@@ -3418,6 +3965,7 @@ async def cmd_activity(message: Message) -> None:
         _normalize_tag(candidate["player_tag"]),
         candidate["player_name"],
         clan_tag,
+        lang=lang,
     )
     await message.answer(report, parse_mode=None)
 
@@ -3425,13 +3973,14 @@ async def cmd_activity(message: Message) -> None:
 @router.message(Command("admin_link_name"))
 async def cmd_admin_link_name(message: Message) -> None:
     """Link a user account by nickname (admin-only, reply required)."""
+    lang = await _get_lang_for_message(message)
     if message.from_user is None:
-        await message.answer("Unable to verify permissions.", parse_mode=None)
+        await message.answer(t("unable_verify_permissions", lang), parse_mode=None)
         return
 
     if message.reply_to_message is None or message.reply_to_message.from_user is None:
         await message.answer(
-            "Reply to a user's message with /admin_link_name <nickname>.",
+            t("admin_link_reply_prompt", lang),
             parse_mode=None,
         )
         return
@@ -3440,11 +3989,11 @@ async def cmd_admin_link_name(message: Message) -> None:
         is_admin = await _is_admin_user(message, message.from_user.id)
     except Exception as e:
         logger.error("Failed to check admin status: %s", e, exc_info=True)
-        await message.answer("Unable to verify admin status.", parse_mode=None)
+        await message.answer(t("unable_verify_admin_status", lang), parse_mode=None)
         return
 
     if not is_admin:
-        await message.answer("You do not have permission to use this command.", parse_mode=None)
+        await message.answer(t("no_permission", lang), parse_mode=None)
         return
 
     args = ""
@@ -3454,7 +4003,7 @@ async def cmd_admin_link_name(message: Message) -> None:
             args = parts[1].strip()
 
     if not args:
-        await message.answer("Provide a nickname to link.", parse_mode=None)
+        await message.answer(t("admin_link_missing_nickname", lang), parse_mode=None)
         return
 
     await _handle_link_candidates(
@@ -3469,13 +4018,14 @@ async def cmd_admin_link_name(message: Message) -> None:
 @router.message(Command("unlink"))
 async def cmd_unlink(message: Message) -> None:
     """Unlink a user account (admin-only, reply required)."""
+    lang = await _get_lang_for_message(message)
     if message.from_user is None:
-        await message.answer("Unable to verify permissions.", parse_mode=None)
+        await message.answer(t("unable_verify_permissions", lang), parse_mode=None)
         return
 
     if message.reply_to_message is None or message.reply_to_message.from_user is None:
         await message.answer(
-            "Reply to a user's message with /unlink.",
+            t("unlink_reply_prompt", lang),
             parse_mode=None,
         )
         return
@@ -3484,12 +4034,12 @@ async def cmd_unlink(message: Message) -> None:
         is_admin = await _is_admin_user(message, message.from_user.id)
     except Exception as e:
         logger.error("Failed to check admin status: %s", e, exc_info=True)
-        await message.answer("Unable to verify admin status.", parse_mode=None)
+        await message.answer(t("unable_verify_admin_status", lang), parse_mode=None)
         return
 
     if not is_admin:
         await message.answer(
-            "You do not have permission to use this command.",
+            t("no_permission", lang),
             parse_mode=None,
         )
         return
@@ -3497,13 +4047,18 @@ async def cmd_unlink(message: Message) -> None:
     target_id = message.reply_to_message.from_user.id
     existing = await get_user_link(target_id)
     if not existing:
-        await message.answer("No linked account found for this user.", parse_mode=None)
+        await message.answer(t("unlink_no_account", lang), parse_mode=None)
         return
 
     await delete_user_link(target_id)
     await delete_user_link_request(target_id)
     await message.answer(
-        f"Unlinked: {existing['player_name']} ({existing['player_tag']}).",
+        t(
+            "unlink_done",
+            lang,
+            name=existing["player_name"],
+            tag=existing["player_tag"],
+        ),
         parse_mode=None,
     )
 
@@ -3514,6 +4069,7 @@ async def handle_private_text(message: Message) -> None:
         return
     if message.from_user is None:
         return
+    lang = await _get_lang_for_message(message)
 
     state_key = _apply_state_key(message.from_user.id)
     apply_state = await get_app_state(state_key)
@@ -3523,13 +4079,13 @@ async def handle_private_text(message: Message) -> None:
             nickname = message.text.strip()
             if not nickname:
                 await message.answer(
-                    "Nickname cannot be empty. Send your in-game nickname.",
+                    t("apply_nickname_empty", lang),
                     parse_mode=None,
                 )
                 return
             if len(nickname) > 32:
                 await message.answer(
-                    "Nickname is too long. Please send a shorter one.",
+                    t("apply_nickname_too_long", lang),
                     parse_mode=None,
                 )
                 return
@@ -3538,8 +4094,11 @@ async def handle_private_text(message: Message) -> None:
             if pending_app:
                 await delete_app_state(state_key)
                 await message.answer(
-                    "You already have a pending application:\n"
-                    f"{_format_application_summary(pending_app)}",
+                    t(
+                        "apply_already_pending",
+                        lang,
+                        summary=_format_application_summary(pending_app),
+                    ),
                     parse_mode=None,
                 )
                 return
@@ -3564,16 +4123,18 @@ async def handle_private_text(message: Message) -> None:
                 user_label = f"{user_label} (@{message.from_user.username})"
             await _notify_application(
                 message.bot,
-                (
-                    "New application received:\n"
-                    f"ID: {app['id']}\n"
-                    f"Player: {nickname}\n"
-                    f"Tag: n/a\n"
-                    f"User: {user_label} id={message.from_user.id}"
+                t(
+                    "app_admin_notify_new",
+                    DEFAULT_LANG,
+                    app_id=app["id"],
+                    player_name=nickname,
+                    player_tag=t("na", DEFAULT_LANG),
+                    user_label=user_label,
+                    user_id=message.from_user.id,
                 ),
             )
             await message.answer(
-                "Send your player tag (optional) or type 'skip'.",
+                t("apply_send_tag_optional", lang),
                 parse_mode=None,
             )
             return
@@ -3583,14 +4144,14 @@ async def handle_private_text(message: Message) -> None:
             if not app_id:
                 await delete_app_state(state_key)
                 await message.answer(
-                    "Please restart with /start apply.",
+                    t("apply_restart", lang),
                     parse_mode=None,
                 )
                 return
             ok, tag = _parse_optional_tag(message.text)
             if not ok:
                 await message.answer(
-                    "Invalid tag format. Send like #ABC123 or type 'skip'.",
+                    t("apply_invalid_tag", lang),
                     parse_mode=None,
                 )
                 return
@@ -3598,7 +4159,7 @@ async def handle_private_text(message: Message) -> None:
                 await update_application_tag(app_id, tag)
             await delete_app_state(state_key)
             await message.answer(
-                "✅ Application received. Admins will review.",
+                t("apply_received", lang),
                 parse_mode=None,
             )
             return
@@ -3618,33 +4179,34 @@ async def handle_private_text(message: Message) -> None:
         )
     elif status == "awaiting_choice":
         await message.answer(
-            "Please select your account from the buttons above.", parse_mode=None
+            t("link_select_prompt", lang), parse_mode=None
         )
 
 
 @router.callback_query(F.data.startswith("link_select:"))
 async def handle_link_select(query: CallbackQuery) -> None:
+    lang = await _get_lang_for_query(query)
     data = query.data or ""
     parts = data.split(":")
     if len(parts) != 3:
-        await query.answer("Invalid selection.", show_alert=True)
+        await query.answer(t("invalid_selection", lang), show_alert=True)
         return
 
     try:
         target_user_id = int(parts[1])
     except ValueError:
-        await query.answer("Invalid selection.", show_alert=True)
+        await query.answer(t("invalid_selection", lang), show_alert=True)
         return
 
     tag = _normalize_tag(parts[2])
 
     request = await get_user_link_request(target_user_id)
     if not request or request.get("status") != "awaiting_choice":
-        await query.answer("This link request has expired.", show_alert=True)
+        await query.answer(t("link_request_expired", lang), show_alert=True)
         return
 
     if query.from_user is None:
-        await query.answer("Unable to verify your account.", show_alert=True)
+        await query.answer(t("unable_verify_account", lang), show_alert=True)
         return
 
     if query.from_user.id != target_user_id:
@@ -3655,17 +4217,17 @@ async def handle_link_select(query: CallbackQuery) -> None:
             except Exception:
                 authorized = False
         if not authorized and query.from_user.id not in ADMIN_USER_IDS:
-            await query.answer("You are not allowed to do this.", show_alert=True)
+            await query.answer(t("link_not_allowed", lang), show_alert=True)
             return
 
     clan_tag = _require_clan_tag()
     if not clan_tag:
-        await query.answer("CLAN_TAG is not configured.", show_alert=True)
+        await query.answer(t("clan_tag_not_configured", lang), show_alert=True)
         return
 
     player_name = await get_player_name_for_tag(tag, clan_tag)
     if not player_name:
-        player_name = "Unknown"
+        player_name = t("unknown", lang)
 
     source = "self"
     if request.get("origin_chat_id") is not None and query.from_user.id != target_user_id:
@@ -3681,17 +4243,54 @@ async def handle_link_select(query: CallbackQuery) -> None:
 
     if query.message is not None:
         await query.message.answer(
-            f"✅ Linked: {player_name} ({tag}). Now use /my_activity.",
+            t(
+                "link_success",
+                lang,
+                name=player_name,
+                tag=tag,
+            ),
             parse_mode=None,
         )
     else:
+        target_lang = await get_user_language(None, target_user_id)
         await query.bot.send_message(
             target_user_id,
-            f"✅ Linked: {player_name} ({tag}). Now use /my_activity.",
+            t(
+                "link_success",
+                target_lang,
+                name=player_name,
+                tag=tag,
+            ),
             parse_mode=None,
         )
 
-    await query.answer("Linked.")
+    await query.answer(t("link_confirm", lang))
+
+
+@router.callback_query(F.data.startswith("lang_select:"))
+async def handle_lang_select(query: CallbackQuery) -> None:
+    data = query.data or ""
+    parts = data.split(":")
+    if len(parts) != 3:
+        await query.answer(t("invalid_selection", DEFAULT_LANG), show_alert=True)
+        return
+    try:
+        target_user_id = int(parts[1])
+    except ValueError:
+        await query.answer(t("invalid_selection", DEFAULT_LANG), show_alert=True)
+        return
+    lang_code = parts[2]
+    if query.from_user is None or query.from_user.id != target_user_id:
+        await query.answer(t("lang_not_for_you", DEFAULT_LANG), show_alert=True)
+        return
+    await set_user_language(target_user_id, lang_code)
+    confirm = t("lang_set_confirm", lang_code)
+    if query.message is not None:
+        try:
+            await query.message.edit_text(confirm, parse_mode=None)
+        except Exception:
+            pass
+    await query.answer(confirm, show_alert=False)
 
 
 @router.message(

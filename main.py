@@ -65,6 +65,7 @@ from reports import (
     build_weekly_report,
 )
 from riverrace_import import get_last_completed_week, get_last_completed_weeks
+from i18n import DEFAULT_LANG, t
 
 # Configure logging
 logging.basicConfig(
@@ -597,9 +598,15 @@ async def maybe_post_weekly_report(bot: Bot) -> None:
     weeks = await get_last_completed_weeks(8, CLAN_TAG)
     if not weeks:
         weeks = [week]
-    weekly_report = await build_weekly_report(season_id, section_index, CLAN_TAG)
-    rolling_report = await build_rolling_report(weeks, CLAN_TAG)
-    kick_report = await build_kick_shortlist_report(weeks, week, CLAN_TAG)
+    weekly_report = await build_weekly_report(
+        season_id, section_index, CLAN_TAG, lang=DEFAULT_LANG
+    )
+    rolling_report = await build_rolling_report(
+        weeks, CLAN_TAG, lang=DEFAULT_LANG
+    )
+    kick_report = await build_kick_shortlist_report(
+        weeks, week, CLAN_TAG, lang=DEFAULT_LANG
+    )
     sent_count = 0
     for chat_id in chat_ids:
         try:
@@ -726,10 +733,10 @@ async def maybe_post_daily_war_reminder(bot: Bot) -> None:
 
             if period_type_lower == "colosseum":
                 messages = {
-                    1: "🏛 COLISEUM WAR HAS STARTED\nDay 1 is live.\n❗ Participation is mandatory.\n⚔️ Play your attacks.",
-                    2: "🏛 Coliseum – Day 2\n⚔️ All attacks matter.\n❗ Participation is mandatory.",
-                    3: "🏛 Coliseum – Day 3\n🔥 Stay active.\n❗ Participation is mandatory.",
-                    4: "🚨 FINAL DAY – COLISEUM\n⚔️ Finish your attacks today.\n📊 Inactive players will be reviewed after war.",
+                    1: t("coliseum_day1", DEFAULT_LANG),
+                    2: t("coliseum_day2", DEFAULT_LANG),
+                    3: t("coliseum_day3", DEFAULT_LANG),
+                    4: t("coliseum_day4", DEFAULT_LANG),
                 }
                 banner_url = (
                     REMINDER_COLOSSEUM_BANNER_URL_DAY4
@@ -738,10 +745,10 @@ async def maybe_post_daily_war_reminder(bot: Bot) -> None:
                 )
             else:
                 messages = {
-                    1: "🏁 Clan War has begun!\nDay 1 is live.\n⚔️ Use your attacks and bring fame to the clan.",
-                    2: "⏳ Clan War – Day 2\nNew war day is open.\n💪 Don’t forget to play your battles.",
-                    3: "🔥 Clan War – Day 3\nWe’re close to the finish.\n⚔️ Every attack matters.",
-                    4: "🚨 Final Day of Clan War!\n⚔️ Finish your attacks today.\n📊 Results and activity report after war ends.",
+                    1: t("riverside_day1", DEFAULT_LANG),
+                    2: t("riverside_day2", DEFAULT_LANG),
+                    3: t("riverside_day3", DEFAULT_LANG),
+                    4: t("riverside_day4", DEFAULT_LANG),
                 }
                 banner_url = (
                     REMINDER_WAR_BANNER_URL_DAY4
@@ -853,7 +860,9 @@ async def maybe_post_promotion_candidates(bot: Bot) -> None:
     if not chat_ids:
         return
 
-    report = await build_promotion_candidates_report(CLAN_TAG)
+    report = await build_promotion_candidates_report(
+        CLAN_TAG, lang=DEFAULT_LANG
+    )
     sent_count = 0
     for chat_id in chat_ids:
         try:
@@ -969,7 +978,12 @@ async def maybe_auto_invite(bot: Bot) -> None:
             )
             await _send_modlog(
                 bot,
-                f"[AUTO] joined: app={app['id']} user={app['telegram_user_id']}",
+                t(
+                    "modlog_auto_joined",
+                    DEFAULT_LANG,
+                    app_id=app["id"],
+                    user_id=app["telegram_user_id"],
+                ),
             )
             continue
         invite_expires_at = app.get("invite_expires_at")
@@ -1004,15 +1018,21 @@ async def maybe_auto_invite(bot: Bot) -> None:
             )
             await _send_modlog(
                 bot,
-                f"[AUTO] joined: app={app['id']} user={app['telegram_user_id']}",
+                t(
+                    "modlog_auto_joined",
+                    DEFAULT_LANG,
+                    app_id=app["id"],
+                    user_id=app["telegram_user_id"],
+                ),
             )
             continue
 
         invite_expires_at = now + timedelta(minutes=AUTO_INVITE_INVITE_MINUTES)
-        text = (
-            "🎉 A slot is free in Black Poison!\n"
-            f"Join now: clan tag #{_normalize_clan_tag(CLAN_TAG)}\n"
-            f"⏳ You have ~{AUTO_INVITE_INVITE_MINUTES} minutes."
+        text = t(
+            "auto_invite_message",
+            DEFAULT_LANG,
+            clan_tag=f"#{_normalize_clan_tag(CLAN_TAG)}",
+            minutes=AUTO_INVITE_INVITE_MINUTES,
         )
         try:
             await bot.send_message(
@@ -1036,7 +1056,12 @@ async def maybe_auto_invite(bot: Bot) -> None:
         )
         await _send_modlog(
             bot,
-            f"[AUTO] invite sent: app={app['id']} user={app['telegram_user_id']}",
+            t(
+                "modlog_auto_invite_sent",
+                DEFAULT_LANG,
+                app_id=app["id"],
+                user_id=app["telegram_user_id"],
+            ),
         )
 
 
@@ -1095,7 +1120,7 @@ async def scheduled_unmute_task(bot: Bot) -> None:
                 try:
                     await bot.send_message(
                         chat_id,
-                        f"✅ Mute expired: {label} can write again.",
+                        t("scheduled_unmute_notice", DEFAULT_LANG, user=label),
                         parse_mode=None,
                     )
                     logger.info(
