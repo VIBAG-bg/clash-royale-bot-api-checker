@@ -1241,7 +1241,7 @@ async def build_kick_shortlist_report(
                 flags.append("📦")
             prefix = f"{' '.join(flags)} " if flags else ""
             display_name = f"{prefix}{row.get('player_name')}"
-            name = _format_name(display_name, lang)
+            name = _format_name(display_name, lang).rstrip()
             donation_suffix = _format_donation_suffix(
                 row.get("player_tag"),
                 donations_wtd,
@@ -1270,7 +1270,7 @@ async def build_kick_shortlist_report(
             ]
         )
         for index, row in enumerate(warnings, 1):
-            name = _format_name(row.get("player_name"), lang)
+            name = _format_name(row.get("player_name"), lang).rstrip()
             donation_suffix = _format_donation_suffix(
                 row.get("player_tag"),
                 donations_wtd,
@@ -1297,7 +1297,7 @@ async def build_kick_shortlist_report(
             ]
         )
         for index, row in enumerate(donation_warnings, 1):
-            name = _format_name(row.get("player_name"), lang)
+            name = _format_name(row.get("player_name"), lang).rstrip()
             donation_suffix = _format_donation_suffix(
                 row.get("player_tag"),
                 donations_wtd,
@@ -1379,7 +1379,7 @@ async def build_kick_shortlist_report(
             ]
         )
         for index, row in enumerate(new_members, 1):
-            name = _format_name(row.get("player_name"), lang)
+            name = _format_name(row.get("player_name"), lang).rstrip()
             lines.append(
                 t(
                     "kick_new_member_line",
