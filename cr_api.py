@@ -1,5 +1,6 @@
 """Clash Royale API client module using httpx."""
 
+import asyncio
 import logging
 from typing import Any
 from urllib.parse import quote
@@ -54,26 +55,61 @@ class ClashRoyaleAPI:
     async def _request(self, endpoint: str) -> dict[str, Any]:
         """Make an API request and return JSON response."""
         client = await self._get_client()
-        
-        try:
-            response = await client.get(endpoint)
-            
+        retry_statuses = {429, 502, 503, 504}
+        max_attempts = 3
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                response = await client.get(endpoint)
+            except httpx.RequestError as e:
+                if attempt < max_attempts:
+                    delay = 0.5 * (2 ** (attempt - 1))
+                    logger.warning(
+                        "HTTP request error (attempt %s/%s): %s",
+                        attempt,
+                        max_attempts,
+                        e,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                logger.error(f"HTTP request error: {e}")
+                raise ClashRoyaleAPIError(0, f"Network error: {str(e)}")
+
             if response.status_code == 200:
                 return response.json()
-            elif response.status_code == 404:
+            if response.status_code == 404:
                 raise ClashRoyaleAPIError(404, "Resource not found")
-            elif response.status_code == 403:
+            if response.status_code == 403:
                 raise ClashRoyaleAPIError(403, "Access denied - check API token")
-            elif response.status_code == 429:
-                raise ClashRoyaleAPIError(429, "Rate limit exceeded")
-            else:
+            if response.status_code in retry_statuses:
+                if attempt < max_attempts:
+                    delay = 0.5 * (2 ** (attempt - 1))
+                    if response.status_code == 429:
+                        retry_after = response.headers.get("Retry-After")
+                        if retry_after:
+                            try:
+                                delay = min(max(float(retry_after), 0.0), 5.0)
+                            except ValueError:
+                                pass
+                    logger.warning(
+                        "CR API retry (status %s) attempt %s/%s; sleeping %.1fs",
+                        response.status_code,
+                        attempt,
+                        max_attempts,
+                        delay,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                if response.status_code == 429:
+                    raise ClashRoyaleAPIError(429, "Rate limit exceeded")
                 raise ClashRoyaleAPIError(
                     response.status_code,
-                    f"API request failed: {response.text}"
+                    f"API request failed: {response.text}",
                 )
-        except httpx.RequestError as e:
-            logger.error(f"HTTP request error: {e}")
-            raise ClashRoyaleAPIError(0, f"Network error: {str(e)}")
+            raise ClashRoyaleAPIError(
+                response.status_code,
+                f"API request failed: {response.text}",
+            )
     
     async def get_clan(self, clan_tag: str) -> dict[str, Any]:
         """

@@ -1098,7 +1098,7 @@ async def scheduled_unmute_task(bot: Bot) -> None:
                         f"✅ Mute expired: {label} can write again.",
                         parse_mode=None,
                     )
-                    logger.warning(
+                    logger.info(
                         "Unmute notify sent: chat=%s user=%s", chat_id, user_id
                     )
                     await mark_scheduled_unmute_sent(item["id"], sent_at=now)
