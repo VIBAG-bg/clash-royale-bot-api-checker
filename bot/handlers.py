@@ -1484,9 +1484,35 @@ async def cmd_app_notify(message: Message) -> None:
         return
 
     invite_expires_at = now + timedelta(minutes=AUTO_INVITE_INVITE_MINUTES)
-    await mark_application_invited(
-        app_id, now=now, invite_expires_at=invite_expires_at
-    )
+
+    try:
+        await mark_application_invited(
+            app_id,
+            now=now,
+            invite_expires_at=invite_expires_at,
+        )
+    except Exception as e:
+        logger.warning(
+            "DM sent but DB update failed for app %s: %s",
+            app_id,
+            e,
+        )
+        await message.answer(
+            "⚠️ DM sent, but DB update failed (application may remain pending).",
+            parse_mode=None,
+        )
+        await log_mod_action(
+            chat_id=message.chat.id,
+            target_user_id=int(telegram_user_id),
+            admin_user_id=message.from_user.id,
+            action="app_notify_db_failed",
+            reason=type(e).__name__,
+        )
+        await send_modlog(
+            message.bot,
+            f"[APP_NOTIFY] db_failed: id={app_id} user={telegram_user_id} error={type(e).__name__}",
+        )
+        return
     await log_mod_action(
         chat_id=message.chat.id,
         target_user_id=int(telegram_user_id),
