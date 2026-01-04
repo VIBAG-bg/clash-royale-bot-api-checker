@@ -411,7 +411,7 @@ async def build_rolling_report(
         weeks=weeks,
         clan_tag=clan_tag,
         inactive_limit=15,
-        active_limit=25,
+        active_limit=35,
     )
     inactive = _filter_protected(inactive)
     member_count = len(await get_current_member_tags(clan_tag))
