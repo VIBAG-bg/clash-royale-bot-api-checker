@@ -1715,6 +1715,38 @@ async def build_current_war_report(
     )
 
     if period_type_upper == "TRAINING":
+        last_completed_line = None
+        async with get_session() as session:
+            last_completed_result = await session.execute(
+                select(
+                    RiverRaceState.season_id,
+                    RiverRaceState.section_index,
+                    RiverRaceState.is_colosseum,
+                )
+                .where(
+                    RiverRaceState.clan_tag == clan_tag,
+                    RiverRaceState.period_type == "completed",
+                )
+                .order_by(
+                    RiverRaceState.season_id.desc(),
+                    RiverRaceState.section_index.desc(),
+                )
+                .limit(1)
+            )
+            last_completed_row = last_completed_result.first()
+            if last_completed_row:
+                last_completed_war_type = (
+                    t("current_war_colosseum", lang)
+                    if bool(last_completed_row.is_colosseum)
+                    else t("current_war_river_race", lang)
+                )
+                last_completed_line = t(
+                    "current_war_training_last_completed",
+                    lang,
+                    season=int(last_completed_row.season_id),
+                    week=int(last_completed_row.section_index) + 1,
+                    war_type=last_completed_war_type,
+                )
         lines = [
             t("current_war_title", lang),
             t("current_war_clan_line", lang, clan=clan_tag),
@@ -1722,19 +1754,15 @@ async def build_current_war_report(
             t("current_war_last_update", lang, last_update=last_update),
             "",
             SEPARATOR_LINE,
-            t(
-                "current_war_week_line",
-                lang,
-                season=season_id,
-                week=section_index + 1,
-                war_type=colosseum_label,
-            ),
             phase_line,
             t("current_war_remaining_line", lang, remaining=remaining_display),
             "",
-            SEPARATOR_LINE,
-            t("current_war_training_notice", lang),
+            t("current_war_training_msg_1", lang),
+            t("current_war_training_msg_2", lang),
         ]
+        if last_completed_line:
+            lines.append(last_completed_line)
+        lines.append(t("current_war_training_msg_4", lang))
         return "\n".join(lines)
 
     member_tags = await get_current_member_tags(clan_tag)
@@ -1914,6 +1942,11 @@ async def build_my_activity_report(
         if is_colosseum
         else t("current_war_river_race", lang)
     )
+    period_type = (state.get("period_type") if state else None) or None
+    period_type_lower = (
+        period_type.lower() if isinstance(period_type, str) else None
+    )
+    training = period_type_lower == "training"
 
     member_tags = await get_current_member_tags(clan_tag)
     member_count = len(member_tags)
@@ -1922,6 +1955,9 @@ async def build_my_activity_report(
     current_fame = 0
     rank_decks: str | int = t("na", lang)
     rank_fame: str | int = t("na", lang)
+    last_completed_week_line: str | None = None
+    last_completed_stats_line: str | None = None
+    last_completed_rank_line: str | None = None
 
     async with get_session() as session:
         week_rows: list[dict[str, object]] = []
@@ -1988,6 +2024,133 @@ async def build_my_activity_report(
                 current_fame = int(row.fame or 0)
                 rank_decks = t("na", lang)
                 rank_fame = t("na", lang)
+
+        if training:
+            last_completed_rank_decks: str | int = t("na", lang)
+            last_completed_rank_fame: str | int = t("na", lang)
+            last_completed_total: str | int = t("na", lang)
+            last_completed_result = await session.execute(
+                select(
+                    RiverRaceState.season_id,
+                    RiverRaceState.section_index,
+                    RiverRaceState.is_colosseum,
+                )
+                .where(
+                    RiverRaceState.clan_tag == clan_tag,
+                    RiverRaceState.period_type == "completed",
+                )
+                .order_by(
+                    RiverRaceState.season_id.desc(),
+                    RiverRaceState.section_index.desc(),
+                )
+                .limit(1)
+            )
+            last_completed_row = last_completed_result.first()
+            if last_completed_row:
+                last_completed_season = int(last_completed_row.season_id)
+                last_completed_section = int(last_completed_row.section_index)
+                last_completed_war_type = (
+                    t("current_war_colosseum", lang)
+                    if bool(last_completed_row.is_colosseum)
+                    else t("current_war_river_race", lang)
+                )
+                last_completed_week_line = t(
+                    "my_activity_last_completed_week",
+                    lang,
+                    season=last_completed_season,
+                    week=last_completed_section + 1,
+                    war_type=last_completed_war_type,
+                )
+                last_completed_user = await session.execute(
+                    select(
+                        PlayerParticipation.decks_used,
+                        PlayerParticipation.fame,
+                    ).where(
+                        PlayerParticipation.player_tag == player_tag,
+                        PlayerParticipation.season_id == last_completed_season,
+                        PlayerParticipation.section_index
+                        == last_completed_section,
+                    )
+                )
+                last_completed_user_row = last_completed_user.first()
+                if last_completed_user_row:
+                    last_completed_stats_line = t(
+                        "my_activity_last_completed_stats",
+                        lang,
+                        decks=int(last_completed_user_row.decks_used or 0),
+                        fame=int(last_completed_user_row.fame or 0),
+                    )
+                else:
+                    last_completed_stats_line = t(
+                        "my_activity_last_completed_stats_none", lang
+                    )
+
+                if member_tags:
+                    last_week_result = await session.execute(
+                        select(
+                            PlayerParticipation.player_tag,
+                            PlayerParticipation.decks_used,
+                            PlayerParticipation.fame,
+                        ).where(
+                            PlayerParticipation.season_id
+                            == last_completed_season,
+                            PlayerParticipation.section_index
+                            == last_completed_section,
+                            PlayerParticipation.player_tag.in_(member_tags),
+                        )
+                    )
+                    last_week_rows = [
+                        {
+                            "player_tag": row.player_tag,
+                            "decks_used": int(row.decks_used),
+                            "fame": int(row.fame),
+                        }
+                        for row in last_week_result.all()
+                    ]
+                    if last_week_rows:
+                        decks_sorted = sorted(
+                            last_week_rows,
+                            key=lambda row: (
+                                -int(row["decks_used"]),
+                                -int(row["fame"]),
+                            ),
+                        )
+                        fame_sorted = sorted(
+                            last_week_rows,
+                            key=lambda row: (
+                                -int(row["fame"]),
+                                -int(row["decks_used"]),
+                            ),
+                        )
+                        for index, row in enumerate(decks_sorted, 1):
+                            if row["player_tag"] == player_tag:
+                                last_completed_rank_decks = index
+                                break
+                        for index, row in enumerate(fame_sorted, 1):
+                            if row["player_tag"] == player_tag:
+                                last_completed_rank_fame = index
+                                break
+                        last_completed_total = member_count
+
+                last_completed_rank_line = t(
+                    "my_activity_last_completed_rank",
+                    lang,
+                    rank_decks=last_completed_rank_decks,
+                    rank_fame=last_completed_rank_fame,
+                    total=last_completed_total,
+                )
+            if last_completed_stats_line is None:
+                last_completed_stats_line = t(
+                    "my_activity_last_completed_stats_none", lang
+                )
+            if last_completed_rank_line is None:
+                last_completed_rank_line = t(
+                    "my_activity_last_completed_rank",
+                    lang,
+                    rank_decks=t("na", lang),
+                    rank_fame=t("na", lang),
+                    total=t("na", lang),
+                )
 
         weeks = await get_last_weeks_from_db(clan_tag, limit=8)
         user_rows: list[tuple[int, int]] = []
@@ -2081,7 +2244,14 @@ async def build_my_activity_report(
         donation_sum = int(donations_8w_map[tag_key].get("sum", 0))
         donation_weeks = int(donations_8w_map[tag_key].get("weeks_present", 0))
 
-    if current_decks == 0:
+    if training:
+        if avg_user_decks >= clan_avg_decks or avg_user_fame >= clan_avg_fame:
+            status_label = t("my_activity_training_status_active", lang)
+            reason_line = t("my_activity_training_reason_above_avg", lang)
+        else:
+            status_label = t("my_activity_training_status_inactive", lang)
+            reason_line = t("my_activity_training_reason_below_avg", lang)
+    elif current_decks == 0:
         status_label = t("my_activity_status_danger", lang)
         reason_line = t("my_activity_reason_zero_decks", lang)
     elif avg_user_decks < clan_avg_decks and avg_user_fame < clan_avg_fame:
@@ -2141,75 +2311,140 @@ async def build_my_activity_report(
                 )
             )
 
-    lines = [
-        t("my_activity_title", lang),
-        t("my_activity_player_line", lang, player=player_name),
-        t("my_activity_tag_line", lang, tag=player_tag),
-        t("my_activity_clan_line", lang, clan=clan_tag),
-        "",
-        SEPARATOR_LINE,
-        t(
-            "my_activity_current_week_line",
-            lang,
-            season=season_id,
-            week=section_index + 1,
-            war_type=colosseum_label,
-        ),
-        t("my_activity_decks_used_line", lang, decks=current_decks),
-        t("my_activity_fame_line", lang, fame=current_fame),
-        last_seen_line,
-        "",
-        t(
-            "my_activity_rank_decks_line",
-            lang,
-            rank=rank_decks,
-            members=member_count,
-        ),
-        t(
-            "my_activity_rank_fame_line",
-            lang,
-            rank=rank_fame,
-            members=member_count,
-        ),
-        "",
-        SEPARATOR_LINE,
-        t("my_activity_summary_header", lang),
-        t(
-            "my_activity_summary_active",
-            lang,
-            active=active_weeks,
-            total=weeks_available,
-        ),
-        t("my_activity_summary_low", lang, count=low_weeks),
-        t("my_activity_summary_zero", lang, count=zero_weeks),
-        "",
-        t("my_activity_avg_decks_line", lang, avg=avg_user_decks_str),
-        t("my_activity_avg_fame_line", lang, avg=avg_user_fame_str),
-        "",
-        SEPARATOR_LINE,
-        t("my_activity_compare_header", lang),
-        t(
-            "my_activity_compare_decks_line",
-            lang,
-            you=avg_user_decks_str,
-            clan=clan_avg_decks_str,
-            compare=decks_comp,
-        ),
-        t(
-            "my_activity_compare_fame_line",
-            lang,
-            you=avg_user_fame_str,
-            clan=clan_avg_fame_str,
-            compare=fame_comp,
-        ),
-        donation_compare_line,
-        "",
-        SEPARATOR_LINE,
-        *donation_lines,
-        "",
-        SEPARATOR_LINE,
-        t("my_activity_status_line", lang, status=status_label),
-        reason_line,
-    ]
+    if training:
+        training_lines = [
+            t(
+                "my_activity_training_week_line",
+                lang,
+                war_type=colosseum_label,
+            ),
+            t("my_activity_training_notice", lang),
+        ]
+        if last_completed_week_line:
+            training_lines.append(last_completed_week_line)
+        if last_completed_stats_line:
+            training_lines.append(last_completed_stats_line)
+        if last_completed_rank_line:
+            training_lines.append(last_completed_rank_line)
+        training_lines.append(last_seen_line)
+        lines = [
+            t("my_activity_title", lang),
+            t("my_activity_player_line", lang, player=player_name),
+            t("my_activity_tag_line", lang, tag=player_tag),
+            t("my_activity_clan_line", lang, clan=clan_tag),
+            "",
+            SEPARATOR_LINE,
+            *training_lines,
+            "",
+            SEPARATOR_LINE,
+            t("my_activity_summary_header", lang),
+            t(
+                "my_activity_summary_active",
+                lang,
+                active=active_weeks,
+                total=weeks_available,
+            ),
+            t("my_activity_summary_low", lang, count=low_weeks),
+            t("my_activity_summary_zero", lang, count=zero_weeks),
+            "",
+            t("my_activity_avg_decks_line", lang, avg=avg_user_decks_str),
+            t("my_activity_avg_fame_line", lang, avg=avg_user_fame_str),
+            "",
+            SEPARATOR_LINE,
+            t("my_activity_compare_header", lang),
+            t(
+                "my_activity_compare_decks_line",
+                lang,
+                you=avg_user_decks_str,
+                clan=clan_avg_decks_str,
+                compare=decks_comp,
+            ),
+            t(
+                "my_activity_compare_fame_line",
+                lang,
+                you=avg_user_fame_str,
+                clan=clan_avg_fame_str,
+                compare=fame_comp,
+            ),
+            donation_compare_line,
+            "",
+            SEPARATOR_LINE,
+            *donation_lines,
+            "",
+            SEPARATOR_LINE,
+            t("my_activity_status_line", lang, status=status_label),
+            reason_line,
+        ]
+    else:
+        lines = [
+            t("my_activity_title", lang),
+            t("my_activity_player_line", lang, player=player_name),
+            t("my_activity_tag_line", lang, tag=player_tag),
+            t("my_activity_clan_line", lang, clan=clan_tag),
+            "",
+            SEPARATOR_LINE,
+            t(
+                "my_activity_current_week_line",
+                lang,
+                season=season_id,
+                week=section_index + 1,
+                war_type=colosseum_label,
+            ),
+            t("my_activity_decks_used_line", lang, decks=current_decks),
+            t("my_activity_fame_line", lang, fame=current_fame),
+            last_seen_line,
+            "",
+            t(
+                "my_activity_rank_decks_line",
+                lang,
+                rank=rank_decks,
+                members=member_count,
+            ),
+            t(
+                "my_activity_rank_fame_line",
+                lang,
+                rank=rank_fame,
+                members=member_count,
+            ),
+            "",
+            SEPARATOR_LINE,
+            t("my_activity_summary_header", lang),
+            t(
+                "my_activity_summary_active",
+                lang,
+                active=active_weeks,
+                total=weeks_available,
+            ),
+            t("my_activity_summary_low", lang, count=low_weeks),
+            t("my_activity_summary_zero", lang, count=zero_weeks),
+            "",
+            t("my_activity_avg_decks_line", lang, avg=avg_user_decks_str),
+            t("my_activity_avg_fame_line", lang, avg=avg_user_fame_str),
+            "",
+            SEPARATOR_LINE,
+            t("my_activity_compare_header", lang),
+            t(
+                "my_activity_compare_decks_line",
+                lang,
+                you=avg_user_decks_str,
+                clan=clan_avg_decks_str,
+                compare=decks_comp,
+            ),
+            t(
+                "my_activity_compare_fame_line",
+                lang,
+                you=avg_user_fame_str,
+                clan=clan_avg_fame_str,
+                compare=fame_comp,
+            ),
+            donation_compare_line,
+            "",
+            SEPARATOR_LINE,
+            *donation_lines,
+            "",
+            SEPARATOR_LINE,
+            t("my_activity_status_line", lang, status=status_label),
+            reason_line,
+        ]
 
     return "\n".join(lines)
