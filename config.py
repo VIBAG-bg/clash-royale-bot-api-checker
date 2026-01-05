@@ -68,6 +68,8 @@ REVIVED_DECKS_THRESHOLD: int = int(
 KICK_SHORTLIST_LIMIT: int = int(
     get_env_var("KICK_SHORTLIST_LIMIT", default="3", required=False)
 )
+KICK_COLOSSEUM_SAVE_FAME: int = 1500
+KICK_COLOSSEUM_SAVE_DECKS: int = 8
 
 # Donation configuration
 DONATION_WEEKS_WINDOW: int = int(

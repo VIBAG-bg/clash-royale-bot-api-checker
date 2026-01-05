@@ -15,6 +15,8 @@ from config import (
     DONATION_REVIVE_WTD_THRESHOLD,
     DONATION_WEEKS_WINDOW,
     DONATION_BOX_THRESHOLD,
+    KICK_COLOSSEUM_SAVE_DECKS,
+    KICK_COLOSSEUM_SAVE_FAME,
     KICK_SHORTLIST_LIMIT,
     LAST_SEEN_FLAG_LIMIT,
     LAST_SEEN_RED_DAYS,
@@ -34,6 +36,7 @@ from config import (
 )
 from db import (
     PlayerParticipation,
+    RiverRaceState,
     get_app_state,
     get_current_member_tags,
     get_current_members_snapshot,
@@ -1342,6 +1345,7 @@ async def build_kick_shortlist_report(
             "last_week_decks": last_decks,
             "donations_wtd": wtd_donations,
             "days_absent": days_absent,
+            "weeks_played": weeks_played,
         }
         if last_decks >= REVIVED_DECKS_THRESHOLD:
             warnings.append(entry)
@@ -1358,6 +1362,84 @@ async def build_kick_shortlist_report(
             candidates.append(entry)
 
     shortlist = candidates[: max(KICK_SHORTLIST_LIMIT, 0)]
+    saved_by_colosseum: list[dict[str, object]] = []
+    if shortlist:
+        colosseum_stats: dict[str, dict[str, int]] = {}
+        week_pairs = [
+            (int(season_id), int(section_index))
+            for season_id, section_index in weeks
+        ]
+        async with get_session() as session:
+            colosseum_result = await session.execute(
+                select(
+                    RiverRaceState.season_id,
+                    RiverRaceState.section_index,
+                )
+                .where(
+                    RiverRaceState.clan_tag == clan_tag,
+                    RiverRaceState.is_colosseum.is_(True),
+                    tuple_(
+                        RiverRaceState.season_id,
+                        RiverRaceState.section_index,
+                    ).in_(week_pairs),
+                )
+                .order_by(
+                    RiverRaceState.season_id.desc(),
+                    RiverRaceState.section_index.desc(),
+                )
+                .limit(1)
+            )
+            colosseum_week = colosseum_result.first()
+            if colosseum_week:
+                colosseum_tags = {
+                    row.get("player_tag")
+                    for row in shortlist
+                    if row.get("player_tag")
+                }
+                if colosseum_tags:
+                    stats_result = await session.execute(
+                        select(
+                            PlayerParticipation.player_tag,
+                            PlayerParticipation.decks_used,
+                            PlayerParticipation.fame,
+                        ).where(
+                            PlayerParticipation.season_id
+                            == int(colosseum_week.season_id),
+                            PlayerParticipation.section_index
+                            == int(colosseum_week.section_index),
+                            PlayerParticipation.player_tag.in_(colosseum_tags),
+                        )
+                    )
+                    colosseum_stats = {
+                        row.player_tag: {
+                            "decks_used": int(row.decks_used),
+                            "fame": int(row.fame),
+                        }
+                        for row in stats_result.all()
+                    }
+
+        if colosseum_stats:
+            filtered_shortlist: list[dict[str, object]] = []
+            for row in shortlist:
+                tag = row.get("player_tag")
+                stats = colosseum_stats.get(tag)
+                if stats and (
+                    stats["fame"] >= KICK_COLOSSEUM_SAVE_FAME
+                    or stats["decks_used"] >= KICK_COLOSSEUM_SAVE_DECKS
+                ):
+                    saved_by_colosseum.append(
+                        {
+                            "player_tag": tag,
+                            "player_name": row.get("player_name")
+                            or t("unknown", lang),
+                            "weeks_played": row.get("weeks_played", 0),
+                            "decks_used": stats["decks_used"],
+                            "fame": stats["fame"],
+                        }
+                    )
+                else:
+                    filtered_shortlist.append(row)
+            shortlist = filtered_shortlist
     if shortlist:
         lines.append(t("kick_candidates_header", lang))
         for index, row in enumerate(shortlist, 1):
@@ -1373,7 +1455,9 @@ async def build_kick_shortlist_report(
             ):
                 flags.append("📦")
             prefix = f"{' '.join(flags)} " if flags else ""
-            display_name = f"{prefix}{row.get('player_name')}"
+            weeks_played = int(row.get("weeks_played") or 0)
+            wp = f" (war:{weeks_played}w)" if weeks_played > 0 else ""
+            display_name = f"{prefix}{row.get('player_name')}{wp}"
             name = _format_name(display_name, lang).rstrip()
             donation_suffix = _format_donation_suffix(
                 row.get("player_tag"),
@@ -1395,6 +1479,30 @@ async def build_kick_shortlist_report(
     else:
         lines.append(t("kick_shortlist_none", lang))
 
+    if saved_by_colosseum:
+        lines.extend(
+            [
+                "",
+                t("kick_saved_colosseum_header", lang),
+            ]
+        )
+        for index, row in enumerate(saved_by_colosseum, 1):
+            player_name = row.get("player_name") or t("unknown", lang)
+            weeks_played = int(row.get("weeks_played") or 0)
+            wp = f" (war:{weeks_played}w)" if weeks_played > 0 else ""
+            display_name = f"{player_name}{wp}"
+            name = _format_name(display_name, lang).rstrip()
+            lines.append(
+                t(
+                    "kick_saved_colosseum_line",
+                    lang,
+                    index=index,
+                    name=name,
+                    decks=row.get("decks_used", 0),
+                    fame=row.get("fame", 0),
+                )
+            )
+
     if warnings:
         lines.extend(
             [
@@ -1403,7 +1511,10 @@ async def build_kick_shortlist_report(
             ]
         )
         for index, row in enumerate(warnings, 1):
-            name = _format_name(row.get("player_name"), lang).rstrip()
+            weeks_played = int(row.get("weeks_played") or 0)
+            wp = f" (war:{weeks_played}w)" if weeks_played > 0 else ""
+            display_name = f"{row.get('player_name')}{wp}"
+            name = _format_name(display_name, lang).rstrip()
             donation_suffix = _format_donation_suffix(
                 row.get("player_tag"),
                 donations_wtd,
@@ -1430,7 +1541,10 @@ async def build_kick_shortlist_report(
             ]
         )
         for index, row in enumerate(donation_warnings, 1):
-            name = _format_name(row.get("player_name"), lang).rstrip()
+            weeks_played = int(row.get("weeks_played") or 0)
+            wp = f" (war:{weeks_played}w)" if weeks_played > 0 else ""
+            display_name = f"{row.get('player_name')}{wp}"
+            name = _format_name(display_name, lang).rstrip()
             donation_suffix = _format_donation_suffix(
                 row.get("player_tag"),
                 donations_wtd,
@@ -1600,6 +1714,29 @@ async def build_current_war_report(
         else t("current_war_river_race", lang)
     )
 
+    if period_type_upper == "TRAINING":
+        lines = [
+            t("current_war_title", lang),
+            t("current_war_clan_line", lang, clan=clan_tag),
+            t("current_war_data_notice", lang),
+            t("current_war_last_update", lang, last_update=last_update),
+            "",
+            SEPARATOR_LINE,
+            t(
+                "current_war_week_line",
+                lang,
+                season=season_id,
+                week=section_index + 1,
+                war_type=colosseum_label,
+            ),
+            phase_line,
+            t("current_war_remaining_line", lang, remaining=remaining_display),
+            "",
+            SEPARATOR_LINE,
+            t("current_war_training_notice", lang),
+        ]
+        return "\n".join(lines)
+
     member_tags = await get_current_member_tags(clan_tag)
     total_decks = 0
     total_fame = 0
@@ -1684,7 +1821,7 @@ async def build_current_war_report(
             "current_war_week_line",
             lang,
             season=season_id,
-            week=section_index,
+            week=section_index + 1,
             war_type=colosseum_label,
         ),
         phase_line,
@@ -2015,7 +2152,7 @@ async def build_my_activity_report(
             "my_activity_current_week_line",
             lang,
             season=season_id,
-            week=section_index,
+            week=section_index + 1,
             war_type=colosseum_label,
         ),
         t("my_activity_decks_used_line", lang, decks=current_decks),

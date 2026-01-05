@@ -62,7 +62,13 @@ async def get_latest_riverrace_log_info(clan_tag: str | None = None) -> dict[str
     }
 
 
-async def import_riverrace_log(weeks: int, clan_tag: str | None = None) -> tuple[int, int]:
+async def import_riverrace_log(
+    weeks: int,
+    clan_tag: str | None = None,
+    *,
+    season_id: int | None = None,
+    section_index: int | None = None,
+) -> tuple[int, int]:
     target_tag = clan_tag or CLAN_TAG
     api_client = await get_api_client()
     items = await api_client.get_river_race_log(target_tag)
@@ -71,7 +77,26 @@ async def import_riverrace_log(weeks: int, clan_tag: str | None = None) -> tuple
     if not items:
         return 0, 0
 
-    items = items[: max(0, weeks)]
+    if season_id is not None and section_index is not None:
+        target_season = int(season_id)
+        target_section = int(section_index)
+        matching_item = None
+        for item in items:
+            item_season = int(item.get("seasonId", 0) or 0)
+            item_section = int(item.get("sectionIndex", 0) or 0)
+            if item_season == target_season and item_section == target_section:
+                matching_item = item
+                break
+        if not matching_item:
+            logger.warning(
+                "No River Race log entry found for season=%s section=%s",
+                target_season,
+                target_section,
+            )
+            return 0, 0
+        items = [matching_item]
+    else:
+        items = items[: max(0, weeks)]
     weeks_imported = 0
     players_imported = 0
 

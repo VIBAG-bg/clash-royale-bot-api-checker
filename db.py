@@ -646,11 +646,23 @@ async def _upsert_player_participation(
         set_={
             "player_name": stmt.excluded.player_name,
             "is_colosseum": stmt.excluded.is_colosseum,
-            "fame": stmt.excluded.fame,
-            "repair_points": stmt.excluded.repair_points,
-            "boat_attacks": stmt.excluded.boat_attacks,
-            "decks_used": stmt.excluded.decks_used,
-            "decks_used_today": stmt.excluded.decks_used_today,
+            "fame": func.greatest(PlayerParticipation.fame, stmt.excluded.fame),
+            "repair_points": func.greatest(
+                PlayerParticipation.repair_points, stmt.excluded.repair_points
+            ),
+            "boat_attacks": func.greatest(
+                PlayerParticipation.boat_attacks, stmt.excluded.boat_attacks
+            ),
+            "decks_used": func.greatest(
+                PlayerParticipation.decks_used, stmt.excluded.decks_used
+            ),
+            "decks_used_today": case(
+                (
+                    stmt.excluded.decks_used >= PlayerParticipation.decks_used,
+                    stmt.excluded.decks_used_today,
+                ),
+                else_=PlayerParticipation.decks_used_today,
+            ),
             "updated_at": now,
         },
     )
@@ -729,11 +741,28 @@ async def _upsert_player_participation_daily(
         ],
         set_={
             "player_name": stmt.excluded.player_name,
-            "fame": stmt.excluded.fame,
-            "repair_points": stmt.excluded.repair_points,
-            "boat_attacks": stmt.excluded.boat_attacks,
-            "decks_used": stmt.excluded.decks_used,
-            "decks_used_today": stmt.excluded.decks_used_today,
+            "fame": func.greatest(
+                PlayerParticipationDaily.fame, stmt.excluded.fame
+            ),
+            "repair_points": func.greatest(
+                PlayerParticipationDaily.repair_points,
+                stmt.excluded.repair_points,
+            ),
+            "boat_attacks": func.greatest(
+                PlayerParticipationDaily.boat_attacks,
+                stmt.excluded.boat_attacks,
+            ),
+            "decks_used": func.greatest(
+                PlayerParticipationDaily.decks_used, stmt.excluded.decks_used
+            ),
+            "decks_used_today": case(
+                (
+                    stmt.excluded.decks_used
+                    >= PlayerParticipationDaily.decks_used,
+                    stmt.excluded.decks_used_today,
+                ),
+                else_=PlayerParticipationDaily.decks_used_today,
+            ),
             "updated_at": now,
         },
     )
