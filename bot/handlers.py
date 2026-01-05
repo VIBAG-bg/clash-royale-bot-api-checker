@@ -116,6 +116,7 @@ from reports import (
     build_my_activity_report,
     build_promotion_candidates_report,
     build_rolling_report,
+    build_top_players_report,
     build_weekly_report,
 )
 from riverrace_import import get_last_completed_week, get_last_completed_weeks
@@ -1226,6 +1227,7 @@ async def cmd_help(message: Message) -> None:
         t("help_cmd_ping", lang),
         t("help_cmd_war", lang),
         t("help_cmd_war8", lang),
+        t("help_cmd_top", lang),
         t("help_cmd_war_all", lang),
         t("help_cmd_current_war", lang),
         t("help_cmd_my_activity", lang),
@@ -3142,6 +3144,31 @@ async def cmd_war8(message: Message) -> None:
         return
     report = await build_rolling_report(weeks, clan_tag, lang=lang)
     await message.answer(report, parse_mode=None)
+
+
+@router.message(Command("top"))
+async def cmd_top(message: Message) -> None:
+    """Show top players by decks and fame for the last 10 completed weeks."""
+    lang = await _get_lang_for_message(message)
+    clan_tag = _require_clan_tag()
+    if not clan_tag:
+        await message.answer(t("clan_tag_not_configured", lang), parse_mode=None)
+        return
+    n = 10
+    if message.text:
+        parts = message.text.split(maxsplit=1)
+        if len(parts) > 1:
+            try:
+                n = int(parts[1].strip())
+            except Exception:
+                n = 10
+    n = max(1, min(50, n))
+    report = await build_top_players_report(
+        clan_tag, lang=lang, limit=n, window_weeks=10, min_tenure_weeks=6
+    )
+    await message.answer(
+        report, parse_mode=None, disable_web_page_preview=True
+    )
 
 
 @router.message(Command("war_all"))

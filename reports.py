@@ -44,12 +44,15 @@ from db import (
     get_alltime_weeks_played,
     get_last_weeks_from_db,
     get_last_seen_map,
+    get_latest_membership_date,
     get_latest_river_race_state,
+    get_member_first_seen_dates,
     get_participation_week_counts,
     get_river_race_state_for_week,
     get_donations_weekly_sums,
     get_war_stats_for_weeks,
     get_rolling_leaderboard,
+    get_rolling_summary,
     get_session,
     get_top_donors_window,
     get_top_donors_wtd,
@@ -440,6 +443,132 @@ async def build_rolling_report(
                 clan_tag, DONATION_WEEKS_WINDOW, lang=lang
             )
         )
+    return "\n".join(lines)
+
+
+async def build_top_players_report(
+    clan_tag: str,
+    *,
+    lang: str = DEFAULT_LANG,
+    limit: int = 10,
+    window_weeks: int = 10,
+    min_tenure_weeks: int = 6,
+) -> str:
+    weeks = await get_last_weeks_from_db(clan_tag, limit=window_weeks)
+    if not weeks:
+        weeks = await get_last_completed_weeks(window_weeks, clan_tag)
+    if not weeks:
+        return t("top_no_data", lang)
+
+    current_tags = await get_current_member_tags(clan_tag)
+    if not current_tags:
+        return t("top_no_data", lang)
+
+    first_seen_map = await get_member_first_seen_dates(
+        clan_tag, player_tags=current_tags
+    )
+    latest_date = await get_latest_membership_date(clan_tag)
+    if latest_date is None:
+        latest_date = datetime.now(timezone.utc).date()
+    min_days = min_tenure_weeks * 7
+    eligible_tags = {
+        tag
+        for tag in current_tags
+        if tag in first_seen_map
+        and (latest_date - first_seen_map[tag]).days >= min_days
+    }
+    if not eligible_tags:
+        return t("top_no_eligible", lang, weeks=min_tenure_weeks)
+
+    summary_rows = await get_rolling_summary(weeks, player_tags=eligible_tags)
+    if not summary_rows:
+        return t("top_no_data", lang)
+
+    war_stats = await get_war_stats_for_weeks(clan_tag, weeks)
+    rows: list[dict[str, object]] = []
+    for row in summary_rows:
+        tag = row.get("player_tag")
+        if not tag:
+            continue
+        name = row.get("player_name") or tag or t("unknown", lang)
+        decks_used_total = int(row.get("decks_used", 0))
+        fame_total = int(row.get("fame", 0))
+        weeks_played = int(war_stats.get(tag, {}).get("weeks_played", 0))
+        rows.append(
+            {
+                "player_tag": tag,
+                "player_name": name,
+                "decks_used_total": decks_used_total,
+                "fame_total": fame_total,
+                "weeks_played": weeks_played,
+            }
+        )
+
+    if not rows:
+        return t("top_no_data", lang)
+
+    decks_sorted = sorted(
+        rows,
+        key=lambda r: (
+            -int(r["decks_used_total"]),
+            -int(r["fame_total"]),
+            str(r["player_name"]),
+        ),
+    )
+    fame_sorted = sorted(
+        rows,
+        key=lambda r: (
+            -int(r["fame_total"]),
+            -int(r["decks_used_total"]),
+            str(r["player_name"]),
+        ),
+    )
+
+    limit = max(1, limit)
+    window = len(weeks)
+    weeks_label = ", ".join(f"{season}/{section + 1}" for season, section in weeks)
+    decks_sorted = decks_sorted[:limit]
+    fame_sorted = fame_sorted[:limit]
+
+    lines = [
+        t("top_title", lang, window=window),
+        t("top_filter_line", lang, weeks=min_tenure_weeks),
+        t(
+            "top_weeks_line",
+            lang,
+            weeks_label=weeks_label if weeks_label else str(window),
+        ),
+        "",
+        t("top_decks_header", lang, n=len(decks_sorted)),
+    ]
+    for index, row in enumerate(decks_sorted, 1):
+        lines.append(
+            t(
+                "top_entry_line",
+                lang,
+                index=index,
+                name=row["player_name"],
+                decks=row["decks_used_total"],
+                fame=row["fame_total"],
+                played=row["weeks_played"],
+                window=window,
+            )
+        )
+    lines.extend(["", t("top_fame_header", lang, n=len(fame_sorted))])
+    for index, row in enumerate(fame_sorted, 1):
+        lines.append(
+            t(
+                "top_entry_line",
+                lang,
+                index=index,
+                name=row["player_name"],
+                decks=row["decks_used_total"],
+                fame=row["fame_total"],
+                played=row["weeks_played"],
+                window=window,
+            )
+        )
+
     return "\n".join(lines)
 
 

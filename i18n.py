@@ -51,6 +51,7 @@ TEXT = {
         "/inactive - неактивные игроки\n"
         "/war - недельный отчёт\n"
         "/war8 - отчёт за 8 недель\n"
+        "/top [N] - ??? ?? 10 ?????? (?????? 6+ ?????? ? ?????)\n"
         "/list_for_kick - список на исключение\n"
         "/current_war - текущая неделя\n"
         "/my_activity - ваша активность\n"
@@ -66,6 +67,7 @@ TEXT = {
         "help_cmd_ping": "/ping - проверка связи",
         "help_cmd_war": "/war - отчёт за последнюю законченую неделю",
         "help_cmd_war8": "/war8 - отчёт за 8 недель",
+        "help_cmd_top": "/top [N] - ??? ?? 10 ?????? (?????? 6+ ?????? ? ?????)",
         "help_cmd_war_all": "/war_all - war + war8 + список на исключение",
         "help_cmd_current_war": "/current_war - текущая неделя",
         "help_cmd_my_activity": "/my_activity - ваша активность",
@@ -452,6 +454,14 @@ TEXT = {
         "rolling_report_title": "📊 Общий отчёт — за {weeks} недель",
         "rolling_report_weeks": "Недели: {weeks}",
         "rolling_report_weeks_na": "Недели: н/д",
+        "top_title": "?? ??? ??????? ? ????????? {window} ??????",
+        "top_filter_line": "??????: ? ????? ? {weeks} ??????",
+        "top_weeks_line": "????: {weeks_label}",
+        "top_decks_header": "?? ??? ?? ??????? ? ?????? {n}",
+        "top_fame_header": "?? ??? ?? ????? ? ?????? {n}",
+        "top_entry_line": "{index}. {name} ? ??{decks}  ??{fame}  ({played}/{window} ???.)",
+        "top_no_data": "??? ?????? ?? ????????? ??????.",
+        "top_no_eligible": "??? ?????????? ???????: ????? ???? ? ????? ? {weeks} ??????.",
         "scheduled_unmute_notice": "🔈 Снятие мута: {user}",
         "unable_approve_application": "Не удалось одобрить заявку.",
         "unable_reject_application": "Не удалось отклонить заявку.",
@@ -540,6 +550,7 @@ TEXT = {
         "/inactive - inactive players\n"
         "/war - weekly report\n"
         "/war8 - 8-week report\n"
+        "/top [N] - top for last 10 weeks (6+ weeks in clan)\n"
         "/list_for_kick - kick shortlist\n"
         "/current_war - current week\n"
         "/my_activity - your activity\n"
@@ -555,6 +566,7 @@ TEXT = {
         "help_cmd_ping": "/ping - health check",
         "help_cmd_war": "/war - report for the last completed week",
         "help_cmd_war8": "/war8 - last 8 weeks report",
+        "help_cmd_top": "/top [N] - top for last 10 weeks (6+ weeks in clan)",
         "help_cmd_war_all": "/war_all - war + war8 + kick list",
         "help_cmd_current_war": "/current_war - current week snapshot",
         "help_cmd_my_activity": "/my_activity - your activity",
@@ -941,6 +953,14 @@ TEXT = {
         "rolling_report_title": "📊 Overall report — for {weeks} weeks",
         "rolling_report_weeks": "Weeks: {weeks}",
         "rolling_report_weeks_na": "Weeks: n/a",
+        "top_title": "?? Top players ? last {window} weeks",
+        "top_filter_line": "Eligible: in clan ? {weeks} weeks",
+        "top_weeks_line": "Window: {weeks_label}",
+        "top_decks_header": "?? Top by decks ? first {n}",
+        "top_fame_header": "?? Top by fame ? first {n}",
+        "top_entry_line": "{index}. {name} ? ??{decks}  ??{fame}  ({played}/{window} wks)",
+        "top_no_data": "No data for the last weeks.",
+        "top_no_eligible": "No eligible players: must be in clan ? {weeks} weeks.",
         "scheduled_unmute_notice": "🔈 Mute expired: {user}",
         "unable_approve_application": "Unable to approve application.",
         "unable_reject_application": "Unable to reject application.",
@@ -1029,6 +1049,7 @@ TEXT = {
         "/inactive - неактивні гравці\n"
         "/war - тижневий звіт\n"
         "/war8 - звіт за 8 тижнів\n"
+        "/top [N] - ??? ?? 10 ?????? (?????? 6+ ?????? ? ?????)\n"
         "/list_for_kick - список на виключення\n"
         "/current_war - поточний тиждень\n"
         "/my_activity - ваша активність\n"
@@ -1044,6 +1065,7 @@ TEXT = {
         "help_cmd_ping": "/ping - перевірка зв’язку",
         "help_cmd_war": "/war - звіт за останній завершений тиждень",
         "help_cmd_war8": "/war8 - звіт за 8 тижнів",
+        "help_cmd_top": "/top [N] - ??? ?? 10 ?????? (?????? 6+ ?????? ? ?????)",
         "help_cmd_war_all": "/war_all - war + war8 + список на виключення",
         "help_cmd_current_war": "/current_war - поточний тиждень",
         "help_cmd_my_activity": "/my_activity - ваша активність",
@@ -1430,6 +1452,14 @@ TEXT = {
         "rolling_report_title": "📊 Загальний звіт — за {weeks} тижнів",
         "rolling_report_weeks": "Тижні: {weeks}",
         "rolling_report_weeks_na": "Тижні: н/д",
+        "top_title": "?? ??? ??????? ? ??????? {window} ??????",
+        "top_filter_line": "??????: ? ????? ? {weeks} ??????",
+        "top_weeks_line": "?????: {weeks_label}",
+        "top_decks_header": "?? ??? ?? ???????? ? ????? {n}",
+        "top_fame_header": "?? ??? ?? ?????? ? ????? {n}",
+        "top_entry_line": "{index}. {name} ? ??{decks}  ??{fame}  ({played}/{window} ???.)",
+        "top_no_data": "????? ????? ?? ??????? ?????.",
+        "top_no_eligible": "????? ??????????? ???????: ???????? ???? ? ????? ? {weeks} ??????.",
         "scheduled_unmute_notice": "🔈 Знято мут: {user}",
         "unable_approve_application": "Не вдалося схвалити заявку.",
         "unable_reject_application": "Не вдалося відхилити заявку.",
