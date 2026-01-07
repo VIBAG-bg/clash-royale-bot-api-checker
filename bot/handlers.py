@@ -208,6 +208,10 @@ def _mod_debug_state_key(chat_id: int) -> str:
     return f"mod_debug:{chat_id}"
 
 
+def _moderation_state_key(chat_id: int) -> str:
+    return f"moderation:{chat_id}"
+
+
 def _is_debug_admin(user_id: int) -> bool:
     return user_id in ADMIN_TELEGRAM_IDS
 
@@ -377,6 +381,18 @@ async def evaluate_moderation(
             "reason": "disabled",
             "debug": {},
         }
+    try:
+        state = await get_app_state(_moderation_state_key(message.chat.id))
+        if state and state.get("enabled") is False:
+            return {
+                "should_check": False,
+                "violation": "none",
+                "should_delete": False,
+                "reason": "disabled_by_command",
+                "debug": {},
+            }
+    except Exception:
+        pass
     settings = await get_chat_settings(
         message.chat.id,
         defaults={
@@ -2454,6 +2470,56 @@ async def cmd_mod_debug_off(message: Message) -> None:
 
     await delete_app_state(_mod_debug_state_key(message.chat.id))
     await message.answer(t("mod_debug_disabled", lang), parse_mode=None)
+
+
+@router.message(Command("moderation_on"))
+async def cmd_moderation_on(message: Message) -> None:
+    lang = await _get_lang_for_message(message)
+    if message.from_user is None:
+        await message.answer(t("unable_verify_permissions", lang), parse_mode=None)
+        return
+    if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await message.answer(t("use_command_in_group", lang), parse_mode=None)
+        return
+    try:
+        if not await _is_admin_user(message, message.from_user.id):
+            await message.answer(t("not_allowed", lang), parse_mode=None)
+            return
+    except Exception as e:
+        logger.error("Failed to check admin status: %s", e, exc_info=True)
+        await message.answer(t("unable_verify_admin_status", lang), parse_mode=None)
+        return
+
+    await set_app_state(
+        _moderation_state_key(message.chat.id),
+        {"enabled": True, "updated_at": datetime.now(timezone.utc).isoformat()},
+    )
+    await message.answer(t("moderation_enabled", lang), parse_mode=None)
+
+
+@router.message(Command("moderation_off"))
+async def cmd_moderation_off(message: Message) -> None:
+    lang = await _get_lang_for_message(message)
+    if message.from_user is None:
+        await message.answer(t("unable_verify_permissions", lang), parse_mode=None)
+        return
+    if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await message.answer(t("use_command_in_group", lang), parse_mode=None)
+        return
+    try:
+        if not await _is_admin_user(message, message.from_user.id):
+            await message.answer(t("not_allowed", lang), parse_mode=None)
+            return
+    except Exception as e:
+        logger.error("Failed to check admin status: %s", e, exc_info=True)
+        await message.answer(t("unable_verify_admin_status", lang), parse_mode=None)
+        return
+
+    await set_app_state(
+        _moderation_state_key(message.chat.id),
+        {"enabled": False, "updated_at": datetime.now(timezone.utc).isoformat()},
+    )
+    await message.answer(t("moderation_disabled", lang), parse_mode=None)
 
 
 @router.message(Command("modlog"))
