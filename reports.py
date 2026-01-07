@@ -47,9 +47,7 @@ from db import (
     get_alltime_weeks_played,
     get_last_weeks_from_db,
     get_last_seen_map,
-    get_latest_membership_date,
     get_latest_river_race_state,
-    get_member_first_seen_dates,
     get_participation_week_counts,
     get_river_race_state_for_week,
     get_donations_weekly_sums,
@@ -457,7 +455,26 @@ async def build_top_players_report(
     window_weeks: int = 10,
     min_tenure_weeks: int = 6,
 ) -> str:
-    weeks = await get_last_weeks_from_db(clan_tag, limit=window_weeks)
+    weeks: list[tuple[int, int]] = []
+    async with get_session() as session:
+        completed_result = await session.execute(
+            select(
+                RiverRaceState.season_id,
+                RiverRaceState.section_index,
+            )
+            .where(
+                RiverRaceState.clan_tag == clan_tag,
+                RiverRaceState.period_type == "completed",
+            )
+            .order_by(
+                RiverRaceState.season_id.desc(),
+                RiverRaceState.section_index.desc(),
+            )
+        )
+        weeks = [
+            (int(row.season_id), int(row.section_index))
+            for row in completed_result.all()
+        ]
     if not weeks:
         weeks = await get_last_completed_weeks(window_weeks, clan_tag)
     if not weeks:
@@ -467,18 +484,12 @@ async def build_top_players_report(
     if not current_tags:
         return t("top_no_data", lang)
 
-    first_seen_map = await get_member_first_seen_dates(
-        clan_tag, player_tags=current_tags
-    )
-    latest_date = await get_latest_membership_date(clan_tag)
-    if latest_date is None:
-        latest_date = datetime.now(timezone.utc).date()
-    min_days = min_tenure_weeks * 7
+    war_stats = await get_war_stats_for_weeks(clan_tag, weeks)
     eligible_tags = {
         tag
         for tag in current_tags
-        if tag in first_seen_map
-        and (latest_date - first_seen_map[tag]).days >= min_days
+        if int(war_stats.get(tag, {}).get("weeks_played", 0))
+        >= min_tenure_weeks
     }
     if not eligible_tags:
         return t("top_no_eligible", lang, weeks=min_tenure_weeks)
@@ -487,7 +498,6 @@ async def build_top_players_report(
     if not summary_rows:
         return t("top_no_data", lang)
 
-    war_stats = await get_war_stats_for_weeks(clan_tag, weeks)
     rows: list[dict[str, object]] = []
     for row in summary_rows:
         tag = row.get("player_tag")
