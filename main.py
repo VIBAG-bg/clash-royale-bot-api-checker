@@ -38,8 +38,10 @@ from db import (
     get_donation_week_start_date,
     get_colosseum_index_for_season,
     get_app_state,
+    delete_app_state,
     get_enabled_clan_chats,
     get_first_snapshot_date_for_week,
+    get_latest_river_race_place_snapshot,
     get_river_race_state_for_week,
     get_session,
     list_invite_candidates,
@@ -60,6 +62,7 @@ from db import (
     upsert_donations_weekly,
 )
 from reports import (
+    capture_clan_place_snapshot,
     build_kick_shortlist_report,
     build_promotion_candidates_report,
     build_rolling_report,
@@ -1064,6 +1067,143 @@ async def daily_reminder_task(bot: Bot) -> None:
             await asyncio.sleep(60)
 
 
+async def clan_place_watchdog_task(bot: Bot) -> None:
+    interval_seconds = 600
+    gap_threshold = 3000
+    gap_duration = timedelta(hours=3)
+    logger.info(
+        "Clan place watchdog started (interval %ss, gap %s, duration %s)",
+        interval_seconds,
+        gap_threshold,
+        gap_duration,
+    )
+    while True:
+        try:
+            if not CLAN_TAG:
+                await asyncio.sleep(interval_seconds)
+                continue
+            chat_ids = await get_enabled_clan_chats(CLAN_TAG)
+            if not chat_ids:
+                await asyncio.sleep(interval_seconds)
+                continue
+
+            snapshot = await capture_clan_place_snapshot(CLAN_TAG)
+            if not snapshot:
+                state = await get_app_state("active_week")
+                if isinstance(state, dict):
+                    season_id = _coerce_non_negative_int(state.get("season_id"))
+                    section_index = _coerce_non_negative_int(
+                        state.get("section_index")
+                    )
+                    if season_id is not None and section_index is not None:
+                        snapshot = await get_latest_river_race_place_snapshot(
+                            CLAN_TAG, season_id, section_index
+                        )
+            if not snapshot:
+                logger.info("Clan place watchdog skipped: no snapshot data")
+                await asyncio.sleep(interval_seconds)
+                continue
+
+            season_id = _coerce_non_negative_int(snapshot.get("season_id"))
+            section_index = _coerce_non_negative_int(snapshot.get("section_index"))
+            our_rank = _coerce_non_negative_int(snapshot.get("our_rank")) or 0
+            gap_to_above = snapshot.get("gap_to_above")
+            gap_value = _coerce_non_negative_int(gap_to_above)
+            if season_id is None or section_index is None:
+                logger.info("Clan place watchdog skipped: missing season/section")
+                await asyncio.sleep(interval_seconds)
+                continue
+            condition = (
+                our_rank > 1
+                and gap_value is not None
+                and gap_value >= gap_threshold
+            )
+            now = datetime.now(timezone.utc)
+            for chat_id in chat_ids:
+                gap_key = (
+                    f"clan_place_gap_started:{chat_id}:{season_id}:{section_index}"
+                )
+                if not condition:
+                    existing = await get_app_state(gap_key)
+                    if existing:
+                        await delete_app_state(gap_key)
+                        logger.info(
+                            "Clan place gap reset: chat=%s season=%s section=%s",
+                            chat_id,
+                            season_id,
+                            section_index,
+                        )
+                    continue
+                started_at = None
+                existing = await get_app_state(gap_key)
+                if isinstance(existing, dict):
+                    raw_started = existing.get("started_at")
+                    if isinstance(raw_started, str):
+                        try:
+                            started_at = datetime.fromisoformat(raw_started)
+                        except ValueError:
+                            started_at = None
+                if started_at is None:
+                    await set_app_state(
+                        gap_key,
+                        {"started_at": now.isoformat()},
+                    )
+                    logger.info(
+                        "Clan place gap tracking started: chat=%s season=%s section=%s gap=%s",
+                        chat_id,
+                        season_id,
+                        section_index,
+                        gap_value,
+                    )
+                    continue
+                if started_at.tzinfo is None:
+                    started_at = started_at.replace(tzinfo=timezone.utc)
+                if now - started_at < gap_duration:
+                    continue
+                day_key = f"clan_place_alert_sent:{chat_id}:{now.date().isoformat()}"
+                if await get_app_state(day_key):
+                    logger.info(
+                        "Clan place alert skipped (daily limit): chat=%s date=%s",
+                        chat_id,
+                        now.date().isoformat(),
+                    )
+                    continue
+                alert_text = t(
+                    "clan_place_alert_text",
+                    DEFAULT_LANG,
+                    rank=our_rank,
+                    gap=gap_value,
+                )
+                try:
+                    await bot.send_message(
+                        chat_id, alert_text, parse_mode=None
+                    )
+                    await set_app_state(
+                        day_key, {"sent_at": now.isoformat()}
+                    )
+                    logger.info(
+                        "Clan place alert sent: chat=%s rank=%s gap=%s",
+                        chat_id,
+                        our_rank,
+                        gap_value,
+                    )
+                except Exception as e:
+                    logger.error(
+                        "Failed to send clan place alert to %s: %s",
+                        chat_id,
+                        e,
+                    )
+            await asyncio.sleep(interval_seconds)
+        except asyncio.CancelledError:
+            logger.info("Clan place watchdog task cancelled")
+            break
+        except Exception as e:
+            logger.error(
+                "Error in clan place watchdog task: %s", e, exc_info=True
+            )
+            await asyncio.sleep(60)
+
+
 async def maybe_auto_invite(bot: Bot) -> None:
     if not AUTO_INVITE_ENABLED:
         return
@@ -1291,11 +1431,13 @@ async def lifespan(dispatcher: Dispatcher):
     reminder_task = None
     invite_task = None
     unmute_task = None
+    clan_place_task = None
     if REMINDER_ENABLED:
         reminder_task = asyncio.create_task(daily_reminder_task(BOT))
     if AUTO_INVITE_ENABLED:
         invite_task = asyncio.create_task(auto_invite_task(BOT))
     unmute_task = asyncio.create_task(scheduled_unmute_task(BOT))
+    clan_place_task = asyncio.create_task(clan_place_watchdog_task(BOT))
     logger.info("Scheduled unmute notification task started")
     logger.info("Background fetch task started")
     
@@ -1312,6 +1454,8 @@ async def lifespan(dispatcher: Dispatcher):
         invite_task.cancel()
     if unmute_task is not None:
         unmute_task.cancel()
+    if clan_place_task is not None:
+        clan_place_task.cancel()
     try:
         await fetch_task
     except asyncio.CancelledError:
@@ -1329,6 +1473,11 @@ async def lifespan(dispatcher: Dispatcher):
     if unmute_task is not None:
         try:
             await unmute_task
+        except asyncio.CancelledError:
+            pass
+    if clan_place_task is not None:
+        try:
+            await clan_place_task
         except asyncio.CancelledError:
             pass
     

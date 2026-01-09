@@ -48,6 +48,7 @@ from db import (
     get_last_weeks_from_db,
     get_last_seen_map,
     get_latest_river_race_state,
+    get_latest_river_race_place_snapshot,
     get_participation_week_counts,
     get_river_race_state_for_week,
     get_donations_weekly_sums,
@@ -59,6 +60,7 @@ from db import (
     get_top_donors_wtd,
     get_week_decks_map,
     get_week_leaderboard,
+    save_river_race_place_snapshot,
 )
 from riverrace_import import get_last_completed_weeks
 from i18n import DEFAULT_LANG, t
@@ -350,6 +352,267 @@ async def _resolve_active_week_key(
     if latest:
         return int(latest["season_id"]), int(latest["section_index"])
     return None
+
+
+def _extract_river_race_entries(
+    river_race: dict[str, object],
+) -> list[dict[str, object]]:
+    entries: list[dict[str, object]] = []
+    standings = river_race.get("standings")
+    if isinstance(standings, list):
+        for entry in standings:
+            if not isinstance(entry, dict):
+                continue
+            clan = entry.get("clan")
+            clan_data = clan if isinstance(clan, dict) else {}
+            tag = clan_data.get("tag") or entry.get("tag")
+            tag = _normalize_tag(tag)
+            if not tag:
+                continue
+            name = clan_data.get("name") or entry.get("name") or tag
+            fame = _coerce_int(clan_data.get("fame"))
+            if fame is None:
+                fame = _coerce_int(entry.get("fame")) or 0
+            rank = _coerce_int(entry.get("rank"))
+            if rank is None:
+                rank = _coerce_int(clan_data.get("rank"))
+            entries.append(
+                {
+                    "rank": rank,
+                    "tag": tag,
+                    "name": name,
+                    "fame": int(fame),
+                }
+            )
+    if entries:
+        return entries
+    clans = river_race.get("clans")
+    if isinstance(clans, list):
+        for clan in clans:
+            if not isinstance(clan, dict):
+                continue
+            tag = _normalize_tag(clan.get("tag"))
+            if not tag:
+                continue
+            name = clan.get("name") or tag
+            fame = _coerce_int(clan.get("fame")) or 0
+            rank = _coerce_int(clan.get("rank"))
+            entries.append(
+                {
+                    "rank": rank,
+                    "tag": tag,
+                    "name": name,
+                    "fame": int(fame),
+                }
+            )
+    return entries
+
+
+def _extract_total_from_top5(top5: list[dict[str, object]], our_rank: int) -> int:
+    if top5 and isinstance(top5[0], dict):
+        total = _coerce_int(top5[0].get("total"))
+        if total is not None and total > 0:
+            return total
+    return max(len(top5), our_rank)
+
+
+async def capture_clan_place_snapshot(
+    clan_tag: str,
+) -> dict[str, object] | None:
+    clan_key = _normalize_tag(clan_tag)
+    active_week = await _resolve_active_week_key(clan_key)
+    if not active_week:
+        return None
+    season_id, section_index = active_week
+    api_client = await get_api_client()
+    try:
+        river_race = await api_client.get_current_river_race(clan_key)
+    except ClashRoyaleAPIError as e:
+        logger.warning("Failed to fetch current river race: %s", e)
+        return None
+    except Exception as e:
+        logger.warning("Failed to fetch current river race: %s", e, exc_info=True)
+        return None
+    if not isinstance(river_race, dict):
+        return None
+    entries = _extract_river_race_entries(river_race)
+    if not entries:
+        return None
+
+    use_rank = all(entry.get("rank") is not None for entry in entries)
+    if use_rank:
+        entries_sorted = sorted(entries, key=lambda row: int(row["rank"]))
+        for entry in entries_sorted:
+            entry["rank"] = int(entry["rank"])
+    else:
+        entries_sorted = sorted(entries, key=lambda row: row["fame"], reverse=True)
+        for index, entry in enumerate(entries_sorted, 1):
+            entry["rank"] = index
+
+    total_clans = len(entries_sorted)
+    our_entry = next(
+        (entry for entry in entries_sorted if entry.get("tag") == clan_key),
+        None,
+    )
+    if not our_entry:
+        return None
+    our_rank = int(our_entry["rank"])
+    our_fame = int(our_entry["fame"])
+    above_entry = None
+    if our_rank > 1:
+        above_entry = next(
+            (entry for entry in entries_sorted if entry.get("rank") == our_rank - 1),
+            None,
+        )
+    above_rank = int(above_entry["rank"]) if above_entry else None
+    above_fame = int(above_entry["fame"]) if above_entry else None
+    gap_to_above = (
+        int(above_fame - our_fame) if above_fame is not None else None
+    )
+
+    top_entries = entries_sorted[:5]
+    top5_json = [
+        {
+            "rank": int(entry["rank"]),
+            "tag": entry["tag"],
+            "name": entry["name"],
+            "fame": int(entry["fame"]),
+            "total": total_clans,
+        }
+        for entry in top_entries
+    ]
+
+    await save_river_race_place_snapshot(
+        clan_tag=clan_key,
+        season_id=season_id,
+        section_index=section_index,
+        our_rank=our_rank,
+        our_fame=our_fame,
+        above_rank=above_rank,
+        above_fame=above_fame,
+        gap_to_above=gap_to_above,
+        top5_json=top5_json,
+    )
+    period_type = str(river_race.get("periodType") or "unknown").lower()
+    logger.info(
+        "Captured clan place snapshot: season=%s section=%s rank=%s fame=%s gap=%s total=%s",
+        season_id,
+        section_index,
+        our_rank,
+        our_fame,
+        gap_to_above,
+        total_clans,
+    )
+    return {
+        "season_id": season_id,
+        "section_index": section_index,
+        "period_type": period_type,
+        "our_rank": our_rank,
+        "our_fame": our_fame,
+        "above_rank": above_rank,
+        "above_fame": above_fame,
+        "gap_to_above": gap_to_above,
+        "top5_json": top5_json,
+        "total_clans": total_clans,
+    }
+
+
+async def build_clan_place_report(
+    clan_tag: str,
+    *,
+    lang: str = DEFAULT_LANG,
+) -> str:
+    clan_key = _normalize_tag(clan_tag)
+    active_week = await _resolve_active_week_key(clan_tag)
+    if not active_week:
+        return t("clan_place_no_data", lang)
+    season_id, section_index = active_week
+    snapshot = await get_latest_river_race_place_snapshot(
+        clan_key, season_id, section_index
+    )
+    if snapshot:
+        snapshot_ts = snapshot.get("snapshot_ts")
+        if isinstance(snapshot_ts, datetime):
+            age = datetime.now(timezone.utc) - snapshot_ts
+            if age > timedelta(minutes=10):
+                snapshot = None
+    if not snapshot:
+        snapshot = await capture_clan_place_snapshot(clan_key)
+    if not snapshot:
+        return t("clan_place_no_data", lang)
+
+    top5 = snapshot.get("top5_json") or []
+    if not isinstance(top5, list):
+        top5 = []
+    top5 = [
+        row
+        for row in top5
+        if isinstance(row, dict) and row.get("rank") is not None
+    ]
+    top5_sorted = sorted(top5, key=lambda row: int(row.get("rank", 0)))
+
+    our_rank = int(snapshot.get("our_rank") or 0)
+    our_fame = int(snapshot.get("our_fame") or 0)
+    total_clans = snapshot.get("total_clans")
+    if total_clans is None:
+        total_clans = _extract_total_from_top5(top5_sorted, our_rank)
+    period_type = snapshot.get("period_type") or ""
+    state = await get_river_race_state_for_week(
+        clan_tag, season_id, section_index
+    )
+    if state:
+        is_colosseum = bool(state.get("is_colosseum"))
+    else:
+        is_colosseum = str(period_type).lower() == "colosseum"
+    period_label = (
+        t("current_war_colosseum", lang)
+        if is_colosseum
+        else t("current_war_river_race", lang)
+    )
+
+    lines = [
+        t("clan_place_title", lang),
+        t("clan_place_clan_line", lang, clan=clan_key),
+        t(
+            "clan_place_week_line",
+            lang,
+            season=season_id,
+            week=section_index + 1,
+            period=period_label,
+        ),
+        t("clan_place_rank_line", lang, rank=our_rank, total=total_clans),
+        t("clan_place_fame_line", lang, fame=our_fame),
+        "",
+        t("clan_place_top_header", lang),
+    ]
+    for entry in top5_sorted:
+        marker = " \u2190" if entry.get("tag") == clan_key else ""
+        lines.append(
+            t(
+                "clan_place_top_line",
+                lang,
+                rank=entry.get("rank"),
+                name=entry.get("name") or entry.get("tag") or t("unknown", lang),
+                fame=entry.get("fame") or 0,
+                marker=marker,
+            )
+        )
+
+    gap_to_above = snapshot.get("gap_to_above")
+    if our_rank > 1 and gap_to_above is not None:
+        lines.extend(
+            [
+                "",
+                t(
+                    "clan_place_gap_line",
+                    lang,
+                    rank=our_rank - 1,
+                    gap=int(gap_to_above),
+                ),
+            ]
+        )
+
+    return "\n".join(lines)
 
 
 def _format_timestamp(value: object, lang: str = DEFAULT_LANG) -> str:

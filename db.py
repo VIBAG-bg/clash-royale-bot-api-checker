@@ -22,6 +22,7 @@ from sqlalchemy import (
     delete,
     func,
     select,
+    text,
     tuple_,
     update,
 )
@@ -138,6 +139,33 @@ class PlayerParticipation(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utc_now, onupdate=_utc_now, nullable=False
     )
+
+
+class RiverRacePlaceSnapshot(Base):
+    __tablename__ = "river_race_place_snapshots"
+    __table_args__ = (
+        Index(
+            "ix_river_race_place_snapshots_clan_season_section_ts",
+            "clan_tag",
+            "season_id",
+            "section_index",
+            text("snapshot_ts DESC"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    clan_tag: Mapped[str] = mapped_column(String(32), nullable=False)
+    season_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    section_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    snapshot_ts: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, nullable=False
+    )
+    our_rank: Mapped[int] = mapped_column(Integer, nullable=False)
+    our_fame: Mapped[int] = mapped_column(Integer, nullable=False)
+    above_rank: Mapped[int | None] = mapped_column(Integer)
+    above_fame: Mapped[int | None] = mapped_column(Integer)
+    gap_to_above: Mapped[int | None] = mapped_column(Integer)
+    top5_json: Mapped[list[dict[str, object]] | None] = mapped_column(JSONB)
 
 
 class PlayerParticipationDaily(Base):
@@ -885,6 +913,24 @@ def _river_race_state_to_dict(state: RiverRaceState) -> dict[str, Any]:
     }
 
 
+def _river_race_place_snapshot_to_dict(
+    snapshot: RiverRacePlaceSnapshot,
+) -> dict[str, Any]:
+    return {
+        "id": snapshot.id,
+        "clan_tag": snapshot.clan_tag,
+        "season_id": snapshot.season_id,
+        "section_index": snapshot.section_index,
+        "snapshot_ts": snapshot.snapshot_ts,
+        "our_rank": snapshot.our_rank,
+        "our_fame": snapshot.our_fame,
+        "above_rank": snapshot.above_rank,
+        "above_fame": snapshot.above_fame,
+        "gap_to_above": snapshot.gap_to_above,
+        "top5_json": snapshot.top5_json,
+    }
+
+
 async def save_player_participation(
     player_tag: str,
     player_name: str,
@@ -1034,6 +1080,43 @@ async def save_river_race_state(
             period_type,
             clan_score,
         )
+
+
+async def save_river_race_place_snapshot(
+    clan_tag: str,
+    season_id: int,
+    section_index: int,
+    our_rank: int,
+    our_fame: int,
+    above_rank: int | None,
+    above_fame: int | None,
+    gap_to_above: int | None,
+    top5_json: list[dict[str, object]],
+    session: AsyncSession | None = None,
+) -> None:
+    now = _utc_now()
+    stmt = pg_insert(RiverRacePlaceSnapshot.__table__).values(
+        clan_tag=clan_tag,
+        season_id=season_id,
+        section_index=section_index,
+        snapshot_ts=now,
+        our_rank=our_rank,
+        our_fame=our_fame,
+        above_rank=above_rank,
+        above_fame=above_fame,
+        gap_to_above=gap_to_above,
+        top5_json=top5_json,
+    )
+    if session is None:
+        async with _get_session() as session:
+            try:
+                await session.execute(stmt)
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+    else:
+        await session.execute(stmt)
 
 
 async def save_player_participation_daily(
@@ -3881,6 +3964,26 @@ async def get_latest_river_race_state(clan_tag: str) -> dict[str, Any] | None:
         )
         state = result.scalar_one_or_none()
         return _river_race_state_to_dict(state) if state else None
+
+
+async def get_latest_river_race_place_snapshot(
+    clan_tag: str,
+    season_id: int,
+    section_index: int,
+) -> dict[str, Any] | None:
+    async with _get_session() as session:
+        result = await session.execute(
+            select(RiverRacePlaceSnapshot)
+            .where(
+                RiverRacePlaceSnapshot.clan_tag == clan_tag,
+                RiverRacePlaceSnapshot.season_id == season_id,
+                RiverRacePlaceSnapshot.section_index == section_index,
+            )
+            .order_by(RiverRacePlaceSnapshot.snapshot_ts.desc())
+            .limit(1)
+        )
+        snapshot = result.scalar_one_or_none()
+        return _river_race_place_snapshot_to_dict(snapshot) if snapshot else None
 
 
 async def get_river_race_state_for_week(

@@ -110,6 +110,7 @@ from db import (
 )
 from reports import (
     build_clan_info_report,
+    build_clan_place_report,
     build_current_war_report,
     build_donations_report,
     build_kick_shortlist_report,
@@ -1252,6 +1253,7 @@ async def cmd_help(message: Message) -> None:
         t("help_cmd_list_for_kick", lang),
         t("help_cmd_inactive", lang),
         t("help_cmd_promote_candidates", lang),
+        t("help_cmd_clan_place", lang),
         t("help_cmd_info", lang),
         t("help_cmd_language", lang),
     ]
@@ -3369,6 +3371,18 @@ async def cmd_info(message: Message) -> None:
         await message.answer(t("clan_tag_not_configured", lang), parse_mode=None)
         return
     report = await build_clan_info_report(clan_tag, lang=lang)
+    await message.answer(report, parse_mode=None)
+
+
+@router.message(Command("clan_place"))
+async def cmd_clan_place(message: Message) -> None:
+    """Show current clan place in River Race."""
+    lang = await _get_lang_for_message(message)
+    clan_tag = _require_clan_tag()
+    if not clan_tag:
+        await message.answer(t("clan_tag_not_configured", lang), parse_mode=None)
+        return
+    report = await build_clan_place_report(clan_tag, lang=lang)
     await message.answer(report, parse_mode=None)
 
 
