@@ -1707,11 +1707,22 @@ async def cmd_app_notify(message: Message) -> None:
             t("clan_link_fallback_tag", lang, tag=clan_tag),
         ]
     )
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=t("clan_link_button_open", lang),
+                    url=deep_link,
+                )
+            ]
+        ]
+    )
     try:
         await message.bot.send_message(
             int(telegram_user_id),
             text,
             parse_mode=None,
+            reply_markup=keyboard,
         )
     except Exception as e:
         logger.warning("Failed to notify applicant %s: %s", app_id, e)
@@ -3405,7 +3416,21 @@ async def cmd_clan(message: Message) -> None:
     ]
     if web_url:
         lines.append(t("clan_link_open_web", lang, url=web_url))
-    await message.answer("\n".join(lines), parse_mode=None)
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=t("clan_link_button_open", lang),
+                    url=deep_link,
+                )
+            ]
+        ]
+    )
+    await message.answer(
+        "\n".join(lines),
+        parse_mode=None,
+        reply_markup=keyboard,
+    )
 
 
 @router.message(Command("clan_place"))
