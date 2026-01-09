@@ -168,6 +168,46 @@ class RiverRacePlaceSnapshot(Base):
     top5_json: Mapped[list[dict[str, object]] | None] = mapped_column(JSONB)
 
 
+class ClanRankSnapshot(Base):
+    __tablename__ = "clan_rank_snapshots"
+    __table_args__ = (
+        Index(
+            "ix_clan_rank_snapshots_clan_location_ts",
+            "clan_tag",
+            "location_id",
+            text("snapshot_at DESC"),
+        ),
+        Index(
+            "ix_clan_rank_snapshots_location_ts",
+            "location_id",
+            text("snapshot_at DESC"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    clan_tag: Mapped[str] = mapped_column(Text, nullable=False)
+    location_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    location_name: Mapped[str | None] = mapped_column(Text)
+    snapshot_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, nullable=False
+    )
+    ladder_rank: Mapped[int | None] = mapped_column(Integer)
+    ladder_previous_rank: Mapped[int | None] = mapped_column(Integer)
+    ladder_clan_score: Mapped[int] = mapped_column(Integer, nullable=False)
+    war_rank: Mapped[int | None] = mapped_column(Integer)
+    war_previous_rank: Mapped[int | None] = mapped_column(Integer)
+    war_clan_score: Mapped[int | None] = mapped_column(Integer)
+    clan_war_trophies: Mapped[int] = mapped_column(Integer, nullable=False)
+    members: Mapped[int] = mapped_column(Integer, nullable=False)
+    neighbors_ladder_json: Mapped[list[dict[str, object]] | None] = mapped_column(
+        JSONB
+    )
+    neighbors_war_json: Mapped[list[dict[str, object]] | None] = mapped_column(JSONB)
+    ladder_points_to_overtake_above: Mapped[int | None] = mapped_column(Integer)
+    war_points_to_overtake_above: Mapped[int | None] = mapped_column(Integer)
+    raw_source: Mapped[dict[str, object] | None] = mapped_column(JSONB)
+
+
 class PlayerParticipationDaily(Base):
     __tablename__ = "player_participation_daily"
     __table_args__ = (
@@ -931,6 +971,31 @@ def _river_race_place_snapshot_to_dict(
     }
 
 
+def _clan_rank_snapshot_to_dict(
+    snapshot: ClanRankSnapshot,
+) -> dict[str, Any]:
+    return {
+        "id": snapshot.id,
+        "clan_tag": snapshot.clan_tag,
+        "location_id": snapshot.location_id,
+        "location_name": snapshot.location_name,
+        "snapshot_at": snapshot.snapshot_at,
+        "ladder_rank": snapshot.ladder_rank,
+        "ladder_previous_rank": snapshot.ladder_previous_rank,
+        "ladder_clan_score": snapshot.ladder_clan_score,
+        "war_rank": snapshot.war_rank,
+        "war_previous_rank": snapshot.war_previous_rank,
+        "war_clan_score": snapshot.war_clan_score,
+        "clan_war_trophies": snapshot.clan_war_trophies,
+        "members": snapshot.members,
+        "neighbors_ladder_json": snapshot.neighbors_ladder_json,
+        "neighbors_war_json": snapshot.neighbors_war_json,
+        "ladder_points_to_overtake_above": snapshot.ladder_points_to_overtake_above,
+        "war_points_to_overtake_above": snapshot.war_points_to_overtake_above,
+        "raw_source": snapshot.raw_source,
+    }
+
+
 async def save_player_participation(
     player_tag: str,
     player_name: str,
@@ -1117,6 +1182,40 @@ async def save_river_race_place_snapshot(
                 raise
     else:
         await session.execute(stmt)
+
+
+async def insert_clan_rank_snapshot(snapshot: dict[str, Any]) -> None:
+    data = {
+        "clan_tag": snapshot.get("clan_tag"),
+        "location_id": snapshot.get("location_id"),
+        "location_name": snapshot.get("location_name"),
+        "snapshot_at": snapshot.get("snapshot_at") or _utc_now(),
+        "ladder_rank": snapshot.get("ladder_rank"),
+        "ladder_previous_rank": snapshot.get("ladder_previous_rank"),
+        "ladder_clan_score": snapshot.get("ladder_clan_score"),
+        "war_rank": snapshot.get("war_rank"),
+        "war_previous_rank": snapshot.get("war_previous_rank"),
+        "war_clan_score": snapshot.get("war_clan_score"),
+        "clan_war_trophies": snapshot.get("clan_war_trophies"),
+        "members": snapshot.get("members"),
+        "neighbors_ladder_json": snapshot.get("neighbors_ladder_json"),
+        "neighbors_war_json": snapshot.get("neighbors_war_json"),
+        "ladder_points_to_overtake_above": snapshot.get(
+            "ladder_points_to_overtake_above"
+        ),
+        "war_points_to_overtake_above": snapshot.get(
+            "war_points_to_overtake_above"
+        ),
+        "raw_source": snapshot.get("raw_source"),
+    }
+    stmt = pg_insert(ClanRankSnapshot.__table__).values(**data)
+    async with _get_session() as session:
+        try:
+            await session.execute(stmt)
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
 
 
 async def save_player_participation_daily(
@@ -3984,6 +4083,44 @@ async def get_latest_river_race_place_snapshot(
         )
         snapshot = result.scalar_one_or_none()
         return _river_race_place_snapshot_to_dict(snapshot) if snapshot else None
+
+
+async def get_latest_clan_rank_snapshot(
+    clan_tag: str,
+    location_id: int,
+) -> dict[str, Any] | None:
+    async with _get_session() as session:
+        result = await session.execute(
+            select(ClanRankSnapshot)
+            .where(
+                ClanRankSnapshot.clan_tag == clan_tag,
+                ClanRankSnapshot.location_id == location_id,
+            )
+            .order_by(ClanRankSnapshot.snapshot_at.desc())
+            .limit(1)
+        )
+        snapshot = result.scalar_one_or_none()
+        return _clan_rank_snapshot_to_dict(snapshot) if snapshot else None
+
+
+async def get_clan_rank_snapshot_at_or_before(
+    clan_tag: str,
+    location_id: int,
+    target_time: datetime,
+) -> dict[str, Any] | None:
+    async with _get_session() as session:
+        result = await session.execute(
+            select(ClanRankSnapshot)
+            .where(
+                ClanRankSnapshot.clan_tag == clan_tag,
+                ClanRankSnapshot.location_id == location_id,
+                ClanRankSnapshot.snapshot_at <= target_time,
+            )
+            .order_by(ClanRankSnapshot.snapshot_at.desc())
+            .limit(1)
+        )
+        snapshot = result.scalar_one_or_none()
+        return _clan_rank_snapshot_to_dict(snapshot) if snapshot else None
 
 
 async def get_river_race_state_for_week(

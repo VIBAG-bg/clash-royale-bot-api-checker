@@ -184,6 +184,46 @@ class ClashRoyaleAPI:
         encoded_tag = self._encode_tag(player_tag)
         return await self._request(f"/players/{encoded_tag}")
 
+    async def get_location_clan_rankings(
+        self,
+        location_id: int,
+        limit: int = 200,
+        after: str | None = None,
+        before: str | None = None,
+    ) -> list[dict[str, Any]]:
+        params = []
+        if limit:
+            params.append(f"limit={limit}")
+        if after:
+            params.append(f"after={after}")
+        if before:
+            params.append(f"before={before}")
+        query = f"?{'&'.join(params)}" if params else ""
+        response = await self._request(
+            f"/locations/{location_id}/rankings/clans{query}"
+        )
+        return response.get("items", [])
+
+    async def get_location_clanwar_rankings(
+        self,
+        location_id: int,
+        limit: int = 200,
+        after: str | None = None,
+        before: str | None = None,
+    ) -> list[dict[str, Any]]:
+        params = []
+        if limit:
+            params.append(f"limit={limit}")
+        if after:
+            params.append(f"after={after}")
+        if before:
+            params.append(f"before={before}")
+        query = f"?{'&'.join(params)}" if params else ""
+        response = await self._request(
+            f"/locations/{location_id}/rankings/clanwars{query}"
+        )
+        return response.get("items", [])
+
 
 # Global API client instance
 _api_client: ClashRoyaleAPI | None = None

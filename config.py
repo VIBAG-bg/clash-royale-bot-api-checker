@@ -69,6 +69,42 @@ CLAN_PLACE_GAP_THRESHOLD: int = int(
 CLAN_PLACE_GAP_HOURS: int = int(
     get_env_var("CLAN_PLACE_GAP_HOURS", default="3", required=False)
 )
+RANKING_SNAPSHOT_ENABLED: bool = get_env_bool(
+    "RANKING_SNAPSHOT_ENABLED", default="true"
+)
+RANKING_SNAPSHOT_MIN_INTERVAL_HOURS: int = int(
+    get_env_var("RANKING_SNAPSHOT_MIN_INTERVAL_HOURS", default="24", required=False)
+)
+RANKING_SNAPSHOT_LIMIT: int = int(
+    get_env_var("RANKING_SNAPSHOT_LIMIT", default="400", required=False)
+)
+RANKING_NEIGHBORS_ABOVE: int = int(
+    get_env_var("RANKING_NEIGHBORS_ABOVE", default="5", required=False)
+)
+RANKING_NEIGHBORS_BELOW: int = int(
+    get_env_var("RANKING_NEIGHBORS_BELOW", default="5", required=False)
+)
+RANKING_AUTOPOST_ENABLED: bool = get_env_bool(
+    "RANKING_AUTOPOST_ENABLED", default="false"
+)
+RANKING_AUTOPOST_DAY: int = int(
+    get_env_var("RANKING_AUTOPOST_DAY", default="2", required=False)
+)
+RANKING_AUTOPOST_TIME_UTC: str = (
+    get_env_var("RANKING_AUTOPOST_TIME_UTC", default="12:00", required=False)
+    or "12:00"
+)
+_ranking_location_id_raw = get_env_var(
+    "RANKING_LOCATION_ID", default=None, required=False
+)
+RANKING_LOCATION_ID: int | None
+if _ranking_location_id_raw:
+    try:
+        RANKING_LOCATION_ID = int(_ranking_location_id_raw)
+    except ValueError:
+        RANKING_LOCATION_ID = None
+else:
+    RANKING_LOCATION_ID = None
 
 # Backfill configuration
 BACKFILL_WEEKS: int = int(get_env_var("BACKFILL_WEEKS", default="8", required=False))

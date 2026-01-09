@@ -117,6 +117,7 @@ from reports import (
     build_donations_report,
     build_kick_shortlist_report,
     build_my_activity_report,
+    build_rank_report,
     build_promotion_candidates_report,
     build_rolling_report,
     build_top_players_report,
@@ -1247,6 +1248,7 @@ async def cmd_help(message: Message) -> None:
         t("help_cmd_war", lang),
         t("help_cmd_war8", lang),
         t("help_cmd_top", lang),
+        t("help_cmd_rank", lang),
         t("help_cmd_war_all", lang),
         t("help_cmd_current_war", lang),
         t("help_cmd_my_activity", lang),
@@ -3448,6 +3450,22 @@ async def cmd_clan_place(message: Message) -> None:
         return
     report = await build_clan_place_report(clan_tag, lang=lang)
     await message.answer(report, parse_mode=None)
+
+
+@router.message(Command("rank"))
+async def cmd_rank(message: Message) -> None:
+    """Show clan ranking snapshot for current location."""
+    lang = await _get_lang_for_message(message)
+    clan_tag = _require_clan_tag()
+    if not clan_tag:
+        await message.answer(t("clan_tag_not_configured", lang), parse_mode=None)
+        return
+    report = await build_rank_report(clan_tag, lang=lang)
+    await message.answer(
+        report,
+        parse_mode=None,
+        disable_web_page_preview=True,
+    )
 
 
 @router.message(Command("debug_reminder"))

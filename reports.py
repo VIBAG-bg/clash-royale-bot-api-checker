@@ -21,6 +21,12 @@ from config import (
     LAST_SEEN_FLAG_LIMIT,
     LAST_SEEN_RED_DAYS,
     LAST_SEEN_YELLOW_DAYS,
+    RANKING_LOCATION_ID,
+    RANKING_NEIGHBORS_ABOVE,
+    RANKING_NEIGHBORS_BELOW,
+    RANKING_SNAPSHOT_ENABLED,
+    RANKING_SNAPSHOT_LIMIT,
+    RANKING_SNAPSHOT_MIN_INTERVAL_HOURS,
     PROMOTE_COLEADER_LIMIT,
     PROMOTE_ELDER_LIMIT,
     PROMOTE_MIN_ACTIVE_WEEKS_COLEADER,
@@ -43,10 +49,12 @@ from db import (
     get_clan_wtd_donation_average,
     get_current_wtd_donations,
     get_current_members_with_wtd_donations,
+    get_clan_rank_snapshot_at_or_before,
     get_donation_weekly_sums_for_window,
     get_alltime_weeks_played,
     get_last_weeks_from_db,
     get_last_seen_map,
+    get_latest_clan_rank_snapshot,
     get_latest_river_race_state,
     get_latest_river_race_place_snapshot,
     get_participation_week_counts,
@@ -60,6 +68,7 @@ from db import (
     get_top_donors_wtd,
     get_week_decks_map,
     get_week_leaderboard,
+    insert_clan_rank_snapshot,
     save_river_race_place_snapshot,
 )
 from riverrace_import import get_last_completed_weeks
@@ -104,6 +113,13 @@ def _format_name(raw_name: object, lang: str = DEFAULT_LANG) -> str:
     if len(name) > NAME_WIDTH:
         name = f"{name[:NAME_WIDTH - 1]}…"
     return name.ljust(NAME_WIDTH)
+
+
+def _coerce_int(value: object) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _format_entries(
@@ -611,6 +627,451 @@ async def build_clan_place_report(
                 ),
             ]
         )
+
+    return "\n".join(lines)
+
+
+def _extract_rank_items(items: object) -> list[dict[str, object]]:
+    if isinstance(items, dict):
+        items = items.get("items", [])
+    if not isinstance(items, list):
+        return []
+    return [item for item in items if isinstance(item, dict)]
+
+
+def _extract_rank_score(item: dict[str, object]) -> int | None:
+    return _coerce_int(
+        item.get("clanScore")
+        or item.get("clanWarTrophies")
+        or item.get("score")
+    )
+
+
+def _find_rank_entry(
+    items: list[dict[str, object]],
+    clan_tag: str,
+) -> tuple[int | None, dict[str, object] | None]:
+    normalized = _normalize_tag(clan_tag)
+    for idx, item in enumerate(items):
+        if _normalize_tag(item.get("tag")) == normalized:
+            return idx, item
+    return None, None
+
+
+def _build_neighbors_window(
+    items: list[dict[str, object]],
+    idx: int | None,
+    clan_tag: str,
+    neighbors_above: int,
+    neighbors_below: int,
+) -> tuple[list[dict[str, object]], int | None, int | None]:
+    if not items:
+        return [], None, None
+
+    normalized = _normalize_tag(clan_tag)
+    if idx is None:
+        window = items[: min(10, len(items))]
+        neighbors: list[dict[str, object]] = []
+        for item in window:
+            score = _extract_rank_score(item)
+            neighbors.append(
+                {
+                    "rank": _coerce_int(item.get("rank")),
+                    "tag": _normalize_tag(item.get("tag")),
+                    "name": item.get("name"),
+                    "score": score,
+                    "delta": None,
+                    "is_us": False,
+                }
+            )
+        return neighbors, None, None
+
+    start = max(0, idx - neighbors_above)
+    end = min(len(items), idx + neighbors_below + 1)
+    window = items[start:end]
+    our_item = items[idx]
+    our_score = _extract_rank_score(our_item)
+    neighbors = []
+    for item in window:
+        score = _extract_rank_score(item)
+        delta = (
+            score - our_score
+            if score is not None and our_score is not None
+            else None
+        )
+        neighbors.append(
+            {
+                "rank": _coerce_int(item.get("rank")),
+                "tag": _normalize_tag(item.get("tag")),
+                "name": item.get("name"),
+                "score": score,
+                "delta": delta,
+                "is_us": _normalize_tag(item.get("tag")) == normalized,
+            }
+        )
+    points_to_overtake = None
+    if our_score is not None:
+        our_pos = idx - start
+        if our_pos > 0:
+            above_score = _extract_rank_score(window[our_pos - 1])
+            if above_score is not None:
+                points_to_overtake = max(0, above_score - our_score + 1)
+    return neighbors, points_to_overtake, our_score
+
+
+def _is_snapshot_fresh(snapshot: dict[str, object]) -> bool:
+    snapshot_at = snapshot.get("snapshot_at")
+    if not isinstance(snapshot_at, datetime):
+        return False
+    if snapshot_at.tzinfo is None:
+        snapshot_at = snapshot_at.replace(tzinfo=timezone.utc)
+    return snapshot_at >= datetime.now(timezone.utc) - timedelta(
+        hours=RANKING_SNAPSHOT_MIN_INTERVAL_HOURS
+    )
+
+
+async def collect_clan_rank_snapshot(
+    clan_tag: str,
+    *,
+    force: bool = False,
+) -> dict[str, object] | None:
+    if not RANKING_SNAPSHOT_ENABLED:
+        return None
+
+    clan_key = _normalize_tag(clan_tag)
+    location_id = RANKING_LOCATION_ID
+    location_name = None
+    if location_id is not None:
+        latest = await get_latest_clan_rank_snapshot(clan_key, location_id)
+        if latest and not force and _is_snapshot_fresh(latest):
+            return latest
+
+    try:
+        api_client = await get_api_client()
+        clan_info = await api_client.get_clan(clan_tag)
+    except ClashRoyaleAPIError as e:
+        logger.warning("Rank snapshot skipped (clan info error): %s", e)
+        return None
+    except Exception as e:
+        logger.warning("Rank snapshot skipped (clan info failed): %s", e)
+        return None
+
+    if not isinstance(clan_info, dict):
+        return None
+
+    if location_id is None:
+        location = clan_info.get("location")
+        if isinstance(location, dict):
+            location_id = _coerce_int(location.get("id"))
+            location_name = location.get("localizedName") or location.get("name")
+        if location_id is None:
+            logger.warning("Rank snapshot skipped: missing location id")
+            return None
+    else:
+        location = clan_info.get("location")
+        if isinstance(location, dict):
+            location_name = location.get("localizedName") or location.get("name")
+
+    if not force:
+        latest = await get_latest_clan_rank_snapshot(clan_key, location_id)
+        if latest and _is_snapshot_fresh(latest):
+            return latest
+
+    clan_name = clan_info.get("name")
+    clan_score = _coerce_int(clan_info.get("clanScore"))
+    clan_war_trophies = _coerce_int(clan_info.get("clanWarTrophies"))
+    members = _coerce_int(clan_info.get("members"))
+    if clan_score is None or clan_war_trophies is None or members is None:
+        logger.warning("Rank snapshot skipped: incomplete clan info")
+        return None
+
+    ladder_items: list[dict[str, object]] = []
+    war_items: list[dict[str, object]] = []
+    try:
+        ladder_items = await api_client.get_location_clan_rankings(
+            location_id,
+            limit=RANKING_SNAPSHOT_LIMIT,
+        )
+    except ClashRoyaleAPIError as e:
+        logger.warning("Ladder rankings fetch failed: %s", e)
+    except Exception as e:
+        logger.warning("Ladder rankings fetch failed: %s", e)
+    try:
+        war_items = await api_client.get_location_clanwar_rankings(
+            location_id,
+            limit=RANKING_SNAPSHOT_LIMIT,
+        )
+    except ClashRoyaleAPIError as e:
+        logger.warning("War rankings fetch failed: %s", e)
+    except Exception as e:
+        logger.warning("War rankings fetch failed: %s", e)
+
+    ladder_items = _extract_rank_items(ladder_items)
+    war_items = _extract_rank_items(war_items)
+
+    ladder_idx, ladder_entry = _find_rank_entry(ladder_items, clan_key)
+    war_idx, war_entry = _find_rank_entry(war_items, clan_key)
+
+    ladder_neighbors, ladder_points, ladder_list_score = _build_neighbors_window(
+        ladder_items,
+        ladder_idx,
+        clan_key,
+        RANKING_NEIGHBORS_ABOVE,
+        RANKING_NEIGHBORS_BELOW,
+    )
+    war_neighbors, war_points, war_list_score = _build_neighbors_window(
+        war_items,
+        war_idx,
+        clan_key,
+        RANKING_NEIGHBORS_ABOVE,
+        RANKING_NEIGHBORS_BELOW,
+    )
+
+    ladder_rank = _coerce_int(ladder_entry.get("rank")) if ladder_entry else None
+    ladder_prev = (
+        _coerce_int(ladder_entry.get("previousRank")) if ladder_entry else None
+    )
+    war_rank = _coerce_int(war_entry.get("rank")) if war_entry else None
+    war_prev = (
+        _coerce_int(war_entry.get("previousRank")) if war_entry else None
+    )
+
+    snapshot = {
+        "clan_tag": clan_key,
+        "location_id": location_id,
+        "location_name": location_name,
+        "snapshot_at": datetime.now(timezone.utc),
+        "ladder_rank": ladder_rank,
+        "ladder_previous_rank": ladder_prev,
+        "ladder_clan_score": clan_score,
+        "war_rank": war_rank,
+        "war_previous_rank": war_prev,
+        "war_clan_score": war_list_score,
+        "clan_war_trophies": clan_war_trophies,
+        "members": members,
+        "neighbors_ladder_json": ladder_neighbors,
+        "neighbors_war_json": war_neighbors,
+        "ladder_points_to_overtake_above": ladder_points,
+        "war_points_to_overtake_above": war_points,
+        "raw_source": {
+            "limit": RANKING_SNAPSHOT_LIMIT,
+            "neighbors_above": RANKING_NEIGHBORS_ABOVE,
+            "neighbors_below": RANKING_NEIGHBORS_BELOW,
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+            "clan_name": clan_name,
+            "ladder_found": ladder_rank is not None,
+            "war_found": war_rank is not None,
+        },
+    }
+    await insert_clan_rank_snapshot(snapshot)
+    return await get_latest_clan_rank_snapshot(clan_key, location_id)
+
+
+def _format_rank_value(value: int | None, na_label: str) -> str:
+    if value is None:
+        return na_label
+    return f"#{value}"
+
+
+def _format_score_value(value: int | None, na_label: str) -> str:
+    if value is None:
+        return na_label
+    return str(value)
+
+
+def _format_delta(value: int | None, na_label: str) -> str:
+    if value is None:
+        return na_label
+    if value > 0:
+        return f"+{value}"
+    return str(value)
+
+
+def _calc_rank_delta(old: int | None, current: int | None) -> int | None:
+    if old is None or current is None:
+        return None
+    return old - current
+
+
+def _calc_score_delta(old: int | None, current: int | None) -> int | None:
+    if old is None or current is None:
+        return None
+    return current - old
+
+
+def _render_neighbors(
+    neighbors: list[dict[str, object]] | None,
+    *,
+    header: str,
+    lang: str,
+    points_to_overtake: int | None,
+    rank_value: int | None,
+) -> list[str]:
+    if not neighbors:
+        return []
+
+    rank_na = t("rank_na", lang)
+    lines = [header]
+    for entry in neighbors:
+        name = entry.get("name") or t("unknown", lang)
+        rank = entry.get("rank")
+        score = entry.get("score")
+        delta = entry.get("delta")
+        is_us = bool(entry.get("is_us"))
+        rank_text = f"#{rank}" if rank is not None else rank_na
+        score_text = _format_score_value(_coerce_int(score), rank_na)
+        if delta is None:
+            line = f"{rank_text} {name} — {score_text}"
+        else:
+            delta_text = _format_delta(_coerce_int(delta), rank_na)
+            prefix = "➡️ " if is_us else ""
+            line = f"{prefix}{rank_text} {name} — {score_text} ({delta_text})"
+        lines.append(t("rank_neighbor_line", lang, line=line))
+    if points_to_overtake is not None:
+        lines.append(
+            t(
+                "rank_neighbors_overtake_line",
+                lang,
+                points=points_to_overtake,
+            )
+        )
+    if rank_value is None:
+        lines.append(
+            t(
+                "rank_neighbors_fallback_note",
+                lang,
+                limit=RANKING_SNAPSHOT_LIMIT,
+                shown=len(neighbors),
+            )
+        )
+    return lines
+
+
+async def build_rank_report(
+    clan_tag: str,
+    *,
+    lang: str = DEFAULT_LANG,
+    force_refresh: bool = False,
+) -> str:
+    if not RANKING_SNAPSHOT_ENABLED:
+        return t("rank_not_configured", lang)
+
+    try:
+        snapshot = await collect_clan_rank_snapshot(
+            clan_tag, force=force_refresh
+        )
+    except Exception as e:
+        logger.error("Rank report failed: %s", e, exc_info=True)
+        return t("rank_error", lang)
+
+    if not snapshot:
+        return t("rank_no_snapshot", lang)
+
+    rank_na = t("rank_na", lang)
+    clan_key = _normalize_tag(clan_tag)
+    location_id = _coerce_int(snapshot.get("location_id"))
+    if location_id is None:
+        return t("rank_no_snapshot", lang)
+
+    raw_source = snapshot.get("raw_source")
+    clan_name = None
+    if isinstance(raw_source, dict):
+        clan_name = raw_source.get("clan_name")
+    if not clan_name:
+        clan_name = t("unknown", lang)
+
+    location_name = snapshot.get("location_name") or rank_na
+
+    ladder_rank = _coerce_int(snapshot.get("ladder_rank"))
+    war_rank = _coerce_int(snapshot.get("war_rank"))
+    ladder_score = _coerce_int(snapshot.get("ladder_clan_score"))
+    war_score = _coerce_int(snapshot.get("war_clan_score"))
+    war_trophies = _coerce_int(snapshot.get("clan_war_trophies"))
+
+    lines: list[str] = [
+        t("rank_title", lang),
+        t("rank_clan_line", lang, name=clan_name, tag=clan_key),
+        t("rank_location_line", lang, location=location_name),
+        "",
+        t(
+            "rank_ladder_line",
+            lang,
+            rank=_format_rank_value(ladder_rank, rank_na),
+            score=_format_score_value(ladder_score, rank_na),
+        ),
+        t(
+            "rank_war_line",
+            lang,
+            rank=_format_rank_value(war_rank, rank_na),
+            score=_format_score_value(war_score, rank_na),
+            trophies=_format_score_value(war_trophies, rank_na),
+        ),
+        "",
+        t("rank_changes_header", lang),
+    ]
+
+    now = datetime.now(timezone.utc)
+    for days in (7, 30, 365):
+        target = now - timedelta(days=days)
+        old = await get_clan_rank_snapshot_at_or_before(
+            clan_key, location_id, target
+        )
+        old_ladder_rank = (
+            _coerce_int(old.get("ladder_rank")) if old else None
+        )
+        old_war_rank = _coerce_int(old.get("war_rank")) if old else None
+        old_ladder_score = (
+            _coerce_int(old.get("ladder_clan_score")) if old else None
+        )
+        old_war_score = _coerce_int(old.get("war_clan_score")) if old else None
+        ladder_rank_delta = _format_delta(
+            _calc_rank_delta(old_ladder_rank, ladder_rank), rank_na
+        )
+        ladder_score_delta = _format_delta(
+            _calc_score_delta(old_ladder_score, ladder_score), rank_na
+        )
+        war_rank_delta = _format_delta(
+            _calc_rank_delta(old_war_rank, war_rank), rank_na
+        )
+        war_score_delta = _format_delta(
+            _calc_score_delta(old_war_score, war_score), rank_na
+        )
+        lines.append(
+            t(
+                "rank_change_line",
+                lang,
+                days=days,
+                ladder_rank=ladder_rank_delta,
+                ladder_score=ladder_score_delta,
+                war_rank=war_rank_delta,
+                war_score=war_score_delta,
+            )
+        )
+
+    ladder_neighbors = snapshot.get("neighbors_ladder_json")
+    war_neighbors = snapshot.get("neighbors_war_json")
+    lines.extend(
+        _render_neighbors(
+            ladder_neighbors if isinstance(ladder_neighbors, list) else None,
+            header=t("rank_neighbors_ladder_header", lang),
+            lang=lang,
+            points_to_overtake=_coerce_int(
+                snapshot.get("ladder_points_to_overtake_above")
+            ),
+            rank_value=ladder_rank,
+        )
+    )
+    lines.extend(
+        _render_neighbors(
+            war_neighbors if isinstance(war_neighbors, list) else None,
+            header=t("rank_neighbors_war_header", lang),
+            lang=lang,
+            points_to_overtake=_coerce_int(
+                snapshot.get("war_points_to_overtake_above")
+            ),
+            rank_value=war_rank,
+        )
+    )
 
     return "\n".join(lines)
 

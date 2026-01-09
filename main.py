@@ -23,6 +23,10 @@ from config import (
     CR_API_TOKEN,
     FETCH_INTERVAL_SECONDS,
     MODLOG_CHAT_ID,
+    RANKING_AUTOPOST_DAY,
+    RANKING_AUTOPOST_ENABLED,
+    RANKING_AUTOPOST_TIME_UTC,
+    RANKING_SNAPSHOT_ENABLED,
     REMINDER_COLOSSEUM_BANNER_URL,
     REMINDER_COLOSSEUM_BANNER_URL_DAY4,
     REMINDER_ENABLED,
@@ -65,6 +69,7 @@ from db import (
 )
 from reports import (
     capture_clan_place_snapshot,
+    build_rank_report,
     build_kick_shortlist_report,
     build_promotion_candidates_report,
     build_rolling_report,
@@ -86,6 +91,7 @@ ACTIVE_WEEK_KEY = "active_week"
 LAST_REPORTED_WEEK_KEY = "last_reported_week"
 LAST_PROMOTE_SEASON_KEY = "last_promote_season"
 LAST_WAR_REMINDER_KEY = "last_war_reminder"
+RANK_AUTOPOST_LAST_DATE_KEY = "rank_autopost_last_date"
 WAR_DAY_START_KEY = "war_day_start"
 WAR_DAY_NUMBER_KEY = "war_day_number"
 WAR_DAY_NUMBER_DATE_KEY = "war_day_number_date"
@@ -1003,6 +1009,60 @@ async def maybe_post_promotion_candidates(bot: Bot) -> None:
     )
 
 
+async def maybe_post_weekly_rank_report(bot: Bot) -> None:
+    if not RANKING_AUTOPOST_ENABLED or not RANKING_SNAPSHOT_ENABLED:
+        return
+    if not CLAN_TAG:
+        return
+    if RANKING_AUTOPOST_DAY < 1 or RANKING_AUTOPOST_DAY > 7:
+        logger.warning(
+            "Invalid RANKING_AUTOPOST_DAY: %s", RANKING_AUTOPOST_DAY
+        )
+        return
+    reminder_time = _parse_reminder_time(RANKING_AUTOPOST_TIME_UTC)
+    if reminder_time is None:
+        logger.warning(
+            "Invalid RANKING_AUTOPOST_TIME_UTC: %s", RANKING_AUTOPOST_TIME_UTC
+        )
+        return
+    now = datetime.now(timezone.utc)
+    if now.isoweekday() != RANKING_AUTOPOST_DAY:
+        return
+    hour, minute = reminder_time
+    target = datetime(
+        now.year, now.month, now.day, hour, minute, tzinfo=timezone.utc
+    )
+    if now < target:
+        return
+    last_state = await get_app_state(RANK_AUTOPOST_LAST_DATE_KEY)
+    today = now.date().isoformat()
+    if isinstance(last_state, dict) and last_state.get("date") == today:
+        return
+    chat_ids = await get_enabled_clan_chats(CLAN_TAG)
+    if not chat_ids:
+        return
+    report = await build_rank_report(
+        CLAN_TAG, lang=DEFAULT_LANG, force_refresh=True
+    )
+    sent_count = 0
+    for chat_id in chat_ids:
+        try:
+            await bot.send_message(
+                chat_id,
+                report,
+                parse_mode=None,
+                disable_web_page_preview=True,
+            )
+            sent_count += 1
+        except Exception as e:
+            logger.error("Failed to send rank report to %s: %s", chat_id, e)
+    await set_app_state(
+        RANK_AUTOPOST_LAST_DATE_KEY,
+        {"date": today, "set_at": now.isoformat()},
+    )
+    logger.info("Posted rank report to %s chat(s)", sent_count)
+
+
 async def background_fetch_task() -> None:
     """Background task that periodically fetches River Race stats."""
     logger.info(
@@ -1017,6 +1077,7 @@ async def background_fetch_task() -> None:
             else:
                 await maybe_post_weekly_report(BOT)
                 await maybe_post_promotion_candidates(BOT)
+                await maybe_post_weekly_rank_report(BOT)
         except asyncio.CancelledError:
             logger.info("Background fetch task cancelled")
             break
