@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, date, timedelta
 
@@ -659,8 +660,10 @@ async def maybe_post_weekly_report(bot: Bot) -> None:
     )
 
 
-async def maybe_post_daily_war_reminder(bot: Bot) -> None:
-    if not REMINDER_ENABLED:
+async def maybe_post_daily_war_reminder(
+    bot: Bot, *, debug_chat_id: int | None = None
+) -> dict[str, object] | None:
+    if not REMINDER_ENABLED and debug_chat_id is None:
         return
     async with REMINDER_LOCK:
         api_client = await get_api_client()
@@ -689,8 +692,59 @@ async def maybe_post_daily_war_reminder(bot: Bot) -> None:
                     "Reminder skipped: unable to resolve week (source=%s)", source
                 )
                 return
+            state = await get_river_race_state_for_week(
+                CLAN_TAG, resolved_season_id, resolved_section_index
+            )
+            is_colosseum = bool(state.get("is_colosseum")) if state else False
+            if not state:
+                colosseum_index = await get_colosseum_index_for_season(
+                    resolved_season_id, session=session
+                )
+                if colosseum_index is not None:
+                    is_colosseum = resolved_section_index == colosseum_index
+                else:
+                    is_colosseum = period_type_lower == "colosseum"
+            effective_period_type = "colosseum" if is_colosseum else "warday"
             first_snapshot_date = await get_first_snapshot_date_for_week(
                 resolved_season_id, resolved_section_index, session=session
+            )
+            override_date = None
+            override_season = _coerce_non_negative_int(
+                os.getenv("WAR_DAY_OVERRIDE_SEASON")
+            )
+            override_section = _coerce_non_negative_int(
+                os.getenv("WAR_DAY_OVERRIDE_SECTION")
+            )
+            override_date_raw = os.getenv("WAR_DAY_OVERRIDE_START_DATE")
+            if override_date_raw:
+                try:
+                    override_date = date.fromisoformat(override_date_raw)
+                except ValueError:
+                    logger.warning(
+                        "Invalid WAR_DAY_OVERRIDE_START_DATE: %s",
+                        override_date_raw,
+                    )
+            if (
+                override_date is not None
+                and override_season is not None
+                and override_section is not None
+                and override_season == resolved_season_id
+                and override_section == resolved_section_index
+            ):
+                first_snapshot_date = override_date
+                logger.info(
+                    "Using war day override start_date=%s for season=%s section=%s",
+                    override_date.isoformat(),
+                    resolved_season_id,
+                    resolved_section_index,
+                )
+            snapshot_value = (
+                first_snapshot_date.isoformat()
+                if isinstance(first_snapshot_date, date)
+                else "n/a"
+            )
+            override_value = (
+                override_date.isoformat() if override_date is not None else "none"
             )
             log_items = None
             if first_snapshot_date is None:
@@ -714,6 +768,16 @@ async def maybe_post_daily_war_reminder(bot: Bot) -> None:
                 log_items=log_items,
             )
             if day_number is None:
+                if debug_chat_id is not None:
+                    return {
+                        "season_id": resolved_season_id,
+                        "section_index": resolved_section_index,
+                        "day_number": "n/a",
+                        "period_type": effective_period_type,
+                        "resolved_by": resolved_by or "none",
+                        "snapshot": snapshot_value,
+                        "override": override_value,
+                    }
                 logger.info(
                     "Reminder skipped: unknown day number (season=%s section=%s period=%s periodIndex=%r first_snapshot_date=%r finish_anchor=%r finish_source=%r training_days_fallback=%s resolved_by=%r now=%s)",
                     context.get("season_id"),
@@ -734,30 +798,48 @@ async def maybe_post_daily_war_reminder(bot: Bot) -> None:
                 day_number,
                 resolved_season_id,
                 resolved_section_index,
-                period_type_lower,
+                effective_period_type,
             )
+            debug_summary = {
+                "season_id": resolved_season_id,
+                "section_index": resolved_section_index,
+                "day_number": day_number,
+                "period_type": effective_period_type,
+                "resolved_by": resolved_by or "none",
+                "snapshot": snapshot_value,
+                "override": override_value,
+            }
 
-            last_state = await get_app_state(LAST_WAR_REMINDER_KEY, session=session)
-            if isinstance(last_state, dict):
-                try:
-                    if (
-                        int(last_state.get("season_id", 0)) == resolved_season_id
-                        and int(last_state.get("section_index", -1))
-                        == resolved_section_index
-                        and str(last_state.get("period_type", "")).lower()
-                        == period_type_lower
-                        and int(last_state.get("day_number", 0)) == day_number
-                    ):
-                        return
-                except Exception:
-                    pass
+            if debug_chat_id is None:
+                last_state = await get_app_state(
+                    LAST_WAR_REMINDER_KEY, session=session
+                )
+                if isinstance(last_state, dict):
+                    try:
+                        if (
+                            int(last_state.get("season_id", 0)) == resolved_season_id
+                            and int(last_state.get("section_index", -1))
+                            == resolved_section_index
+                            and str(last_state.get("period_type", "")).lower()
+                            == effective_period_type
+                            and int(last_state.get("day_number", 0)) == day_number
+                        ):
+                            return
+                    except Exception:
+                        pass
 
-            chat_ids = await get_enabled_clan_chats(CLAN_TAG)
-            if not chat_ids:
-                logger.info("No enabled clan chats for daily reminders")
-                return
+            if debug_chat_id is not None:
+                chat_ids = [debug_chat_id]
+                logger.info(
+                    "Debug reminder: forcing chat_id=%s", debug_chat_id
+                )
+            else:
+                chat_ids = await get_enabled_clan_chats(CLAN_TAG)
+                if not chat_ids:
+                    logger.info("No enabled clan chats for daily reminders")
+                    return
 
-            if period_type_lower == "colosseum":
+            if effective_period_type == "colosseum":
                 messages = {
                     1: t("coliseum_day1", DEFAULT_LANG),
                     2: t("coliseum_day2", DEFAULT_LANG),
@@ -790,32 +872,33 @@ async def maybe_post_daily_war_reminder(bot: Bot) -> None:
             reminder_date = datetime.now(timezone.utc).date()
             sent_count = 0
             for chat_id in chat_ids:
-                try:
-                    should_send = await try_mark_reminder_posted(
-                        chat_id=chat_id,
-                        reminder_date=reminder_date,
-                        season_id=resolved_season_id,
-                        section_index=resolved_section_index,
-                        period=period_type_lower,
-                        day_number=day_number,
-                    )
-                except Exception as e:
-                    logger.error(
-                        "Failed to mark reminder posted for %s: %s", chat_id, e
-                    )
-                    should_send = False
-                if not should_send:
-                    logger.info(
-                        "Reminder already posted, skipping (chat=%s date=%s season=%s section=%s period=%s day=%s source=%s)",
-                        chat_id,
-                        reminder_date.isoformat(),
-                        resolved_season_id,
-                        resolved_section_index,
-                        period_type_lower,
-                        day_number,
-                        resolved_by,
-                    )
-                    continue
+                if debug_chat_id is None:
+                    try:
+                        should_send = await try_mark_reminder_posted(
+                            chat_id=chat_id,
+                            reminder_date=reminder_date,
+                            season_id=resolved_season_id,
+                            section_index=resolved_section_index,
+                            period=effective_period_type,
+                            day_number=day_number,
+                        )
+                    except Exception as e:
+                        logger.error(
+                            "Failed to mark reminder posted for %s: %s", chat_id, e
+                        )
+                        should_send = False
+                    if not should_send:
+                        logger.info(
+                            "Reminder already posted, skipping (chat=%s date=%s season=%s section=%s period=%s day=%s source=%s)",
+                            chat_id,
+                            reminder_date.isoformat(),
+                            resolved_season_id,
+                            resolved_section_index,
+                            effective_period_type,
+                            day_number,
+                            resolved_by,
+                        )
+                        continue
                 try:
                     if day_number in (1, 4):
                         try:
@@ -837,27 +920,31 @@ async def maybe_post_daily_war_reminder(bot: Bot) -> None:
                         "Failed to send reminder to %s: %s", chat_id, e
                     )
 
-            await set_app_state(
-                LAST_WAR_REMINDER_KEY,
-                {
-                    "clan_tag": CLAN_TAG,
-                    "season_id": resolved_season_id,
-                    "section_index": resolved_section_index,
-                    "period_type": period_type_lower,
-                    "day_number": day_number,
-                    "sent_at": datetime.now(timezone.utc).isoformat(),
-                },
-                session=session,
-            )
+            if debug_chat_id is None:
+                await set_app_state(
+                    LAST_WAR_REMINDER_KEY,
+                    {
+                        "clan_tag": CLAN_TAG,
+                        "season_id": resolved_season_id,
+                        "section_index": resolved_section_index,
+                        "period_type": effective_period_type,
+                        "day_number": day_number,
+                        "sent_at": datetime.now(timezone.utc).isoformat(),
+                    },
+                    session=session,
+                )
 
             logger.info(
                 "Posted daily reminder day %s (%s) for season %s section %s to %s chat(s)",
                 day_number,
-                period_type_lower,
+                effective_period_type,
                 resolved_season_id,
                 resolved_section_index,
                 sent_count,
             )
+            if debug_chat_id is not None:
+                return debug_summary
+    return None
 
 
 async def maybe_post_promotion_candidates(bot: Bot) -> None:

@@ -3372,6 +3372,49 @@ async def cmd_info(message: Message) -> None:
     await message.answer(report, parse_mode=None)
 
 
+@router.message(Command("debug_reminder"))
+async def cmd_debug_reminder(message: Message) -> None:
+    """Debug: run daily reminder logic immediately for this chat."""
+    lang = await _get_lang_for_message(message)
+    if message.from_user is None or not _is_debug_admin(message.from_user.id):
+        await message.answer(t("not_allowed", lang), parse_mode=None)
+        return
+    if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await message.answer(t("use_command_in_group", lang), parse_mode=None)
+        return
+    try:
+        from main import maybe_post_daily_war_reminder
+
+        summary = await maybe_post_daily_war_reminder(
+            message.bot, debug_chat_id=message.chat.id
+        )
+        await message.answer(
+            t("debug_reminder_triggered", lang), parse_mode=None
+        )
+        if lang == "en" and isinstance(summary, dict):
+            period_type = summary.get("period_type")
+            war_type = (
+                t("debug_war_type_coliseum", "en")
+                if period_type == "colosseum"
+                else t("debug_war_type_riverside", "en")
+            )
+            text = t(
+                "debug_reminder_summary",
+                "en",
+                season=summary.get("season_id", "n/a"),
+                section=summary.get("section_index", "n/a"),
+                day=summary.get("day_number", "n/a"),
+                war_type=war_type,
+                resolved_by=summary.get("resolved_by", "n/a"),
+                snapshot=summary.get("snapshot", "n/a"),
+                override=summary.get("override", "none"),
+            )
+            await message.answer(text, parse_mode=None)
+    except Exception as e:
+        logger.error("Debug reminder failed: %s", e, exc_info=True)
+        await message.answer(t("debug_reminder_failed", lang), parse_mode=None)
+
+
 @router.message(Command("riverside"))
 async def cmd_riverside(message: Message) -> None:
     """Debug: send Clan War reminder to this chat only."""
