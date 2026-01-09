@@ -110,10 +110,10 @@ TRAINING_DAYS_FALLBACK: int = int(
 REMINDER_WAR_BANNER_URL: str = (
     get_env_var(
         "REMINDER_WAR_BANNER_URL",
-        default="https://i.ibb.co/Cs4Sjpzw/image.png",
+        default="https://i.ibb.co/VyGjscj/image.png",
         required=False,
     )
-    or "https://i.ibb.co/Cs4Sjpzw/image.png"
+    or "https://i.ibb.co/VyGjscj/image.png"
 )
 REMINDER_WAR_BANNER_URL_DAY4: str = (
     get_env_var(
@@ -126,10 +126,10 @@ REMINDER_WAR_BANNER_URL_DAY4: str = (
 REMINDER_COLOSSEUM_BANNER_URL: str = (
     get_env_var(
         "REMINDER_COLOSSEUM_BANNER_URL",
-        default="https://i.ibb.co/VyGjscj/image.png",
+        default="https://i.ibb.co/Cs4Sjpzw/image.png",
         required=False,
     )
-    or "https://i.ibb.co/VyGjscj/image.png"
+    or "https://i.ibb.co/Cs4Sjpzw/image.png"
 )
 REMINDER_COLOSSEUM_BANNER_URL_DAY4: str = (
     get_env_var(
