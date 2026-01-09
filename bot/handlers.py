@@ -28,7 +28,9 @@ from config import (
     CAPTCHA_EXPIRE_MINUTES,
     CAPTCHA_MAX_ATTEMPTS,
     CAPTCHA_REMIND_COOLDOWN_SECONDS,
+    CLAN_DEEP_LINK,
     CLAN_TAG,
+    CLAN_ROYALEAPI_URL,
     ENABLE_CAPTCHA,
     FLOOD_MAX_MESSAGES,
     FLOOD_MUTE_MINUTES,
@@ -1254,6 +1256,7 @@ async def cmd_help(message: Message) -> None:
         t("help_cmd_inactive", lang),
         t("help_cmd_promote_candidates", lang),
         t("help_cmd_clan_place", lang),
+        t("help_cmd_clan", lang),
         t("help_cmd_info", lang),
         t("help_cmd_language", lang),
     ]
@@ -1696,6 +1699,14 @@ async def cmd_app_notify(message: Message) -> None:
         return
 
     text = t("application_invite_message", lang, clan_tag=clan_tag)
+    deep_link = CLAN_DEEP_LINK or f"clashroyale://clanInfo?id={clan_tag.lstrip('#')}"
+    text = "\n".join(
+        [
+            text,
+            t("clan_link_open_in_game", lang, link=deep_link),
+            t("clan_link_fallback_tag", lang, tag=clan_tag),
+        ]
+    )
     try:
         await message.bot.send_message(
             int(telegram_user_id),
@@ -3372,6 +3383,29 @@ async def cmd_info(message: Message) -> None:
         return
     report = await build_clan_info_report(clan_tag, lang=lang)
     await message.answer(report, parse_mode=None)
+
+
+@router.message(Command("clan"))
+async def cmd_clan(message: Message) -> None:
+    """Show clan tag and deep link for Clash Royale."""
+    lang = await _get_lang_for_message(message)
+    clan_tag = _require_clan_tag()
+    if not clan_tag:
+        await message.answer(t("clan_tag_not_configured", lang), parse_mode=None)
+        return
+    clan_tag_hash = _normalize_tag(clan_tag)
+    clan_tag_no_hash = clan_tag_hash.lstrip("#")
+    deep_link = CLAN_DEEP_LINK or f"clashroyale://clanInfo?id={clan_tag_no_hash}"
+    web_url = CLAN_ROYALEAPI_URL or f"https://royaleapi.com/clan/{clan_tag_no_hash}"
+    lines = [
+        t("clan_link_title", lang),
+        t("clan_link_tag_line", lang, tag=clan_tag_hash),
+        t("clan_link_open_in_game", lang, link=deep_link),
+        t("clan_link_fallback_tag", lang, tag=clan_tag_hash),
+    ]
+    if web_url:
+        lines.append(t("clan_link_open_web", lang, url=web_url))
+    await message.answer("\n".join(lines), parse_mode=None)
 
 
 @router.message(Command("clan_place"))

@@ -18,6 +18,8 @@ from config import (
     AUTO_INVITE_INVITE_MINUTES,
     AUTO_INVITE_MAX_ATTEMPTS,
     CLAN_TAG,
+    CLAN_PLACE_GAP_HOURS,
+    CLAN_PLACE_GAP_THRESHOLD,
     CR_API_TOKEN,
     FETCH_INTERVAL_SECONDS,
     MODLOG_CHAT_ID,
@@ -1069,8 +1071,8 @@ async def daily_reminder_task(bot: Bot) -> None:
 
 async def clan_place_watchdog_task(bot: Bot) -> None:
     interval_seconds = 600
-    gap_threshold = 3000
-    gap_duration = timedelta(hours=3)
+    gap_threshold = CLAN_PLACE_GAP_THRESHOLD
+    gap_duration = timedelta(hours=CLAN_PLACE_GAP_HOURS)
     logger.info(
         "Clan place watchdog started (interval %ss, gap %s, duration %s)",
         interval_seconds,

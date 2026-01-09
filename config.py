@@ -35,6 +35,26 @@ TELEGRAM_BOT_TOKEN: str | None = get_env_var("TELEGRAM_BOT_TOKEN")
 # Clash Royale API configuration
 CR_API_TOKEN: str | None = get_env_var("CR_API_TOKEN")
 CLAN_TAG: str | None = get_env_var("CLAN_TAG")
+CLAN_TAG_NO_HASH: str | None = CLAN_TAG.lstrip("#") if CLAN_TAG else None
+CLAN_TAG_HASH: str | None = f"#{CLAN_TAG_NO_HASH}" if CLAN_TAG_NO_HASH else None
+CLAN_DEEP_LINK: str | None = get_env_var(
+    "CLAN_DEEP_LINK",
+    default=(
+        f"clashroyale://clanInfo?id={CLAN_TAG_NO_HASH}"
+        if CLAN_TAG_NO_HASH
+        else None
+    ),
+    required=False,
+)
+CLAN_ROYALEAPI_URL: str | None = get_env_var(
+    "CLAN_ROYALEAPI_URL",
+    default=(
+        f"https://royaleapi.com/clan/{CLAN_TAG_NO_HASH}"
+        if CLAN_TAG_NO_HASH
+        else None
+    ),
+    required=False,
+)
 
 # PostgreSQL configuration (Heroku provides DATABASE_URL)
 DATABASE_URL: str | None = get_env_var("DATABASE_URL", required=False)
@@ -42,6 +62,12 @@ DATABASE_URL: str | None = get_env_var("DATABASE_URL", required=False)
 # Background task configuration
 FETCH_INTERVAL_SECONDS: int = int(
     get_env_var("FETCH_INTERVAL_SECONDS", default="3600", required=False)
+)
+CLAN_PLACE_GAP_THRESHOLD: int = int(
+    get_env_var("CLAN_PLACE_GAP_THRESHOLD", default="2000", required=False)
+)
+CLAN_PLACE_GAP_HOURS: int = int(
+    get_env_var("CLAN_PLACE_GAP_HOURS", default="3", required=False)
 )
 
 # Backfill configuration
