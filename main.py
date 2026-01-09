@@ -338,12 +338,38 @@ async def _resolve_active_week(
     stored_season_id, stored_section_index = _parse_active_week_state(stored_state)
 
     if current_section_index is not None:
+        if (
+            stored_season_id is not None
+            and stored_section_index is not None
+            and current_section_index == 0
+            and stored_section_index >= 3
+            and (
+                current_season_id is None
+                or current_season_id <= stored_season_id
+            )
+        ):
+            inferred_season_id = stored_season_id + 1
+            await _store_active_week(inferred_season_id, 0, session)
+            logger.info(
+                "Heuristic rollover active week: stored=(%s,%s) current=(%s,%s) inferred=(%s,%s)",
+                stored_season_id,
+                stored_section_index,
+                current_season_id,
+                current_section_index,
+                inferred_season_id,
+                0,
+            )
+            return inferred_season_id, 0, "heuristic_rollover"
         if current_season_id is not None:
             await _store_active_week(current_season_id, current_section_index, session)
             return current_season_id, current_section_index, "currentriverrace"
-        if stored_season_id is not None:
-            await _store_active_week(stored_season_id, current_section_index, session)
-            return stored_season_id, current_section_index, "stored_active_week"
+        if stored_season_id is not None and stored_section_index is not None:
+            if current_section_index >= stored_section_index:
+                await _store_active_week(
+                    stored_season_id, current_section_index, session
+                )
+                return stored_season_id, current_section_index, "stored_active_week"
+            return stored_season_id, stored_section_index, "stored_active_week"
         return None, None, "missing"
 
     if stored_season_id is not None and stored_section_index is not None:
@@ -915,6 +941,7 @@ async def daily_reminder_task(bot: Bot) -> None:
         logger.warning("Invalid REMINDER_TIME_UTC: %s", REMINDER_TIME_UTC)
         return
     hour, minute = reminder_time
+    late_grace = timedelta(hours=6)
     logger.info("Daily reminder scheduler started at %02d:%02d UTC", hour, minute)
 
     while True:
@@ -925,6 +952,18 @@ async def daily_reminder_task(bot: Bot) -> None:
             )
             if now < target:
                 await asyncio.sleep((target - now).total_seconds())
+                now = datetime.now(timezone.utc)
+            if now > target + late_grace:
+                logger.info(
+                    "Daily reminder skipped (late by %s, target=%s)",
+                    now - target,
+                    target.isoformat(),
+                )
+                next_target = target + timedelta(days=1)
+                sleep_for = (next_target - now).total_seconds()
+                if sleep_for > 0:
+                    await asyncio.sleep(sleep_for)
+                continue
             await maybe_post_daily_war_reminder(bot)
             next_target = target + timedelta(days=1)
             sleep_for = (next_target - datetime.now(timezone.utc)).total_seconds()
