@@ -4176,16 +4176,35 @@ async def get_last_weeks_from_db(
         return [(int(row.season_id), int(row.section_index)) for row in result.all()]
 
 
-async def get_player_weekly_decks(
+async def get_last_completed_weeks_from_db(
+    clan_tag: str, limit: int = 8
+) -> list[tuple[int, int]]:
+    async with _get_session() as session:
+        result = await session.execute(
+            select(RiverRaceState.season_id, RiverRaceState.section_index)
+            .where(
+                RiverRaceState.clan_tag == clan_tag,
+                func.lower(RiverRaceState.period_type) == "completed",
+            )
+            .order_by(
+                RiverRaceState.season_id.desc(),
+                RiverRaceState.section_index.desc(),
+            )
+            .limit(limit)
+        )
+        return [(int(row.season_id), int(row.section_index)) for row in result.all()]
+
+
+async def get_player_weekly_activity(
     player_tag: str,
     weeks: list[tuple[int, int]],
     session: AsyncSession | None = None,
-) -> list[tuple[int, int, int]]:
+) -> list[tuple[int, int, int, int]]:
     if not weeks:
         return []
     if session is None:
         async with _get_session() as session:
-            return await get_player_weekly_decks(
+            return await get_player_weekly_activity(
                 player_tag, weeks, session=session
             )
     result = await session.execute(
@@ -4193,6 +4212,7 @@ async def get_player_weekly_decks(
             PlayerParticipation.season_id,
             PlayerParticipation.section_index,
             PlayerParticipation.decks_used,
+            PlayerParticipation.fame,
         ).where(
             PlayerParticipation.player_tag == player_tag,
             tuple_(
@@ -4201,13 +4221,12 @@ async def get_player_weekly_decks(
             ).in_(weeks),
         )
     )
-    rows = [
+    return [
         (
             int(row.season_id),
             int(row.section_index),
             int(row.decks_used or 0),
+            int(row.fame or 0),
         )
         for row in result.all()
     ]
-    rows.sort(key=lambda row: (row[0], row[1]))
-    return rows

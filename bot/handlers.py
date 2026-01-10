@@ -4086,43 +4086,62 @@ async def cmd_my_activity(message: Message) -> None:
             from charts import render_my_activity_decks_chart
             from db import (
                 get_current_member_tags,
-                get_last_weeks_from_db,
-                get_player_weekly_decks,
+                get_last_completed_weeks_from_db,
+                get_player_weekly_activity,
                 get_rolling_summary,
             )
 
-            weeks = await get_last_weeks_from_db(clan_tag, limit=8)
-            if weeks:
-                weekly_rows = await get_player_weekly_decks(
+            weeks_desc = await get_last_completed_weeks_from_db(
+                clan_tag, limit=8
+            )
+            if weeks_desc:
+                weeks = list(reversed(weeks_desc))
+                weekly_rows = await get_player_weekly_activity(
                     existing["player_tag"], weeks
                 )
-                if weekly_rows:
-                    week_labels = [
-                        f"{season}/{section + 1}"
-                        for season, section, _ in weekly_rows
-                    ]
-                    player_decks = [decks for _, _, decks in weekly_rows]
-                    clan_avg_decks = None
-                    member_tags = await get_current_member_tags(clan_tag)
-                    if member_tags:
-                        rolling = await get_rolling_summary(
-                            weeks, player_tags=member_tags
-                        )
-                        total_decks = sum(
-                            int(row.get("decks_used", 0)) for row in rolling
-                        )
-                        denominator = max(1, len(weeks) * len(member_tags))
-                        clan_avg_decks = total_decks / denominator
-                    png_bytes = render_my_activity_decks_chart(
-                        title=t("my_activity_title", lang),
-                        week_labels=week_labels,
-                        player_decks=player_decks,
-                        clan_avg_decks=clan_avg_decks,
+                week_map = {
+                    (season, section): (decks, fame)
+                    for season, section, decks, fame in weekly_rows
+                }
+                week_labels = [
+                    f"{season}/{section + 1}" for season, section in weeks
+                ]
+                player_decks = []
+                player_fame = []
+                for season, section in weeks:
+                    decks, fame = week_map.get((season, section), (0, 0))
+                    player_decks.append(decks)
+                    player_fame.append(fame)
+                clan_avg_decks = None
+                member_tags = await get_current_member_tags(clan_tag)
+                if member_tags:
+                    rolling = await get_rolling_summary(
+                        weeks, player_tags=member_tags
                     )
-                    await message.answer_photo(
-                        BufferedInputFile(png_bytes, filename="activity.png"),
-                        parse_mode=None,
+                    total_decks = sum(
+                        int(row.get("decks_used", 0)) for row in rolling
                     )
+                    denominator = max(1, len(weeks) * len(member_tags))
+                    clan_avg_decks = total_decks / denominator
+                png_bytes = render_my_activity_decks_chart(
+                    title=t("chart.war_activity.title", lang),
+                    week_labels=week_labels,
+                    player_decks=player_decks,
+                    player_fame=player_fame,
+                    clan_avg_decks=clan_avg_decks,
+                    x_label=t("chart.axis.week", lang),
+                    y_left_label=t("chart.axis.decks", lang),
+                    y_right_label=t("chart.axis.fame", lang),
+                    legend_you_decks=t("chart.legend.you.decks", lang),
+                    legend_you_fame=t("chart.legend.you.fame", lang),
+                    legend_clan_avg_decks=t(
+                        "chart.legend.clan_avg.decks", lang
+                    ),
+                )
+                await message.answer_photo(
+                    BufferedInputFile(png_bytes, filename="activity.png"),
+                    parse_mode=None,
+                )
         except Exception as e:
             logger.warning(
                 "Failed to send my_activity chart: %s", e, exc_info=True
