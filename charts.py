@@ -71,7 +71,7 @@ def render_my_activity_decks_chart(
         player_fame,
         marker="o",
         label=legend_you_fame,
-        color="tab:yellow",
+        color="gold",
     )[0]
     ax2.set_ylabel(y_right_label)
 
@@ -85,7 +85,7 @@ def render_my_activity_decks_chart(
         legend_labels.append(legend_clan_avg_decks)
     if clan_avg_fame is not None:
         avg_fame_line = ax2.axhline(
-            clan_avg_fame, label=legend_clan_avg_fame, color="tab:yellow"
+            clan_avg_fame, label=legend_clan_avg_fame, color="gold"
         )
         legend_lines.append(avg_fame_line)
         legend_labels.append(legend_clan_avg_fame)
