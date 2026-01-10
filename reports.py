@@ -959,6 +959,7 @@ def _render_neighbors(
             line = f"{prefix}{rank_text} {name} — {score_text} ({delta_text})"
         lines.append(t("rank_neighbor_line", lang, line=line))
     if points_to_overtake is not None:
+        lines.append("")
         lines.append(
             t(
                 "rank_neighbors_overtake_line",
@@ -966,6 +967,7 @@ def _render_neighbors(
                 points=points_to_overtake,
             )
         )
+        lines.append("")
     if rank_value is None:
         lines.append(
             t(
@@ -1081,28 +1083,30 @@ async def build_rank_report(
 
     ladder_neighbors = snapshot.get("neighbors_ladder_json")
     war_neighbors = snapshot.get("neighbors_war_json")
-    lines.extend(
-        _render_neighbors(
-            ladder_neighbors if isinstance(ladder_neighbors, list) else None,
-            header=t("rank_neighbors_ladder_header", lang),
-            lang=lang,
-            points_to_overtake=_coerce_int(
-                snapshot.get("ladder_points_to_overtake_above")
-            ),
-            rank_value=ladder_rank,
-        )
+    ladder_lines = _render_neighbors(
+        ladder_neighbors if isinstance(ladder_neighbors, list) else None,
+        header=t("rank_neighbors_ladder_header", lang),
+        lang=lang,
+        points_to_overtake=_coerce_int(
+            snapshot.get("ladder_points_to_overtake_above")
+        ),
+        rank_value=ladder_rank,
     )
-    lines.extend(
-        _render_neighbors(
-            war_neighbors if isinstance(war_neighbors, list) else None,
-            header=t("rank_neighbors_war_header", lang),
-            lang=lang,
-            points_to_overtake=_coerce_int(
-                snapshot.get("war_points_to_overtake_above")
-            ),
-            rank_value=war_rank,
-        )
+    if ladder_lines:
+        lines.append("")
+        lines.extend(ladder_lines)
+    war_lines = _render_neighbors(
+        war_neighbors if isinstance(war_neighbors, list) else None,
+        header=t("rank_neighbors_war_header", lang),
+        lang=lang,
+        points_to_overtake=_coerce_int(
+            snapshot.get("war_points_to_overtake_above")
+        ),
+        rank_value=war_rank,
     )
+    if war_lines:
+        lines.append("")
+        lines.extend(war_lines)
 
     return "\n".join(lines)
 
