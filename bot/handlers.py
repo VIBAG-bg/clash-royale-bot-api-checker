@@ -4080,6 +4080,53 @@ async def cmd_my_activity(message: Message) -> None:
             lang=lang,
         )
         await message.answer(report, parse_mode=None)
+        try:
+            from aiogram.types import BufferedInputFile
+
+            from charts import render_my_activity_decks_chart
+            from db import (
+                get_current_member_tags,
+                get_last_weeks_from_db,
+                get_player_weekly_decks,
+                get_rolling_summary,
+            )
+
+            weeks = await get_last_weeks_from_db(clan_tag, limit=8)
+            if weeks:
+                weekly_rows = await get_player_weekly_decks(
+                    existing["player_tag"], weeks
+                )
+                if weekly_rows:
+                    week_labels = [
+                        f"{season}/{section + 1}"
+                        for season, section, _ in weekly_rows
+                    ]
+                    player_decks = [decks for _, _, decks in weekly_rows]
+                    clan_avg_decks = None
+                    member_tags = await get_current_member_tags(clan_tag)
+                    if member_tags:
+                        rolling = await get_rolling_summary(
+                            weeks, player_tags=member_tags
+                        )
+                        total_decks = sum(
+                            int(row.get("decks_used", 0)) for row in rolling
+                        )
+                        denominator = max(1, len(weeks) * len(member_tags))
+                        clan_avg_decks = total_decks / denominator
+                    png_bytes = render_my_activity_decks_chart(
+                        title=t("my_activity_title", lang),
+                        week_labels=week_labels,
+                        player_decks=player_decks,
+                        clan_avg_decks=clan_avg_decks,
+                    )
+                    await message.answer_photo(
+                        BufferedInputFile(png_bytes, filename="activity.png"),
+                        parse_mode=None,
+                    )
+        except Exception as e:
+            logger.warning(
+                "Failed to send my_activity chart: %s", e, exc_info=True
+            )
         return
 
     if message.chat.type == ChatType.PRIVATE:

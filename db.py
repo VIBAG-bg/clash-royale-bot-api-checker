@@ -4174,3 +4174,40 @@ async def get_last_weeks_from_db(
             .limit(limit)
         )
         return [(int(row.season_id), int(row.section_index)) for row in result.all()]
+
+
+async def get_player_weekly_decks(
+    player_tag: str,
+    weeks: list[tuple[int, int]],
+    session: AsyncSession | None = None,
+) -> list[tuple[int, int, int]]:
+    if not weeks:
+        return []
+    if session is None:
+        async with _get_session() as session:
+            return await get_player_weekly_decks(
+                player_tag, weeks, session=session
+            )
+    result = await session.execute(
+        select(
+            PlayerParticipation.season_id,
+            PlayerParticipation.section_index,
+            PlayerParticipation.decks_used,
+        ).where(
+            PlayerParticipation.player_tag == player_tag,
+            tuple_(
+                PlayerParticipation.season_id,
+                PlayerParticipation.section_index,
+            ).in_(weeks),
+        )
+    )
+    rows = [
+        (
+            int(row.season_id),
+            int(row.section_index),
+            int(row.decks_used or 0),
+        )
+        for row in result.all()
+    ]
+    rows.sort(key=lambda row: (row[0], row[1]))
+    return rows
