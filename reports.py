@@ -811,6 +811,18 @@ async def collect_clan_rank_snapshot(
 
     ladder_idx, ladder_entry = _find_rank_entry(ladder_items, clan_key)
     war_idx, war_entry = _find_rank_entry(war_items, clan_key)
+    if war_entry is None and RANKING_SNAPSHOT_LIMIT < 1000:
+        try:
+            war_items = await api_client.get_location_clanwar_rankings(
+                location_id,
+                limit=1000,
+            )
+            war_items = _extract_rank_items(war_items)
+            war_idx, war_entry = _find_rank_entry(war_items, clan_key)
+        except ClashRoyaleAPIError as e:
+            logger.warning("War rankings fallback fetch failed: %s", e)
+        except Exception as e:
+            logger.warning("War rankings fallback fetch failed: %s", e)
 
     ladder_neighbors, ladder_points, ladder_list_score = _build_neighbors_window(
         ladder_items,
