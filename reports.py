@@ -730,6 +730,18 @@ def _is_snapshot_fresh(snapshot: dict[str, object]) -> bool:
     )
 
 
+def _needs_war_refresh(snapshot: dict[str, object]) -> bool:
+    if _coerce_int(snapshot.get("war_rank")) is not None:
+        return False
+    raw_source = snapshot.get("raw_source")
+    limit = None
+    if isinstance(raw_source, dict):
+        limit = _coerce_int(raw_source.get("war_limit_used"))
+        if limit is None:
+            limit = _coerce_int(raw_source.get("limit"))
+    return limit is not None and limit < 1000
+
+
 async def collect_clan_rank_snapshot(
     clan_tag: str,
     *,
@@ -744,7 +756,8 @@ async def collect_clan_rank_snapshot(
     if location_id is not None:
         latest = await get_latest_clan_rank_snapshot(clan_key, location_id)
         if latest and not force and _is_snapshot_fresh(latest):
-            return latest
+            if not _needs_war_refresh(latest):
+                return latest
 
     try:
         api_client = await get_api_client()
@@ -775,7 +788,8 @@ async def collect_clan_rank_snapshot(
     if not force:
         latest = await get_latest_clan_rank_snapshot(clan_key, location_id)
         if latest and _is_snapshot_fresh(latest):
-            return latest
+            if not _needs_war_refresh(latest):
+                return latest
 
     clan_name = clan_info.get("name")
     clan_score = _coerce_int(clan_info.get("clanScore"))
@@ -787,6 +801,7 @@ async def collect_clan_rank_snapshot(
 
     ladder_items: list[dict[str, object]] = []
     war_items: list[dict[str, object]] = []
+    war_limit_used = RANKING_SNAPSHOT_LIMIT
     try:
         ladder_items = await api_client.get_location_clan_rankings(
             location_id,
@@ -819,10 +834,13 @@ async def collect_clan_rank_snapshot(
             )
             war_items = _extract_rank_items(war_items)
             war_idx, war_entry = _find_rank_entry(war_items, clan_key)
+            war_limit_used = 1000
         except ClashRoyaleAPIError as e:
             logger.warning("War rankings fallback fetch failed: %s", e)
+            war_limit_used = 1000
         except Exception as e:
             logger.warning("War rankings fallback fetch failed: %s", e)
+            war_limit_used = 1000
 
     ladder_neighbors, ladder_points, ladder_list_score = _build_neighbors_window(
         ladder_items,
@@ -873,6 +891,7 @@ async def collect_clan_rank_snapshot(
             "clan_name": clan_name,
             "ladder_found": ladder_rank is not None,
             "war_found": war_rank is not None,
+            "war_limit_used": war_limit_used,
         },
     }
     await insert_clan_rank_snapshot(snapshot)
