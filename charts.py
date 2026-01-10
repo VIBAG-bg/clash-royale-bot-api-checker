@@ -35,12 +35,14 @@ def render_my_activity_decks_chart(
     player_decks: list[int],
     player_fame: list[int],
     clan_avg_decks: float | None = None,
+    clan_avg_fame: float | None = None,
     x_label: str,
     y_left_label: str,
     y_right_label: str,
     legend_you_decks: str,
     legend_you_fame: str,
     legend_clan_avg_decks: str,
+    legend_clan_avg_fame: str,
 ) -> bytes:
     _require_matplotlib()
     if not week_labels or not player_decks or not player_fame:
@@ -72,6 +74,12 @@ def render_my_activity_decks_chart(
         )
         legend_lines.append(avg_line)
         legend_labels.append(legend_clan_avg_decks)
+    if clan_avg_fame is not None:
+        avg_fame_line = ax2.axhline(
+            clan_avg_fame, label=legend_clan_avg_fame
+        )
+        legend_lines.append(avg_fame_line)
+        legend_labels.append(legend_clan_avg_fame)
     ax.set_title(title)
     ax.legend(legend_lines, legend_labels)
     ax.tick_params(axis="x", rotation=20)

@@ -4099,6 +4099,10 @@ async def cmd_my_activity(message: Message) -> None:
                 weekly_rows = await get_player_weekly_activity(
                     existing["player_tag"], weeks
                 )
+                weeks_available = len(weekly_rows)
+                player_fame_total = sum(
+                    fame for _, _, _, fame in weekly_rows
+                )
                 week_map = {
                     (season, section): (decks, fame)
                     for season, section, decks, fame in weekly_rows
@@ -4113,6 +4117,7 @@ async def cmd_my_activity(message: Message) -> None:
                     player_decks.append(decks)
                     player_fame.append(fame)
                 clan_avg_decks = None
+                clan_avg_fame = None
                 member_tags = await get_current_member_tags(clan_tag)
                 if member_tags:
                     rolling = await get_rolling_summary(
@@ -4121,14 +4126,24 @@ async def cmd_my_activity(message: Message) -> None:
                     total_decks = sum(
                         int(row.get("decks_used", 0)) for row in rolling
                     )
+                    total_fame = sum(
+                        int(row.get("fame", 0)) for row in rolling
+                    )
                     denominator = max(1, len(weeks) * len(member_tags))
                     clan_avg_decks = total_decks / denominator
+                    clan_avg_fame = total_fame / denominator
+                clan_avg_fame_line = None
+                if clan_avg_fame is not None and weeks_available:
+                    player_avg_fame = player_fame_total / weeks_available
+                    if abs(player_avg_fame - clan_avg_fame) <= 500:
+                        clan_avg_fame_line = clan_avg_fame
                 png_bytes = render_my_activity_decks_chart(
                     title=t("chart.war_activity.title", lang),
                     week_labels=week_labels,
                     player_decks=player_decks,
                     player_fame=player_fame,
                     clan_avg_decks=clan_avg_decks,
+                    clan_avg_fame=clan_avg_fame_line,
                     x_label=t("chart.axis.week", lang),
                     y_left_label=t("chart.axis.decks", lang),
                     y_right_label=t("chart.axis.fame", lang),
@@ -4136,6 +4151,9 @@ async def cmd_my_activity(message: Message) -> None:
                     legend_you_fame=t("chart.legend.you.fame", lang),
                     legend_clan_avg_decks=t(
                         "chart.legend.clan_avg.decks", lang
+                    ),
+                    legend_clan_avg_fame=t(
+                        "chart.legend.clan_avg.fame", lang
                     ),
                 )
                 await message.answer_photo(
