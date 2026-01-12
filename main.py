@@ -75,7 +75,11 @@ from reports import (
     build_rolling_report,
     build_weekly_report,
 )
-from riverrace_import import get_last_completed_week, get_last_completed_weeks
+from riverrace_import import (
+    get_last_completed_week,
+    get_last_completed_weeks,
+    import_riverrace_log,
+)
 from i18n import DEFAULT_LANG, t
 
 # Configure logging
@@ -205,6 +209,54 @@ def _parse_reminder_time(value: str) -> tuple[int, int] | None:
     if hour < 0 or hour > 23 or minute < 0 or minute > 59:
         return None
     return hour, minute
+
+
+async def _maybe_backfill_last_completed_week(
+    clan_tag: str,
+    season_id: int | None,
+    section_index: int | None,
+) -> None:
+    if not clan_tag:
+        return
+    target_season = None
+    target_section = None
+    if season_id is not None and section_index is not None and section_index > 0:
+        target_season = season_id
+        target_section = section_index - 1
+    else:
+        last_week = await get_last_completed_week(clan_tag)
+        if last_week:
+            target_season, target_section = last_week
+    if target_season is None or target_section is None:
+        logger.info("Training backfill skipped: missing target week")
+        return
+
+    state = await get_river_race_state_for_week(
+        clan_tag, target_season, target_section
+    )
+    if state and str(state.get("period_type")).lower() == "completed":
+        return
+    try:
+        weeks_imported, players_imported = await import_riverrace_log(
+            weeks=1,
+            clan_tag=clan_tag,
+            season_id=target_season,
+            section_index=target_section,
+        )
+        logger.info(
+            "Training backfill completed: season=%s section=%s weeks=%s players=%s",
+            target_season,
+            target_section,
+            weeks_imported,
+            players_imported,
+        )
+    except Exception as e:
+        logger.warning(
+            "Training backfill failed: season=%s section=%s error=%s",
+            target_season,
+            target_section,
+            e,
+        )
 
 
 async def _store_war_day_start(
@@ -510,6 +562,11 @@ async def fetch_river_race_stats() -> None:
                                 session=session,
                             )
                         await session.commit()
+                        await _maybe_backfill_last_completed_week(
+                            CLAN_TAG,
+                            resolved_season_id,
+                            resolved_section_index,
+                        )
                         return
 
                     if resolved_season_id is None or resolved_section_index is None:
