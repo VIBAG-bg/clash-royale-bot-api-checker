@@ -729,19 +729,46 @@ async def maybe_post_weekly_report(bot: Bot) -> None:
 
 
 async def maybe_post_daily_war_reminder(
-    bot: Bot, *, debug_chat_id: int | None = None
+    bot: Bot,
+    *,
+    debug_chat_id: int | None = None,
+    return_status: bool = False,
 ) -> dict[str, object] | None:
     if not REMINDER_ENABLED and debug_chat_id is None:
+        if return_status:
+            return {"status": "disabled"}
         return
     async with REMINDER_LOCK:
         api_client = await get_api_client()
-        river_race = await api_client.get_current_river_race(CLAN_TAG)
+        try:
+            river_race = await api_client.get_current_river_race(CLAN_TAG)
+        except ClashRoyaleAPIError as e:
+            logger.warning(
+                "Reminder skipped: failed to fetch current river race: %s", e
+            )
+            if return_status:
+                return {"status": "api_error", "error": str(e)}
+            return
+        except Exception as e:
+            logger.warning(
+                "Reminder skipped: failed to fetch current river race: %s",
+                e,
+                exc_info=True,
+            )
+            if return_status:
+                return {"status": "api_error", "error": str(e)}
+            return
         period_type = river_race.get("periodType", "unknown") or "unknown"
         period_type_lower = str(period_type).lower()
         if period_type_lower not in ("warday", "colosseum"):
             logger.info(
                 "Reminder skipped: period type %s", period_type_lower
             )
+            if return_status:
+                return {
+                    "status": "skip_period",
+                    "period_type": period_type_lower,
+                }
             return
 
         season_id = _parse_season_id(river_race.get("seasonId"))
@@ -759,6 +786,11 @@ async def maybe_post_daily_war_reminder(
                 logger.warning(
                     "Reminder skipped: unable to resolve week (source=%s)", source
                 )
+                if return_status:
+                    return {
+                        "status": "skip_week",
+                        "period_type": period_type_lower,
+                    }
                 return
             state = await get_river_race_state_for_week(
                 CLAN_TAG, resolved_season_id, resolved_section_index
@@ -846,6 +878,17 @@ async def maybe_post_daily_war_reminder(
                         "snapshot": snapshot_value,
                         "override": override_value,
                     }
+                if return_status:
+                    return {
+                        "status": "unknown_day",
+                        "season_id": resolved_season_id,
+                        "section_index": resolved_section_index,
+                        "day_number": "n/a",
+                        "period_type": effective_period_type,
+                        "resolved_by": resolved_by or "none",
+                        "snapshot": snapshot_value,
+                        "override": override_value,
+                    }
                 logger.info(
                     "Reminder skipped: unknown day number (season=%s section=%s period=%s periodIndex=%r first_snapshot_date=%r finish_anchor=%r finish_source=%r training_days_fallback=%s resolved_by=%r now=%s)",
                     context.get("season_id"),
@@ -892,6 +935,14 @@ async def maybe_post_daily_war_reminder(
                             == effective_period_type
                             and int(last_state.get("day_number", 0)) == day_number
                         ):
+                            if return_status:
+                                return {
+                                    "status": "already_posted",
+                                    "season_id": resolved_season_id,
+                                    "section_index": resolved_section_index,
+                                    "period_type": effective_period_type,
+                                    "day_number": day_number,
+                                }
                             return
                     except Exception:
                         pass
@@ -905,6 +956,14 @@ async def maybe_post_daily_war_reminder(
                 chat_ids = await get_enabled_clan_chats(CLAN_TAG)
                 if not chat_ids:
                     logger.info("No enabled clan chats for daily reminders")
+                    if return_status:
+                        return {
+                            "status": "no_chats",
+                            "season_id": resolved_season_id,
+                            "section_index": resolved_section_index,
+                            "period_type": effective_period_type,
+                            "day_number": day_number,
+                        }
                     return
 
             if effective_period_type == "colosseum":
@@ -935,6 +994,14 @@ async def maybe_post_daily_war_reminder(
             message = messages.get(day_number)
             if not message:
                 logger.warning("Reminder skipped: no template for day %s", day_number)
+                if return_status:
+                    return {
+                        "status": "no_template",
+                        "season_id": resolved_season_id,
+                        "section_index": resolved_section_index,
+                        "period_type": effective_period_type,
+                        "day_number": day_number,
+                    }
                 return
 
             reminder_date = datetime.now(timezone.utc).date()
@@ -1012,6 +1079,15 @@ async def maybe_post_daily_war_reminder(
             )
             if debug_chat_id is not None:
                 return debug_summary
+            if return_status:
+                return {
+                    "status": "posted",
+                    "season_id": resolved_season_id,
+                    "section_index": resolved_section_index,
+                    "period_type": effective_period_type,
+                    "day_number": day_number,
+                    "sent_count": sent_count,
+                }
     return None
 
 
@@ -1152,6 +1228,8 @@ async def daily_reminder_task(bot: Bot) -> None:
         return
     hour, minute = reminder_time
     late_grace = timedelta(hours=6)
+    retry_window = timedelta(minutes=120)
+    retry_interval = timedelta(minutes=10)
     logger.info("Daily reminder scheduler started at %02d:%02d UTC", hour, minute)
 
     while True:
@@ -1174,7 +1252,38 @@ async def daily_reminder_task(bot: Bot) -> None:
                 if sleep_for > 0:
                     await asyncio.sleep(sleep_for)
                 continue
-            await maybe_post_daily_war_reminder(bot)
+            retry_deadline = target + retry_window
+            while True:
+                result = await maybe_post_daily_war_reminder(
+                    bot, return_status=True
+                )
+                status = result.get("status") if isinstance(result, dict) else None
+                period_type = (
+                    result.get("period_type") if isinstance(result, dict) else None
+                )
+                if status in ("posted", "already_posted"):
+                    break
+                if status in ("skip_period", "no_chats", "disabled", "no_template"):
+                    break
+                if status not in ("api_error", "skip_week", "unknown_day"):
+                    break
+                if status != "api_error" and period_type not in ("warday", "colosseum"):
+                    break
+                now = datetime.now(timezone.utc)
+                if now >= retry_deadline:
+                    logger.info(
+                        "Daily reminder retry window elapsed (status=%s)",
+                        status,
+                    )
+                    break
+                sleep_for = min(
+                    retry_interval.total_seconds(),
+                    (retry_deadline - now).total_seconds(),
+                )
+                if sleep_for > 0:
+                    await asyncio.sleep(sleep_for)
+                else:
+                    break
             next_target = target + timedelta(days=1)
             sleep_for = (next_target - datetime.now(timezone.utc)).total_seconds()
             if sleep_for > 0:
