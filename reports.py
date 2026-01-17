@@ -807,6 +807,8 @@ async def collect_clan_rank_snapshot(
     ladder_items: list[dict[str, object]] = []
     war_items: list[dict[str, object]] = []
     war_limit_used = RANKING_SNAPSHOT_LIMIT
+    ladder_fetch_failed = False
+    war_fetch_failed = False
     try:
         ladder_items = await api_client.get_location_clan_rankings(
             location_id,
@@ -814,8 +816,10 @@ async def collect_clan_rank_snapshot(
         )
     except ClashRoyaleAPIError as e:
         logger.warning("Ladder rankings fetch failed: %s", e)
+        ladder_fetch_failed = True
     except Exception as e:
         logger.warning("Ladder rankings fetch failed: %s", e)
+        ladder_fetch_failed = True
     try:
         war_items = await api_client.get_location_clanwar_rankings(
             location_id,
@@ -823,8 +827,14 @@ async def collect_clan_rank_snapshot(
         )
     except ClashRoyaleAPIError as e:
         logger.warning("War rankings fetch failed: %s", e)
+        war_fetch_failed = True
     except Exception as e:
         logger.warning("War rankings fetch failed: %s", e)
+        war_fetch_failed = True
+
+    if not force and (ladder_fetch_failed or war_fetch_failed) and latest:
+        logger.info("Rank snapshot fallback to latest due to ranking fetch failure")
+        return latest
 
     ladder_items = _extract_rank_items(ladder_items)
     war_items = _extract_rank_items(war_items)
