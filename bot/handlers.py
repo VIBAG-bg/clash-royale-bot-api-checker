@@ -66,6 +66,7 @@ from db import (
     get_application_by_id,
     get_captcha_question,
     get_current_member_tags,
+    get_current_members_snapshot,
     get_user_language,
     get_first_seen_time,
     get_last_rejected_time_for_user,
@@ -90,6 +91,7 @@ from db import (
     get_challenge_by_id,
     get_user_link,
     get_user_link_request,
+    get_user_links_by_tags,
     list_mod_actions,
     list_mod_actions_for_user,
     search_player_candidates,
@@ -3413,7 +3415,61 @@ async def cmd_tg(message: Message) -> None:
     if not clan_tag:
         await message.answer(t("clan_tag_not_configured", lang), parse_mode=None)
         return
-    report = await build_tg_list_report(clan_tag, lang=lang)
+    members = await get_current_members_snapshot(clan_tag)
+    if not members:
+        await message.answer(t("tg_no_snapshot", lang), parse_mode=None)
+        return
+    tags: set[str] = set()
+    for row in members:
+        raw_tag = row.get("player_tag")
+        if not raw_tag:
+            continue
+        tag = str(raw_tag).strip().upper()
+        if tag and not tag.startswith("#"):
+            tag = f"#{tag}"
+        if tag:
+            tags.add(tag)
+    if not tags:
+        await message.answer(t("tg_no_snapshot", lang), parse_mode=None)
+        return
+    links = await get_user_links_by_tags(tags)
+    if not links:
+        await message.answer(t("tg_no_users", lang), parse_mode=None)
+        return
+    entries: list[dict[str, str]] = []
+    for row in members:
+        raw_tag = row.get("player_tag")
+        if not raw_tag:
+            continue
+        tag = str(raw_tag).strip().upper()
+        if tag and not tag.startswith("#"):
+            tag = f"#{tag}"
+        user_id = links.get(tag)
+        if not user_id:
+            continue
+        username = None
+        try:
+            chat = await message.bot.get_chat(user_id)
+            username = getattr(chat, "username", None)
+        except Exception:
+            username = None
+        entries.append(
+            {
+                "name": row.get("player_name") or t("unknown", lang),
+                "username": (
+                    username.lstrip("@")
+                    if username
+                    else t("tg_username_id", lang, id=user_id)
+                ),
+            }
+        )
+    if not entries:
+        await message.answer(t("tg_no_users", lang), parse_mode=None)
+        return
+    entries.sort(key=lambda row: row["name"].lower())
+    report = await build_tg_list_report(
+        clan_tag, lang=lang, entries=entries
+    )
     await message.answer(report, parse_mode=None)
 
 

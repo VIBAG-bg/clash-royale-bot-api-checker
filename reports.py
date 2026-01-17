@@ -44,7 +44,6 @@ from db import (
     PlayerParticipation,
     RiverRaceState,
     get_app_state,
-    get_application_usernames_by_tag,
     get_current_member_tags,
     get_current_members_snapshot,
     get_clan_wtd_donation_average,
@@ -2603,46 +2602,21 @@ async def build_tg_list_report(
     clan_tag: str,
     *,
     lang: str = DEFAULT_LANG,
+    entries: list[dict[str, str]] | None = None,
 ) -> str:
     lines = [HEADER_LINE, t("tg_title", lang), HEADER_LINE]
-    async with get_session() as session:
-        members = await get_current_members_snapshot(
-            clan_tag, session=session
-        )
-        if not members:
-            lines.append(t("tg_no_snapshot", lang))
-            return "\n".join(lines)
-        members = sorted(
-            members,
-            key=lambda row: str(row.get("player_name") or "").lower(),
-        )
-        tags = {
-            _normalize_tag(row.get("player_tag"))
-            for row in members
-            if row.get("player_tag")
-        }
-        if not tags:
-            lines.append(t("tg_no_snapshot", lang))
-            return "\n".join(lines)
-        usernames = await get_application_usernames_by_tag(
-            tags, session=session
-        )
-
-    for index, row in enumerate(members, 1):
-        tag = _normalize_tag(row.get("player_tag"))
-        name = row.get("player_name") or t("unknown", lang)
-        username = usernames.get(tag)
-        if username:
-            username = username.lstrip("@")
-        else:
-            username = t("tg_username_missing", lang)
+    entries = entries or []
+    if not entries:
+        lines.append(t("tg_no_users", lang))
+        return "\n".join(lines)
+    for index, row in enumerate(entries, 1):
         lines.append(
             t(
                 "tg_line",
                 lang,
                 index=index,
-                name=name,
-                username=username,
+                name=row.get("name"),
+                username=row.get("username"),
             )
         )
     return "\n".join(lines)

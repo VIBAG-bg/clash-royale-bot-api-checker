@@ -3328,6 +3328,30 @@ async def get_user_link(
     }
 
 
+async def get_user_links_by_tags(
+    player_tags: set[str], session: AsyncSession | None = None
+) -> dict[str, int]:
+    if session is None:
+        async with _get_session() as session:
+            return await get_user_links_by_tags(player_tags, session=session)
+    if not player_tags:
+        return {}
+    normalized = {str(tag).strip().upper() for tag in player_tags if tag}
+    result = await session.execute(
+        select(UserLink.player_tag, UserLink.telegram_user_id).where(
+            func.upper(UserLink.player_tag).in_(normalized)
+        )
+    )
+    links: dict[str, int] = {}
+    for row in result.all():
+        tag = str(row.player_tag).strip().upper()
+        if tag and not tag.startswith("#"):
+            tag = f"#{tag}"
+        if tag:
+            links[tag] = int(row.telegram_user_id)
+    return links
+
+
 async def upsert_user_link(
     telegram_user_id: int,
     player_tag: str,
