@@ -753,6 +753,7 @@ async def collect_clan_rank_snapshot(
     clan_key = _normalize_tag(clan_tag)
     location_id = RANKING_LOCATION_ID
     location_name = None
+    latest = None
     if location_id is not None:
         latest = await get_latest_clan_rank_snapshot(clan_key, location_id)
         if latest and not force and _is_snapshot_fresh(latest):
@@ -764,9 +765,13 @@ async def collect_clan_rank_snapshot(
         clan_info = await api_client.get_clan(clan_tag)
     except ClashRoyaleAPIError as e:
         logger.warning("Rank snapshot skipped (clan info error): %s", e)
+        if latest:
+            return latest
         return None
     except Exception as e:
         logger.warning("Rank snapshot skipped (clan info failed): %s", e)
+        if latest:
+            return latest
         return None
 
     if not isinstance(clan_info, dict):
@@ -1541,17 +1546,92 @@ def _normalize_role(role: object) -> str:
 async def build_clan_info_report(
     clan_tag: str, *, lang: str = DEFAULT_LANG
 ) -> str:
+    async def _load_clan_info_fallback() -> tuple[dict[str, object] | None, list[dict[str, object]]]:
+        clan_key = _normalize_tag(clan_tag)
+        snapshot = None
+        if RANKING_LOCATION_ID is not None:
+            snapshot = await get_latest_clan_rank_snapshot(
+                clan_key, RANKING_LOCATION_ID
+            )
+        member_rows = await get_current_members_snapshot(clan_tag)
+        if not member_rows and not snapshot:
+            return None, []
+
+        members: list[dict[str, object]] = []
+        for row in member_rows:
+            members.append(
+                {
+                    "tag": row.get("player_tag") or "",
+                    "name": row.get("player_name") or t("unknown", lang),
+                    "role": row.get("role"),
+                    "trophies": row.get("trophies"),
+                    "donations": row.get("donations"),
+                    "donationsReceived": row.get("donations_received"),
+                    "expLevel": row.get("exp_level"),
+                    "clanRank": row.get("clan_rank"),
+                    "previousClanRank": row.get("previous_clan_rank"),
+                    "lastSeen": row.get("last_seen"),
+                }
+            )
+
+        clan_name = t("unknown", lang)
+        members_count = len(members)
+        clan_score = None
+        war_trophies = None
+        location_name = None
+        if isinstance(snapshot, dict):
+            location_name = snapshot.get("location_name") or location_name
+            clan_score = snapshot.get("ladder_clan_score")
+            war_trophies = snapshot.get("clan_war_trophies")
+            snapshot_members = snapshot.get("members")
+            if isinstance(snapshot_members, int):
+                members_count = snapshot_members
+            raw_source = snapshot.get("raw_source")
+            if isinstance(raw_source, dict):
+                clan_name = raw_source.get("clan_name") or clan_name
+
+        donations_total = None
+        if members:
+            donations_total = sum(
+                int(member.get("donations") or 0) for member in members
+            )
+
+        clan = {
+            "tag": clan_tag,
+            "name": clan_name,
+            "members": members_count,
+            "clanScore": clan_score if clan_score is not None else t("na", lang),
+            "clanWarTrophies": war_trophies
+            if war_trophies is not None
+            else t("na", lang),
+            "donationsPerWeek": donations_total
+            if donations_total is not None
+            else t("na", lang),
+            "location": {"name": location_name} if location_name else {},
+            "type": None,
+            "requiredTrophies": None,
+        }
+        return clan, members
+
+    clan = None
+    members: list[dict[str, object]] = []
     try:
         api_client = await get_api_client()
         clan = await api_client.get_clan(clan_tag)
         members = await api_client.get_clan_members(clan_tag)
+        if not isinstance(members, list):
+            members = []
     except ClashRoyaleAPIError as e:
         if e.status_code in (401, 403):
             return t("clan_info_access_denied", lang)
-        return t("clan_info_unavailable", lang)
-    except Exception as e:
         logger.warning("Failed to fetch clan info: %s", e)
-        return t("clan_info_unavailable", lang)
+    except Exception as e:
+        logger.warning("Failed to fetch clan info: %s", e, exc_info=True)
+
+    if not clan:
+        clan, members = await _load_clan_info_fallback()
+        if not clan:
+            return t("clan_info_unavailable", lang)
 
     location = clan.get("location") or {}
     location_name = (

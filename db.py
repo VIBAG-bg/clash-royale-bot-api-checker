@@ -1613,6 +1613,11 @@ async def get_current_members_snapshot(
             ClanMemberDaily.role,
             ClanMemberDaily.last_seen,
             ClanMemberDaily.donations,
+            ClanMemberDaily.donations_received,
+            ClanMemberDaily.trophies,
+            ClanMemberDaily.exp_level,
+            ClanMemberDaily.clan_rank,
+            ClanMemberDaily.previous_clan_rank,
         ).where(
             ClanMemberDaily.clan_tag == clan_tag,
             ClanMemberDaily.snapshot_date == latest_date,
@@ -1625,6 +1630,19 @@ async def get_current_members_snapshot(
             "role": row.role,
             "last_seen": row.last_seen,
             "donations": int(row.donations) if row.donations is not None else None,
+            "donations_received": (
+                int(row.donations_received)
+                if row.donations_received is not None
+                else None
+            ),
+            "trophies": int(row.trophies) if row.trophies is not None else None,
+            "exp_level": int(row.exp_level) if row.exp_level is not None else None,
+            "clan_rank": int(row.clan_rank) if row.clan_rank is not None else None,
+            "previous_clan_rank": (
+                int(row.previous_clan_rank)
+                if row.previous_clan_rank is not None
+                else None
+            ),
         }
         for row in result.all()
     ]

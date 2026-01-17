@@ -110,6 +110,26 @@ class ClashRoyaleAPI:
                 response.status_code,
                 f"API request failed: {response.text}",
             )
+
+    async def _request_with_404_retry(self, endpoint: str) -> dict[str, Any]:
+        """Retry 404s a few times to handle flaky CR API edge/cache nodes."""
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return await self._request(endpoint)
+            except ClashRoyaleAPIError as e:
+                if e.status_code != 404 or attempt >= max_attempts:
+                    raise
+                delay = 0.5 * attempt
+                logger.warning(
+                    "CR API 404 for %s (attempt %s/%s), retrying in %.1fs",
+                    endpoint,
+                    attempt,
+                    max_attempts,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+        return {}
     
     async def get_clan(self, clan_tag: str) -> dict[str, Any]:
         """
@@ -122,7 +142,7 @@ class ClashRoyaleAPI:
             Clan data dictionary
         """
         encoded_tag = self._encode_tag(clan_tag)
-        return await self._request(f"/clans/{encoded_tag}")
+        return await self._request_with_404_retry(f"/clans/{encoded_tag}")
     
     async def get_clan_members(self, clan_tag: str) -> list[dict[str, Any]]:
         """
@@ -135,7 +155,9 @@ class ClashRoyaleAPI:
             List of clan member dictionaries
         """
         encoded_tag = self._encode_tag(clan_tag)
-        response = await self._request(f"/clans/{encoded_tag}/members")
+        response = await self._request_with_404_retry(
+            f"/clans/{encoded_tag}/members"
+        )
         return response.get("items", [])
     
     async def get_current_river_race(self, clan_tag: str) -> dict[str, Any]:
@@ -155,7 +177,9 @@ class ClashRoyaleAPI:
             Current River Race data dictionary
         """
         encoded_tag = self._encode_tag(clan_tag)
-        return await self._request(f"/clans/{encoded_tag}/currentriverrace")
+        return await self._request_with_404_retry(
+            f"/clans/{encoded_tag}/currentriverrace"
+        )
     
     async def get_river_race_log(self, clan_tag: str) -> list[dict[str, Any]]:
         """
@@ -168,23 +192,10 @@ class ClashRoyaleAPI:
             List of past River Race entries
         """
         encoded_tag = self._encode_tag(clan_tag)
-        max_attempts = 3
-        for attempt in range(1, max_attempts + 1):
-            try:
-                response = await self._request(f"/clans/{encoded_tag}/riverracelog")
-                return response.get("items", [])
-            except ClashRoyaleAPIError as e:
-                if e.status_code != 404 or attempt >= max_attempts:
-                    raise
-                delay = 0.5 * attempt
-                logger.warning(
-                    "CR API 404 for riverracelog (attempt %s/%s), retrying in %.1fs",
-                    attempt,
-                    max_attempts,
-                    delay,
-                )
-                await asyncio.sleep(delay)
-        return []
+        response = await self._request_with_404_retry(
+            f"/clans/{encoded_tag}/riverracelog"
+        )
+        return response.get("items", [])
     
     async def get_player(self, player_tag: str) -> dict[str, Any]:
         """
@@ -197,7 +208,7 @@ class ClashRoyaleAPI:
             Player data dictionary
         """
         encoded_tag = self._encode_tag(player_tag)
-        return await self._request(f"/players/{encoded_tag}")
+        return await self._request_with_404_retry(f"/players/{encoded_tag}")
 
     async def get_location_clan_rankings(
         self,
@@ -214,7 +225,7 @@ class ClashRoyaleAPI:
         if before:
             params.append(f"before={before}")
         query = f"?{'&'.join(params)}" if params else ""
-        response = await self._request(
+        response = await self._request_with_404_retry(
             f"/locations/{location_id}/rankings/clans{query}"
         )
         return response.get("items", [])
@@ -234,7 +245,7 @@ class ClashRoyaleAPI:
         if before:
             params.append(f"before={before}")
         query = f"?{'&'.join(params)}" if params else ""
-        response = await self._request(
+        response = await self._request_with_404_retry(
             f"/locations/{location_id}/rankings/clanwars{query}"
         )
         return response.get("items", [])
