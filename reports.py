@@ -44,6 +44,7 @@ from db import (
     PlayerParticipation,
     RiverRaceState,
     get_app_state,
+    get_application_usernames_by_tag,
     get_current_member_tags,
     get_current_members_snapshot,
     get_clan_wtd_donation_average,
@@ -2499,6 +2500,151 @@ async def build_kick_shortlist_report(
             )
 
     lines.append(t("kick_wtd_note", lang))
+    return "\n".join(lines)
+
+
+async def build_kick_newbie_report(
+    clan_tag: str,
+    *,
+    lang: str = DEFAULT_LANG,
+    limit: int = 10,
+) -> str:
+    lines = [
+        HEADER_LINE,
+        t("kick_newbie_title", lang),
+        HEADER_LINE,
+        t("kick_newbie_rules", lang, limit=limit),
+    ]
+    async with get_session() as session:
+        members = await get_current_members_snapshot(
+            clan_tag, session=session
+        )
+        if not members:
+            lines.append(t("kick_newbie_no_snapshot", lang))
+            return "\n".join(lines)
+        members = _filter_protected(members)
+        tags = {
+            _normalize_tag(row.get("player_tag"))
+            for row in members
+            if row.get("player_tag")
+        }
+        if not tags:
+            lines.append(t("kick_newbie_none", lang))
+            return "\n".join(lines)
+        history_counts = await get_participation_week_counts(
+            player_tags=tags, session=session
+        )
+        totals_result = await session.execute(
+            select(
+                PlayerParticipation.player_tag,
+                func.sum(PlayerParticipation.decks_used).label("decks_sum"),
+                func.sum(PlayerParticipation.fame).label("fame_sum"),
+            )
+            .where(PlayerParticipation.player_tag.in_(tags))
+            .group_by(PlayerParticipation.player_tag)
+        )
+        activity_map = {
+            row.player_tag: {
+                "decks_sum": int(row.decks_sum or 0),
+                "fame_sum": int(row.fame_sum or 0),
+            }
+            for row in totals_result.all()
+        }
+
+    candidates: list[dict[str, object]] = []
+    for row in members:
+        tag = _normalize_tag(row.get("player_tag"))
+        if not tag:
+            continue
+        full_weeks = int(history_counts.get(tag, 0))
+        if full_weeks > 2:
+            continue
+        totals = activity_map.get(tag, {})
+        decks_sum = int(totals.get("decks_sum", 0))
+        fame_sum = int(totals.get("fame_sum", 0))
+        candidates.append(
+            {
+                "player_tag": tag,
+                "player_name": row.get("player_name") or t("unknown", lang),
+                "weeks_in_clan": full_weeks,
+                "decks_sum": decks_sum,
+                "fame_sum": fame_sum,
+            }
+        )
+
+    if not candidates:
+        lines.append(t("kick_newbie_none", lang))
+        return "\n".join(lines)
+
+    candidates.sort(
+        key=lambda row: (
+            int(row.get("decks_sum", 0)),
+            int(row.get("fame_sum", 0)),
+            str(row.get("player_name", "")),
+        )
+    )
+    for index, row in enumerate(candidates[: max(limit, 0)], 1):
+        lines.append(
+            t(
+                "kick_newbie_line",
+                lang,
+                index=index,
+                name=row.get("player_name"),
+                tag=row.get("player_tag"),
+                weeks=row.get("weeks_in_clan"),
+                decks=row.get("decks_sum"),
+                fame=row.get("fame_sum"),
+            )
+        )
+    return "\n".join(lines)
+
+
+async def build_tg_list_report(
+    clan_tag: str,
+    *,
+    lang: str = DEFAULT_LANG,
+) -> str:
+    lines = [HEADER_LINE, t("tg_title", lang), HEADER_LINE]
+    async with get_session() as session:
+        members = await get_current_members_snapshot(
+            clan_tag, session=session
+        )
+        if not members:
+            lines.append(t("tg_no_snapshot", lang))
+            return "\n".join(lines)
+        members = sorted(
+            members,
+            key=lambda row: str(row.get("player_name") or "").lower(),
+        )
+        tags = {
+            _normalize_tag(row.get("player_tag"))
+            for row in members
+            if row.get("player_tag")
+        }
+        if not tags:
+            lines.append(t("tg_no_snapshot", lang))
+            return "\n".join(lines)
+        usernames = await get_application_usernames_by_tag(
+            tags, session=session
+        )
+
+    for index, row in enumerate(members, 1):
+        tag = _normalize_tag(row.get("player_tag"))
+        name = row.get("player_name") or t("unknown", lang)
+        username = usernames.get(tag)
+        if username:
+            username = username.lstrip("@")
+        else:
+            username = t("tg_username_missing", lang)
+        lines.append(
+            t(
+                "tg_line",
+                lang,
+                index=index,
+                name=name,
+                username=username,
+            )
+        )
     return "\n".join(lines)
 
 

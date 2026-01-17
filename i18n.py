@@ -53,6 +53,8 @@ TEXT = {
         "/war8 - отчёт за 8 недель\n"
         "/top [N] - ТОП за 10 недель (только 6+ недель в клане)\n"
         "/list_for_kick - список на исключение\n"
+        "/kick_newbie - список на кик новичков\n"
+        "/tg - ник + telegram username\n"
         "/current_war - текущая неделя\n"
         "/my_activity - ваша активность\n"
         "/activity - активность по нику/@username\n"
@@ -75,6 +77,8 @@ TEXT = {
         "help_cmd_activity": "/activity <ник>|@username|reply - активность по нику/@/reply",
         "help_cmd_donations": "/donations - таблица донатов",
         "help_cmd_list_for_kick": "/list_for_kick - список на исключение",
+        "help_cmd_kick_newbie": "/kick_newbie - список на кик новичков",
+        "help_cmd_tg": "/tg - ник в игре и telegram username",
         "help_cmd_inactive": "/inactive - список по last seen",
         "help_cmd_promote_candidates": "/promote_candidates - рекомендации по повышению",
         "help_cmd_clan_place": "/clan_place - место клана в текущей гонке",
@@ -355,9 +359,18 @@ TEXT = {
         "kick_shortlist_rules": "Правила: новички ≤ {weeks} нед.; восстановлены при {revived} колодах на прошлой неделе.",
         "kick_wtd_note": "WTD — текущая донат-неделя.",
         "kick_shortlist_title": "🚫 Список на кик",
+        "kick_newbie_title": "🚫 Кик новичков",
+        "kick_newbie_rules": "1–2 полных КВ в клане. Топ {limit} по низким показателям от входа.",
+        "kick_newbie_line": "{index}) {name} {tag} — {weeks} КВ | колоды {decks} | очки {fame}",
+        "kick_newbie_none": "Нет новичков для списка.",
+        "kick_newbie_no_snapshot": "Нет данных по участникам клана.",
         "kick_warnings_donating_header": "🟢 Кандидаты на кик, но имеют активные донаты",
         "kick_warnings_revived_header": "🟡 Кандидаты на кик, но недавно восстановили активность",
         "link_confirm": "Готово.",
+        "tg_title": "📋 Telegram список",
+        "tg_line": "{index}) {name} — {username}",
+        "tg_username_missing": "нет username",
+        "tg_no_snapshot": "Нет данных по участникам клана.",
         "link_not_allowed": "Вам нельзя выполнять эту операцию.",
         "link_request_expired": "Запрос на привязку истек.",
         "link_select_prompt": "Выберите свой аккаунт из списка.",
@@ -618,6 +631,8 @@ TEXT = {
         "/war8 - 8-week report\n"
         "/top [N] - top for last 10 weeks (6+ weeks in clan)\n"
         "/list_for_kick - kick shortlist\n"
+        "/kick_newbie - newbie kick list\n"
+        "/tg - in-game name + Telegram username\n"
         "/current_war - current week\n"
         "/my_activity - your activity\n"
         "/activity - activity by nickname/@username\n"
@@ -640,6 +655,8 @@ TEXT = {
         "help_cmd_activity": "/activity <nickname>|@username|reply - activity by name/@/reply",
         "help_cmd_donations": "/donations - donations leaderboard",
         "help_cmd_list_for_kick": "/list_for_kick - kick shortlist",
+        "help_cmd_kick_newbie": "/kick_newbie - newbie kick list",
+        "help_cmd_tg": "/tg - in-game name + Telegram username",
         "help_cmd_inactive": "/inactive - last seen list",
         "help_cmd_promote_candidates": "/promote_candidates - promotions",
         "help_cmd_clan_place": "/clan_place - clan place in current race",
@@ -920,9 +937,18 @@ TEXT = {
         "kick_shortlist_rules": "Rules: new members ≤ {weeks} weeks; revived if {revived} decks last week.",
         "kick_wtd_note": "WTD — current donation week.",
         "kick_shortlist_title": "🚫 Kick shortlist",
+        "kick_newbie_title": "🚫 Newbie kick list",
+        "kick_newbie_rules": "1–2 full war weeks in clan. Top {limit} by low totals since join.",
+        "kick_newbie_line": "{index}) {name} {tag} — {weeks} ww | decks {decks} | fame {fame}",
+        "kick_newbie_none": "No newbies to show.",
+        "kick_newbie_no_snapshot": "No clan member snapshot data.",
         "kick_warnings_donating_header": "🟢 Kick candidates, but have active donations",
         "kick_warnings_revived_header": "🟡 Kick candidates, but recently revived their activity",
         "link_confirm": "Done.",
+        "tg_title": "📋 Telegram list",
+        "tg_line": "{index}) {name} — {username}",
+        "tg_username_missing": "no username",
+        "tg_no_snapshot": "No clan member snapshot data.",
         "link_not_allowed": "You are not allowed to do this.",
         "link_request_expired": "Link request expired.",
         "link_select_prompt": "Choose your account from the list.",
@@ -1183,6 +1209,8 @@ TEXT = {
         "/war8 - звіт за 8 тижнів\n"
         "/top [N] - ТОП за 10 тижнів (тільки 6+ тижнів у клані)\n"
         "/list_for_kick - список на виключення\n"
+        "/kick_newbie - список на кік новачків\n"
+        "/tg - нік у грі + telegram username\n"
         "/current_war - поточний тиждень\n"
         "/my_activity - ваша активність\n"
         "/activity - активність за ніком/@username\n"
@@ -1205,6 +1233,8 @@ TEXT = {
         "help_cmd_activity": "/activity <нік>|@username|reply - активність за ніком/@/reply",
         "help_cmd_donations": "/donations - таблиця донатів",
         "help_cmd_list_for_kick": "/list_for_kick - список на виключення",
+        "help_cmd_kick_newbie": "/kick_newbie - список на кік новачків",
+        "help_cmd_tg": "/tg - нік у грі + telegram username",
         "help_cmd_inactive": "/inactive - список по last seen",
         "help_cmd_promote_candidates": "/promote_candidates - рекомендації підвищень",
         "help_cmd_clan_place": "/clan_place - місце клану в поточній гонці",
@@ -1485,9 +1515,18 @@ TEXT = {
         "kick_shortlist_rules": "Правила: новачки ≤ {weeks} тиж.; відновлені при {revived} колодах минулого тижня.",
         "kick_wtd_note": "WTD — поточний донат-тиждень.",
         "kick_shortlist_title": "🚫 Список на кік",
+        "kick_newbie_title": "🚫 Кік новачків",
+        "kick_newbie_rules": "1–2 повні КВ у клані. Топ {limit} за низькими показниками від вступу.",
+        "kick_newbie_line": "{index}) {name} {tag} — {weeks} КВ | колоди {decks} | очки {fame}",
+        "kick_newbie_none": "Немає новачків для списку.",
+        "kick_newbie_no_snapshot": "Немає даних по учасниках клану.",
         "kick_warnings_donating_header": "🟢 Кандидати на кік, але мають активні донати",
         "kick_warnings_revived_header": "🟡 Кандидати на кік, але відновили свою гру нещодавно",
         "link_confirm": "Готово.",
+        "tg_title": "📋 Telegram список",
+        "tg_line": "{index}) {name} — {username}",
+        "tg_username_missing": "немає username",
+        "tg_no_snapshot": "Немає даних по учасниках клану.",
         "link_not_allowed": "Вам не можна виконувати цю операцію.",
         "link_request_expired": "Запит на прив'язку минув.",
         "link_select_prompt": "Оберіть свій акаунт зі списку.",

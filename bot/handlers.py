@@ -115,11 +115,13 @@ from reports import (
     build_clan_place_report,
     build_current_war_report,
     build_donations_report,
+    build_kick_newbie_report,
     build_kick_shortlist_report,
     build_my_activity_report,
     build_rank_report,
     build_promotion_candidates_report,
     build_rolling_report,
+    build_tg_list_report,
     build_top_players_report,
     build_weekly_report,
 )
@@ -1328,6 +1330,8 @@ async def cmd_help(message: Message) -> None:
         t("help_cmd_activity", lang),
         t("help_cmd_donations", lang),
         t("help_cmd_list_for_kick", lang),
+        t("help_cmd_kick_newbie", lang),
+        t("help_cmd_tg", lang),
         t("help_cmd_inactive", lang),
         t("help_cmd_promote_candidates", lang),
         t("help_cmd_clan_place", lang),
@@ -3384,6 +3388,32 @@ async def cmd_list_for_kick(message: Message) -> None:
     report = await build_kick_shortlist_report(
         weeks, last_week, clan_tag, lang=lang
     )
+    await message.answer(report, parse_mode=None)
+
+
+@router.message(Command("kick_newbie"))
+async def cmd_kick_newbie(message: Message) -> None:
+    """Show kick shortlist for newbies (1-2 full war weeks)."""
+    lang = await _get_lang_for_message(message)
+    clan_tag = _require_clan_tag()
+    if not clan_tag:
+        await message.answer(t("clan_tag_not_configured", lang), parse_mode=None)
+        return
+    report = await build_kick_newbie_report(
+        clan_tag, lang=lang, limit=10
+    )
+    await message.answer(report, parse_mode=None)
+
+
+@router.message(Command("tg"))
+async def cmd_tg(message: Message) -> None:
+    """Show clan members with Telegram usernames (if known)."""
+    lang = await _get_lang_for_message(message)
+    clan_tag = _require_clan_tag()
+    if not clan_tag:
+        await message.answer(t("clan_tag_not_configured", lang), parse_mode=None)
+        return
+    report = await build_tg_list_report(clan_tag, lang=lang)
     await message.answer(report, parse_mode=None)
 
 

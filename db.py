@@ -2151,6 +2151,70 @@ async def get_member_first_seen_dates(
     return {row.player_tag: row.first_seen for row in result.all()}
 
 
+async def get_newbie_kick_activity_since_join(
+    clan_tag: str,
+    player_tags: set[str],
+    session: AsyncSession | None = None,
+) -> dict[str, dict[str, int]]:
+    if session is None:
+        async with _get_session() as session:
+            return await get_newbie_kick_activity_since_join(
+                clan_tag, player_tags, session=session
+            )
+    if not player_tags:
+        return {}
+
+    first_seen_subq = (
+        select(
+            ClanMemberDaily.player_tag.label("player_tag"),
+            func.min(ClanMemberDaily.snapshot_date).label("first_seen"),
+        )
+        .where(
+            ClanMemberDaily.clan_tag == clan_tag,
+            ClanMemberDaily.player_tag.in_(player_tags),
+        )
+        .group_by(ClanMemberDaily.player_tag)
+        .subquery()
+    )
+
+    per_week = (
+        select(
+            PlayerParticipationDaily.player_tag.label("player_tag"),
+            PlayerParticipationDaily.season_id,
+            PlayerParticipationDaily.section_index,
+            func.max(PlayerParticipationDaily.decks_used).label("max_decks"),
+            func.max(PlayerParticipationDaily.fame).label("max_fame"),
+        )
+        .select_from(PlayerParticipationDaily)
+        .join(
+            first_seen_subq,
+            PlayerParticipationDaily.player_tag == first_seen_subq.c.player_tag,
+        )
+        .where(PlayerParticipationDaily.snapshot_date >= first_seen_subq.c.first_seen)
+        .group_by(
+            PlayerParticipationDaily.player_tag,
+            PlayerParticipationDaily.season_id,
+            PlayerParticipationDaily.section_index,
+        )
+        .subquery()
+    )
+
+    result = await session.execute(
+        select(
+            per_week.c.player_tag,
+            func.sum(per_week.c.max_decks).label("decks_sum"),
+            func.sum(per_week.c.max_fame).label("fame_sum"),
+        ).group_by(per_week.c.player_tag)
+    )
+    return {
+        row.player_tag: {
+            "decks_sum": int(row.decks_sum or 0),
+            "fame_sum": int(row.fame_sum or 0),
+        }
+        for row in result.all()
+    }
+
+
 async def get_week_leaderboard(
     season_id: int,
     section_index: int,
@@ -2573,6 +2637,46 @@ async def list_pending_applications(
         .limit(limit)
     )
     return [_application_to_dict(app) for app in result.scalars().all()]
+
+
+async def get_application_usernames_by_tag(
+    player_tags: set[str],
+    session: AsyncSession | None = None,
+) -> dict[str, str]:
+    if session is None:
+        async with _get_session() as session:
+            return await get_application_usernames_by_tag(
+                player_tags, session=session
+            )
+    if not player_tags:
+        return {}
+    latest_subq = (
+        select(
+            ClanApplication.player_tag.label("player_tag"),
+            func.max(ClanApplication.updated_at).label("last_update"),
+        )
+        .where(
+            ClanApplication.player_tag.in_(player_tags),
+            ClanApplication.telegram_username.is_not(None),
+        )
+        .group_by(ClanApplication.player_tag)
+        .subquery()
+    )
+    result = await session.execute(
+        select(
+            ClanApplication.player_tag,
+            ClanApplication.telegram_username,
+        ).join(
+            latest_subq,
+            (ClanApplication.player_tag == latest_subq.c.player_tag)
+            & (ClanApplication.updated_at == latest_subq.c.last_update),
+        )
+    )
+    return {
+        row.player_tag: row.telegram_username
+        for row in result.all()
+        if row.telegram_username
+    }
 
 
 async def get_application_by_id(
