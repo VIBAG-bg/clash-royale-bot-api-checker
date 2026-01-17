@@ -168,8 +168,23 @@ class ClashRoyaleAPI:
             List of past River Race entries
         """
         encoded_tag = self._encode_tag(clan_tag)
-        response = await self._request(f"/clans/{encoded_tag}/riverracelog")
-        return response.get("items", [])
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            try:
+                response = await self._request(f"/clans/{encoded_tag}/riverracelog")
+                return response.get("items", [])
+            except ClashRoyaleAPIError as e:
+                if e.status_code != 404 or attempt >= max_attempts:
+                    raise
+                delay = 0.5 * attempt
+                logger.warning(
+                    "CR API 404 for riverracelog (attempt %s/%s), retrying in %.1fs",
+                    attempt,
+                    max_attempts,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+        return []
     
     async def get_player(self, player_tag: str) -> dict[str, Any]:
         """

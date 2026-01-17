@@ -4,9 +4,10 @@ import logging
 from typing import Any
 
 from config import CLAN_TAG
-from cr_api import get_api_client
+from cr_api import get_api_client, ClashRoyaleAPIError
 from db import (
     get_colosseum_index_map,
+    get_last_completed_weeks_from_db,
     get_session,
     save_player_participation,
     save_river_race_state,
@@ -170,7 +171,18 @@ async def get_last_completed_weeks(
 ) -> list[tuple[int, int]]:
     target_tag = clan_tag or CLAN_TAG
     api_client = await get_api_client()
-    items = await api_client.get_river_race_log(target_tag)
+    try:
+        items = await api_client.get_river_race_log(target_tag)
+    except ClashRoyaleAPIError as e:
+        logger.warning("River race log unavailable, falling back to DB: %s", e)
+        return await get_last_completed_weeks_from_db(target_tag, limit=count)
+    except Exception as e:
+        logger.warning(
+            "River race log unavailable, falling back to DB: %s",
+            e,
+            exc_info=True,
+        )
+        return await get_last_completed_weeks_from_db(target_tag, limit=count)
     if isinstance(items, dict):
         items = items.get("items", [])
     weeks: list[tuple[int, int]] = []
