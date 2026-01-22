@@ -83,6 +83,11 @@ SEPARATOR_LINE = "---------------------------"
 
 logger = logging.getLogger(__name__)
 
+KICK_COLOSSEUM_D0_OVERRIDES = {
+    (125, 3): date(2025, 10, 31),
+    (126, 3): date(2025, 11, 28),
+}
+
 
 def _normalize_tag(raw_tag: object) -> str:
     tag = str(raw_tag).strip() if raw_tag else ""
@@ -2561,11 +2566,14 @@ async def build_kick_shortlist_report(
         ]
 
         for season_id, section_index in colosseum_weeks:
-            d0_map[(season_id, section_index)] = (
-                await get_first_snapshot_date_for_week(
-                    season_id, section_index, session=session
-                )
+            d0 = await get_first_snapshot_date_for_week(
+                season_id, section_index, session=session
             )
+            if d0 is None:
+                d0 = KICK_COLOSSEUM_D0_OVERRIDES.get(
+                    (season_id, section_index)
+                )
+            d0_map[(season_id, section_index)] = d0
 
         for season_id, section_index in colosseum_weeks:
             d0 = d0_map.get((season_id, section_index))
@@ -2857,7 +2865,6 @@ async def build_kick_shortlist_report(
     control_credit: list[dict[str, object]] = []
     not_applicable: list[dict[str, object]] = []
     revived_activity: list[dict[str, object]] = []
-    revived_donations: list[dict[str, object]] = []
     new_members: list[dict[str, object]] = []
 
     has_unknown_colosseum = any(
@@ -2898,48 +2905,45 @@ async def build_kick_shortlist_report(
                 new_members.append(entry)
             continue
 
-        if last_decks >= REVIVED_DECKS_THRESHOLD:
-            revived_activity.append(entry)
-            continue
-
-        donation_revive = (
-            wtd_donations is not None
-            and wtd_donations >= DONATION_REVIVE_WTD_THRESHOLD
-        )
-        if donation_revive:
-            revived_donations.append(entry)
-            continue
-
         fail_streak = 0
         for result in eligible_results:
             if result == "fail":
                 fail_streak += 1
             else:
                 break
-
+        classification = None
         if fail_streak >= 2:
             entry["reason"] = t("kick_v2_reason_streak", lang)
-            candidate_ordered.append(("streak", entry))
-            continue
-
-        if fail_streak == 1:
+            classification = "streak"
+        elif fail_streak == 1:
             if (
                 len(eligible_results) >= 3
                 and eligible_results[1] == "pass"
                 and eligible_results[2] == "pass"
             ):
                 entry["reason"] = t("kick_v2_reason_credit", lang)
-                control_credit.append(entry)
+                classification = "control"
             else:
                 entry["reason"] = t("kick_v2_reason_last_fail", lang)
-                candidate_ordered.append(("last_fail", entry))
-            continue
-
-        if not eligible_results:
+                classification = "last_fail"
+        elif not eligible_results:
             if has_unknown or has_unknown_colosseum or not colosseum_weeks:
                 entry["reason"] = t("kick_v2_reason_unknown_colosseum", lang)
             else:
                 entry["reason"] = t("kick_v2_reason_not_applicable", lang)
+            classification = "not_applicable"
+
+        if last_decks >= REVIVED_DECKS_THRESHOLD:
+            revived_activity.append(entry)
+            continue
+
+        if classification == "streak":
+            candidate_ordered.append(("streak", entry))
+        elif classification == "last_fail":
+            candidate_ordered.append(("last_fail", entry))
+        elif classification == "control":
+            control_credit.append(entry)
+        elif classification == "not_applicable":
             not_applicable.append(entry)
 
     limited_candidates = candidate_ordered[: max(KICK_SHORTLIST_LIMIT, 0)]
@@ -2991,13 +2995,40 @@ async def build_kick_shortlist_report(
             lines.append(row.get("history_line") or "")
             lines.append(row.get("detail_line") or "")
 
+    def _append_new_members_section(
+        entries: list[dict[str, object]]
+    ) -> None:
+        if not entries:
+            return
+        lines.extend(["", t("kick_v2_section_new_members", lang)])
+        for index, row in enumerate(entries, 1):
+            display_name = row.get("player_name") or t("unknown", lang)
+            name = _format_name(display_name, lang).rstrip()
+            lines.append(
+                t(
+                    "kick_v2_new_member_line_compact",
+                    lang,
+                    index=index,
+                    name=name,
+                    decks_label=decks_label,
+                    decks=row.get("decks_used", 0),
+                    fame_label=fame_label,
+                    fame=row.get("fame", 0),
+                    last_week_label=last_week_label,
+                    last_week=row.get("last_week_decks", 0),
+                    donations_label=donations_label,
+                    donations=_format_kick_v2_value(
+                        row.get("donations_wtd"), lang
+                    ),
+                )
+            )
+
     _append_section("kick_v2_section_candidates_streak", candidates_streak)
     _append_section("kick_v2_section_candidates_last_fail", candidates_last_fail)
     _append_section("kick_v2_section_control_credit", control_credit)
     _append_section("kick_v2_section_not_applicable", not_applicable)
-    _append_section("kick_v2_section_new_members", new_members)
+    _append_new_members_section(new_members)
     _append_section("kick_v2_section_revived_activity", revived_activity)
-    _append_section("kick_v2_section_revived_donations", revived_donations)
 
     if (
         not candidates_streak
@@ -3006,7 +3037,6 @@ async def build_kick_shortlist_report(
         and not not_applicable
         and not new_members
         and not revived_activity
-        and not revived_donations
     ):
         lines.append("")
         lines.append(t("kick_shortlist_none", lang))
