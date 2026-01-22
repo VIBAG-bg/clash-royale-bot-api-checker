@@ -1,6 +1,6 @@
 ﻿"""Report builders for weekly and rolling war summaries."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Iterable
 
 from statistics import median
@@ -41,6 +41,7 @@ from config import (
     REVIVED_DECKS_THRESHOLD,
 )
 from db import (
+    ClanMemberDaily,
     PlayerParticipation,
     RiverRaceState,
     get_app_state,
@@ -52,6 +53,7 @@ from db import (
     get_clan_rank_snapshot_at_or_before,
     get_donation_weekly_sums_for_window,
     get_alltime_weeks_played,
+    get_first_snapshot_date_for_week,
     get_last_weeks_from_db,
     get_last_seen_map,
     get_latest_clan_rank_snapshot,
@@ -353,6 +355,28 @@ def _absence_label(days_absent: int | None, lang: str = DEFAULT_LANG) -> str:
     if days_absent >= LAST_SEEN_YELLOW_DAYS:
         return t("absence_yellow", lang)
     return t("absence_ok", lang)
+
+
+def _format_kick_v2_value(value: object, lang: str) -> str:
+    if value is None:
+        return t("kick_v2_value_na", lang)
+    return str(value)
+
+
+def _format_kick_v2_date(value: date | None, lang: str) -> str:
+    if isinstance(value, date):
+        return value.isoformat()
+    return t("kick_v2_value_na", lang)
+
+
+def _format_kick_v2_last_seen(
+    last_seen: datetime | None, now: datetime, lang: str
+) -> str:
+    if not isinstance(last_seen, datetime):
+        return t("kick_v2_value_na", lang)
+    if last_seen.tzinfo is None:
+        last_seen = last_seen.replace(tzinfo=timezone.utc)
+    return _format_relative(now - last_seen, lang)
 
 
 async def _resolve_active_week_key(
@@ -2109,7 +2133,7 @@ async def build_promotion_candidates_report(
     return "\n".join(lines)
 
 
-async def build_kick_shortlist_report(
+async def build_kick_shortlist_report_legacy(
     weeks: list[tuple[int, int]],
     last_week: tuple[int, int] | None,
     clan_tag: str,
@@ -2499,6 +2523,494 @@ async def build_kick_shortlist_report(
             )
 
     lines.append(t("kick_wtd_note", lang))
+    return "\n".join(lines)
+
+
+async def build_kick_shortlist_report(
+    weeks: list[tuple[int, int]],
+    last_week: tuple[int, int] | None,
+    clan_tag: str,
+    *,
+    lang: str = DEFAULT_LANG,
+) -> str:
+    now_utc = datetime.now(timezone.utc)
+    colosseum_weeks: list[tuple[int, int]] = []
+    d0_map: dict[tuple[int, int], date | None] = {}
+    fallback_map: dict[tuple[int, int], date | None] = {}
+    eligible_tags_map: dict[tuple[int, int], set[str] | None] = {}
+    colosseum_stats: dict[str, dict[tuple[int, int], dict[str, int]]] = {}
+
+    inactive: list[dict[str, object]] = []
+    inactive_tags: set[str] = set()
+    history_counts: dict[str, int] = {}
+    last_week_decks: dict[str, int] = {}
+
+    async with get_session() as session:
+        colosseum_result = await session.execute(
+            select(RiverRaceState.season_id, RiverRaceState.section_index)
+            .where(RiverRaceState.is_colosseum.is_(True))
+            .order_by(
+                RiverRaceState.season_id.desc(),
+                RiverRaceState.section_index.desc(),
+            )
+            .limit(3)
+        )
+        colosseum_weeks = [
+            (int(row.season_id), int(row.section_index))
+            for row in colosseum_result.all()
+        ]
+
+        for season_id, section_index in colosseum_weeks:
+            d0_map[(season_id, section_index)] = (
+                await get_first_snapshot_date_for_week(
+                    season_id, section_index, session=session
+                )
+            )
+
+        for season_id, section_index in colosseum_weeks:
+            d0 = d0_map.get((season_id, section_index))
+            if d0 is None:
+                fallback_map[(season_id, section_index)] = None
+                continue
+            cutoff = d0 + timedelta(days=2)
+            window_start = d0 - timedelta(days=1)
+            fallback_result = await session.execute(
+                select(func.max(ClanMemberDaily.snapshot_date)).where(
+                    ClanMemberDaily.clan_tag == clan_tag,
+                    ClanMemberDaily.snapshot_date >= window_start,
+                    ClanMemberDaily.snapshot_date <= cutoff,
+                )
+            )
+            fallback_map[(season_id, section_index)] = (
+                fallback_result.scalar_one_or_none()
+            )
+
+        fallback_dates = {
+            value for value in fallback_map.values() if isinstance(value, date)
+        }
+        roster_tags_by_date: dict[date, set[str]] = {}
+        if fallback_dates:
+            roster_result = await session.execute(
+                select(ClanMemberDaily.snapshot_date, ClanMemberDaily.player_tag)
+                .where(
+                    ClanMemberDaily.clan_tag == clan_tag,
+                    ClanMemberDaily.snapshot_date.in_(fallback_dates),
+                )
+            )
+            for row in roster_result.all():
+                roster_tags_by_date.setdefault(row.snapshot_date, set()).add(
+                    _normalize_tag(row.player_tag)
+                )
+
+        for week in colosseum_weeks:
+            fallback_date = fallback_map.get(week)
+            if fallback_date is None:
+                eligible_tags_map[week] = None
+            else:
+                eligible_tags_map[week] = roster_tags_by_date.get(
+                    fallback_date, set()
+                )
+
+        if weeks and last_week:
+            inactive, _active = await get_rolling_leaderboard(
+                weeks=weeks,
+                clan_tag=clan_tag,
+                session=session,
+            )
+            inactive = _filter_protected(inactive)
+            inactive_tags = {
+                _normalize_tag(row.get("player_tag"))
+                for row in inactive
+                if row.get("player_tag")
+            }
+            if inactive_tags:
+                history_counts = await get_participation_week_counts(
+                    player_tags=inactive_tags, session=session
+                )
+                last_week_decks = await get_week_decks_map(
+                    last_week[0],
+                    last_week[1],
+                    player_tags=inactive_tags,
+                    session=session,
+                )
+                if colosseum_weeks:
+                    stats_result = await session.execute(
+                        select(
+                            PlayerParticipation.player_tag,
+                            PlayerParticipation.season_id,
+                            PlayerParticipation.section_index,
+                            PlayerParticipation.decks_used,
+                            PlayerParticipation.fame,
+                        ).where(
+                            tuple_(
+                                PlayerParticipation.season_id,
+                                PlayerParticipation.section_index,
+                            ).in_(colosseum_weeks),
+                            PlayerParticipation.player_tag.in_(inactive_tags),
+                        )
+                    )
+                    for row in stats_result.all():
+                        tag = _normalize_tag(row.player_tag)
+                        colosseum_stats.setdefault(tag, {})[
+                            (int(row.season_id), int(row.section_index))
+                        ] = {
+                            "decks_used": int(row.decks_used),
+                            "fame": int(row.fame),
+                        }
+
+    col_weeks_count = len(colosseum_weeks)
+    lines = [
+        HEADER_LINE,
+        t("kick_v2_title", lang),
+        HEADER_LINE,
+        t(
+            "kick_v2_window_line",
+            lang,
+            weeks=len(weeks or []),
+            col_weeks=col_weeks_count,
+        ),
+        t("kick_v2_rules_header", lang),
+        t("kick_v2_rule_colosseum_priority", lang),
+        t("kick_v2_rule_eligibility_cutoff", lang),
+    ]
+
+    fallback_start = t("kick_v2_value_na", lang)
+    fallback_end = t("kick_v2_value_na", lang)
+    if colosseum_weeks:
+        latest_d0 = d0_map.get(colosseum_weeks[0])
+        if isinstance(latest_d0, date):
+            fallback_start = (latest_d0 - timedelta(days=1)).isoformat()
+            fallback_end = (latest_d0 + timedelta(days=2)).isoformat()
+    lines.append(
+        t(
+            "kick_v2_rule_eligibility_fallback",
+            lang,
+            start=fallback_start,
+            end=fallback_end,
+        )
+    )
+    lines.append(
+        t(
+            "kick_v2_rule_pass_and",
+            lang,
+            decks=KICK_COLOSSEUM_SAVE_DECKS,
+            fame=KICK_COLOSSEUM_SAVE_FAME,
+        )
+    )
+    lines.extend(
+        [
+            t("kick_v2_rule_trust_credit", lang),
+            t("kick_v2_rule_existing_rules_hint", lang),
+            "",
+            t("kick_v2_colosseum_weeks_header", lang),
+        ]
+    )
+
+    season_label = t("kick_v2_label_season", lang)
+    week_label = t("kick_v2_label_week", lang)
+    colosseum_label = t("kick_v2_label_colosseum", lang)
+    na_value = t("kick_v2_value_na", lang)
+    for week in colosseum_weeks or [(None, None)]:
+        season_id, section_index = week
+        season_text = season_id if season_id is not None else na_value
+        week_text = (
+            int(section_index) + 1 if isinstance(section_index, int) else na_value
+        )
+        lines.append(
+            t(
+                "kick_v2_colosseum_week_line",
+                lang,
+                colosseum=colosseum_label,
+                season_label=season_label,
+                season=season_text,
+                week_label=week_label,
+                week=week_text,
+            )
+        )
+        d0 = d0_map.get(week) if week in d0_map else None
+        cutoff = d0 + timedelta(days=2) if isinstance(d0, date) else None
+        fallback = fallback_map.get(week) if week in fallback_map else None
+        lines.append(
+            t(
+                "kick_v2_colosseum_week_dates_line",
+                lang,
+                d0=_format_kick_v2_date(d0, lang),
+                cutoff=_format_kick_v2_date(cutoff, lang),
+                fallback=_format_kick_v2_date(fallback, lang),
+            )
+        )
+
+    if not weeks or not last_week:
+        lines.append("")
+        lines.append(t("kick_shortlist_none", lang))
+        return "\n".join(lines)
+
+    if not inactive or not inactive_tags:
+        lines.append("")
+        lines.append(t("kick_shortlist_none", lang))
+        return "\n".join(lines)
+
+    donations_wtd = await _collect_wtd_donations(clan_tag, inactive_tags)
+    last_seen_map = await get_last_seen_map(clan_tag)
+
+    decks_label = t("kick_v2_label_decks_window", lang)
+    fame_label = t("kick_v2_label_fame_window", lang)
+    last_week_label = t("kick_v2_label_last_week", lang)
+    donations_label = t("kick_v2_label_donations_wtd", lang)
+    weeks_label = t("kick_v2_label_weeks_in_clan", lang)
+    last_seen_label = t("kick_v2_label_last_seen", lang)
+    not_applicable_short = t("kick_v2_value_not_applicable_short", lang)
+
+    def _build_colosseum_lines(
+        tag: str,
+    ) -> tuple[str, str, list[str], bool]:
+        history_parts: list[str] = []
+        eligible_results: list[str] = []
+        has_unknown = False
+        for season_id, section_index in colosseum_weeks:
+            week_key = (season_id, section_index)
+            eligible_tags = eligible_tags_map.get(week_key)
+            if eligible_tags is None:
+                has_unknown = True
+                status_text = t("kick_v2_value_na", lang)
+            elif tag in eligible_tags:
+                stats = colosseum_stats.get(tag, {}).get(
+                    week_key, {"decks_used": 0, "fame": 0}
+                )
+                is_pass = (
+                    stats["decks_used"] >= KICK_COLOSSEUM_SAVE_DECKS
+                    and stats["fame"] >= KICK_COLOSSEUM_SAVE_FAME
+                )
+                status_text = t(
+                    "kick_v2_value_pass" if is_pass else "kick_v2_value_fail",
+                    lang,
+                )
+                eligible_results.append("pass" if is_pass else "fail")
+            else:
+                status_text = not_applicable_short
+            history_parts.append(
+                f"[{season_label}{season_id} {status_text}]"
+            )
+        history_text = (
+            " ".join(history_parts) if history_parts else t("kick_v2_value_na", lang)
+        )
+        history_line = t(
+            "kick_v2_colosseum_history_line", lang, history=history_text
+        )
+
+        latest_week = colosseum_weeks[0] if colosseum_weeks else None
+        if latest_week:
+            eligible_tags = eligible_tags_map.get(latest_week)
+            stats = colosseum_stats.get(tag, {}).get(
+                latest_week, {"decks_used": 0, "fame": 0}
+            )
+            if eligible_tags is None:
+                result_text = t("kick_v2_value_na", lang)
+            elif tag in eligible_tags:
+                is_pass = (
+                    stats["decks_used"] >= KICK_COLOSSEUM_SAVE_DECKS
+                    and stats["fame"] >= KICK_COLOSSEUM_SAVE_FAME
+                )
+                result_text = t(
+                    "kick_v2_value_pass" if is_pass else "kick_v2_value_fail",
+                    lang,
+                )
+            else:
+                result_text = not_applicable_short
+            detail_line = t(
+                "kick_v2_colosseum_latest_detail_line",
+                lang,
+                colosseum=colosseum_label,
+                season_label=season_label,
+                season=latest_week[0],
+                week_label=week_label,
+                week=latest_week[1] + 1,
+                decks_label=decks_label,
+                decks=stats["decks_used"],
+                decks_req=KICK_COLOSSEUM_SAVE_DECKS,
+                fame_label=fame_label,
+                fame=stats["fame"],
+                fame_req=KICK_COLOSSEUM_SAVE_FAME,
+                result=result_text,
+            )
+        else:
+            detail_line = t(
+                "kick_v2_colosseum_latest_detail_line",
+                lang,
+                colosseum=colosseum_label,
+                season_label=season_label,
+                season=na_value,
+                week_label=week_label,
+                week=na_value,
+                decks_label=decks_label,
+                decks=na_value,
+                decks_req=KICK_COLOSSEUM_SAVE_DECKS,
+                fame_label=fame_label,
+                fame=na_value,
+                fame_req=KICK_COLOSSEUM_SAVE_FAME,
+                result=t("kick_v2_value_na", lang),
+            )
+
+        return history_line, detail_line, eligible_results, has_unknown
+
+    candidate_ordered: list[tuple[str, dict[str, object]]] = []
+    control_credit: list[dict[str, object]] = []
+    not_applicable: list[dict[str, object]] = []
+    revived_activity: list[dict[str, object]] = []
+    revived_donations: list[dict[str, object]] = []
+    new_members: list[dict[str, object]] = []
+
+    has_unknown_colosseum = any(
+        eligible_tags_map.get(week) is None for week in colosseum_weeks
+    )
+
+    for row in inactive:
+        tag = row.get("player_tag")
+        if not tag:
+            continue
+        normalized_tag = _normalize_tag(tag)
+        weeks_played = int(history_counts.get(normalized_tag, 0))
+        last_decks = int(last_week_decks.get(normalized_tag, 0))
+        wtd_donations = None
+        if normalized_tag in donations_wtd:
+            wtd_donations = donations_wtd[normalized_tag].get("donations")
+        last_seen = last_seen_map.get(normalized_tag)
+
+        history_line, detail_line, eligible_results, has_unknown = (
+            _build_colosseum_lines(normalized_tag)
+        )
+
+        entry = {
+            "player_tag": normalized_tag,
+            "player_name": row.get("player_name") or t("unknown", lang),
+            "decks_used": int(row.get("decks_used", 0)),
+            "fame": int(row.get("fame", 0)),
+            "last_week_decks": last_decks,
+            "donations_wtd": wtd_donations,
+            "weeks_played": weeks_played,
+            "last_seen": last_seen,
+            "history_line": history_line,
+            "detail_line": detail_line,
+        }
+
+        if weeks_played <= NEW_MEMBER_WEEKS_PLAYED:
+            if last_decks < REVIVED_DECKS_THRESHOLD:
+                new_members.append(entry)
+            continue
+
+        if last_decks >= REVIVED_DECKS_THRESHOLD:
+            revived_activity.append(entry)
+            continue
+
+        donation_revive = (
+            wtd_donations is not None
+            and wtd_donations >= DONATION_REVIVE_WTD_THRESHOLD
+        )
+        if donation_revive:
+            revived_donations.append(entry)
+            continue
+
+        fail_streak = 0
+        for result in eligible_results:
+            if result == "fail":
+                fail_streak += 1
+            else:
+                break
+
+        if fail_streak >= 2:
+            entry["reason"] = t("kick_v2_reason_streak", lang)
+            candidate_ordered.append(("streak", entry))
+            continue
+
+        if fail_streak == 1:
+            if (
+                len(eligible_results) >= 3
+                and eligible_results[1] == "pass"
+                and eligible_results[2] == "pass"
+            ):
+                entry["reason"] = t("kick_v2_reason_credit", lang)
+                control_credit.append(entry)
+            else:
+                entry["reason"] = t("kick_v2_reason_last_fail", lang)
+                candidate_ordered.append(("last_fail", entry))
+            continue
+
+        if not eligible_results:
+            if has_unknown or has_unknown_colosseum or not colosseum_weeks:
+                entry["reason"] = t("kick_v2_reason_unknown_colosseum", lang)
+            else:
+                entry["reason"] = t("kick_v2_reason_not_applicable", lang)
+            not_applicable.append(entry)
+
+    limited_candidates = candidate_ordered[: max(KICK_SHORTLIST_LIMIT, 0)]
+    candidates_streak: list[dict[str, object]] = []
+    candidates_last_fail: list[dict[str, object]] = []
+    for category, entry in limited_candidates:
+        if category == "streak":
+            candidates_streak.append(entry)
+        else:
+            candidates_last_fail.append(entry)
+
+    def _append_section(
+        header_key: str, entries: list[dict[str, object]]
+    ) -> None:
+        if not entries:
+            return
+        lines.extend(["", t(header_key, lang)])
+        for index, row in enumerate(entries, 1):
+            reason = row.get("reason") or ""
+            reason_suffix = f" — {reason}" if reason else ""
+            display_name = row.get("player_name") or t("unknown", lang)
+            name = _format_name(display_name, lang).rstrip()
+            last_seen_text = _format_kick_v2_last_seen(
+                row.get("last_seen"), now_utc, lang
+            )
+            lines.append(
+                t(
+                    "kick_v2_player_line_main",
+                    lang,
+                    index=index,
+                    name=name,
+                    reason=reason_suffix,
+                    decks_label=decks_label,
+                    decks=row.get("decks_used", 0),
+                    fame_label=fame_label,
+                    fame=row.get("fame", 0),
+                    last_week_label=last_week_label,
+                    last_week=row.get("last_week_decks", 0),
+                    donations_label=donations_label,
+                    donations=_format_kick_v2_value(
+                        row.get("donations_wtd"), lang
+                    ),
+                    weeks_label=weeks_label,
+                    weeks=row.get("weeks_played", 0),
+                    last_seen_label=last_seen_label,
+                    last_seen=last_seen_text,
+                )
+            )
+            lines.append(row.get("history_line") or "")
+            lines.append(row.get("detail_line") or "")
+
+    _append_section("kick_v2_section_candidates_streak", candidates_streak)
+    _append_section("kick_v2_section_candidates_last_fail", candidates_last_fail)
+    _append_section("kick_v2_section_control_credit", control_credit)
+    _append_section("kick_v2_section_not_applicable", not_applicable)
+    _append_section("kick_v2_section_new_members", new_members)
+    _append_section("kick_v2_section_revived_activity", revived_activity)
+    _append_section("kick_v2_section_revived_donations", revived_donations)
+
+    if (
+        not candidates_streak
+        and not candidates_last_fail
+        and not control_credit
+        and not not_applicable
+        and not new_members
+        and not revived_activity
+        and not revived_donations
+    ):
+        lines.append("")
+        lines.append(t("kick_shortlist_none", lang))
+
     return "\n".join(lines)
 
 
