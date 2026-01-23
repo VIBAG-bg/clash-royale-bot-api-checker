@@ -3660,6 +3660,25 @@ async def build_my_activity_report(
 
     member_tags = await get_current_member_tags(clan_tag)
     member_count = len(member_tags)
+    member_snapshot = await get_current_members_snapshot(clan_tag)
+    role_value = None
+    target_tag = _normalize_tag(player_tag)
+    for row in member_snapshot:
+        if _normalize_tag(row.get("player_tag")) == target_tag:
+            role_value = row.get("role")
+            break
+    role_text = _normalize_role(role_value)
+    if role_text == "leader":
+        role_label = t("my_activity_role_leader", lang)
+    elif role_text == "coleader":
+        role_label = t("my_activity_role_coleader", lang)
+    elif role_text == "elder":
+        role_label = t("my_activity_role_elder", lang)
+    elif role_text == "member":
+        role_label = t("my_activity_role_member", lang)
+    else:
+        role_label = t("my_activity_role_unknown", lang)
+    role_line = t("my_activity_role_line", lang, role=role_label)
 
     current_decks = 0
     current_fame = 0
@@ -4042,6 +4061,7 @@ async def build_my_activity_report(
             t("my_activity_player_line", lang, player=player_name),
             t("my_activity_tag_line", lang, tag=player_tag),
             t("my_activity_clan_line", lang, clan=clan_tag),
+            role_line,
             "",
             SEPARATOR_LINE,
             *training_lines,
@@ -4091,6 +4111,7 @@ async def build_my_activity_report(
             t("my_activity_player_line", lang, player=player_name),
             t("my_activity_tag_line", lang, tag=player_tag),
             t("my_activity_clan_line", lang, clan=clan_tag),
+            role_line,
             "",
             SEPARATOR_LINE,
             t(

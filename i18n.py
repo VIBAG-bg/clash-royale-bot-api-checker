@@ -551,6 +551,12 @@ TEXT = {
         "my_activity_summary_zero": "🔴 Нулевые недели (0 колод): {count}",
         "my_activity_tag_line": "🏷 Тег: {tag}",
         "my_activity_title": "👤 Моя активность в войне",
+        "my_activity_role_line": "🎖 Должность: {role}",
+        "my_activity_role_member": "участник",
+        "my_activity_role_elder": "старейшина",
+        "my_activity_role_coleader": "соруководитель",
+        "my_activity_role_leader": "лидер",
+        "my_activity_role_unknown": "н/д",
         "chart.war_activity.title": "Моя активность в войне (колоды + очки)",
         "chart.war_activity.title_named": "Активность в войне: {name} (колоды + очки)",
         "chart.axis.decks": "Колоды",
@@ -1205,6 +1211,12 @@ TEXT = {
         "my_activity_summary_zero": "🔴 Zero weeks (0 decks): {count}",
         "my_activity_tag_line": "🏷 Tag: {tag}",
         "my_activity_title": "👤 My War Activity",
+        "my_activity_role_line": "🎖 Role: {role}",
+        "my_activity_role_member": "member",
+        "my_activity_role_elder": "elder",
+        "my_activity_role_coleader": "co-leader",
+        "my_activity_role_leader": "leader",
+        "my_activity_role_unknown": "n/a",
         "chart.war_activity.title": "My war activity (decks & fame)",
         "chart.war_activity.title_named": "War activity: {name} (decks & fame)",
         "chart.axis.decks": "Decks",
@@ -1859,6 +1871,12 @@ TEXT = {
         "my_activity_summary_zero": "🔴 Нульові тижні (0 колод): {count}",
         "my_activity_tag_line": "🏷 Тег: {tag}",
         "my_activity_title": "👤 Моя активність у війні",
+        "my_activity_role_line": "🎖 Посада: {role}",
+        "my_activity_role_member": "учасник",
+        "my_activity_role_elder": "старійшина",
+        "my_activity_role_coleader": "співкерівник",
+        "my_activity_role_leader": "лідер",
+        "my_activity_role_unknown": "н/д",
         "chart.war_activity.title": "Моя активність у війні (колоди + очки)",
         "chart.war_activity.title_named": "Активність у війні: {name} (колоди + очки)",
         "chart.axis.decks": "Колоди",
@@ -1978,3 +1996,4 @@ def t(key: str, lang: str = DEFAULT_LANG, **fmt) -> str:
         return template.format(**fmt)
     except Exception:
         return template
+
