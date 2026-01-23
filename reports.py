@@ -2929,6 +2929,7 @@ async def build_kick_shortlist_report(
             return "\n".join(lines)
 
         short_last_week_label = t("kick_v2_label_last_week", lang)
+        short_decks_unit = t("kick_short_decks_unit", lang)
         short_weeks_label = t("kick_v2_label_weeks_in_clan", lang)
         short_last_seen_label = t("kick_v2_label_last_seen", lang)
 
@@ -2961,6 +2962,7 @@ async def build_kick_shortlist_report(
                         lang,
                         last_week_label=short_last_week_label,
                         last_week=row.get("last_week_decks", 0),
+                        decks_unit=short_decks_unit,
                         weeks_label=short_weeks_label,
                         weeks=row.get("weeks_played", 0),
                         last_seen_label=short_last_seen_label,
