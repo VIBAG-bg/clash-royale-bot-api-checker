@@ -117,6 +117,7 @@ from reports import (
     build_clan_place_report,
     build_current_war_report,
     build_donations_report,
+    build_kick_debug_report,
     build_kick_newbie_report,
     build_kick_shortlist_report,
     build_my_activity_report,
@@ -1358,6 +1359,7 @@ async def cmd_help(message: Message) -> None:
         t("help_admin_captcha_unverify", lang),
         t("help_admin_riverside", lang),
         t("help_admin_coliseum", lang),
+        t("help_admin_kick_report", lang),
         t("help_admin_modlog_test", lang),
     ]
 
@@ -3388,6 +3390,36 @@ async def cmd_list_for_kick(message: Message) -> None:
         await message.answer(t("war_no_completed_weeks", lang), parse_mode=None)
         return
     report = await build_kick_shortlist_report(
+        weeks, last_week, clan_tag, lang=lang
+    )
+    await message.answer(report, parse_mode=None)
+
+
+@router.message(Command("kick_report"))
+async def cmd_kick_report(message: Message) -> None:
+    """Show detailed kick shortlist diagnostics (admin-only)."""
+    lang = await _get_lang_for_message(message)
+    if message.from_user is None:
+        await message.answer(t("unable_verify_permissions", lang), parse_mode=None)
+        return
+    try:
+        if not await _is_admin_user(message, message.from_user.id):
+            await message.answer(t("not_allowed", lang), parse_mode=None)
+            return
+    except Exception as e:
+        logger.error("Failed to check admin status: %s", e, exc_info=True)
+        await message.answer(t("unable_verify_admin_status", lang), parse_mode=None)
+        return
+    clan_tag = _require_clan_tag()
+    if not clan_tag:
+        await message.answer(t("clan_tag_not_configured", lang), parse_mode=None)
+        return
+    weeks = await get_last_completed_weeks(8, clan_tag)
+    last_week = await get_last_completed_week(clan_tag)
+    if not weeks or not last_week:
+        await message.answer(t("war_no_completed_weeks", lang), parse_mode=None)
+        return
+    report = await build_kick_debug_report(
         weeks, last_week, clan_tag, lang=lang
     )
     await message.answer(report, parse_mode=None)
