@@ -1,6 +1,7 @@
 """Main entry point for the Clash Royale Telegram Bot."""
 
 import asyncio
+import inspect
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -9,6 +10,7 @@ from datetime import datetime, timezone, date, timedelta
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ChatMemberStatus, ParseMode
+from aiogram.types import ChatPermissions
 
 from bot import router, moderation_router
 from config import (
@@ -39,12 +41,14 @@ from config import (
 )
 from cr_api import get_api_client, close_api_client, ClashRoyaleAPIError
 from db import (
+    clear_user_penalty,
     connect_db,
     close_db,
     get_donation_week_start_date,
     get_colosseum_index_for_season,
     get_app_state,
     delete_app_state,
+    get_user_link,
     get_enabled_clan_chats,
     get_first_snapshot_date_for_week,
     get_latest_river_race_place_snapshot,
@@ -115,6 +119,99 @@ async def _send_modlog(bot: Bot, text: str) -> None:
         )
     except Exception as e:
         logger.warning("Failed to send modlog: %s", e)
+
+
+def _admin_restore_state_key(chat_id: int, user_id: int) -> str:
+    return f"admin_restore:{chat_id}:{user_id}"
+
+
+_PROMOTE_RIGHTS_KEYS: set[str] | None = None
+
+
+def _filter_promote_kwargs(bot: Bot, rights: dict[str, bool]) -> dict[str, bool]:
+    global _PROMOTE_RIGHTS_KEYS
+    if _PROMOTE_RIGHTS_KEYS is None:
+        try:
+            params = inspect.signature(bot.promote_chat_member).parameters
+            if any(
+                param.kind == inspect.Parameter.VAR_KEYWORD
+                for param in params.values()
+            ):
+                _PROMOTE_RIGHTS_KEYS = set(rights.keys())
+            else:
+                _PROMOTE_RIGHTS_KEYS = {
+                    name
+                    for name in params
+                    if name not in ("chat_id", "user_id")
+                }
+        except Exception:
+            _PROMOTE_RIGHTS_KEYS = set(rights.keys())
+    return {key: value for key, value in rights.items() if key in _PROMOTE_RIGHTS_KEYS}
+
+
+def _build_admin_rights(invite_only: bool) -> dict[str, bool]:
+    return {
+        "can_manage_chat": False,
+        "can_change_info": False,
+        "can_post_messages": False,
+        "can_edit_messages": False,
+        "can_delete_messages": False,
+        "can_invite_users": invite_only,
+        "can_restrict_members": False,
+        "can_pin_messages": False,
+        "can_promote_members": False,
+        "can_manage_video_chats": False,
+        "can_manage_topics": False,
+        "is_anonymous": False,
+    }
+
+
+def _normalize_admin_title(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    return text[:16]
+
+
+async def _restore_invite_only_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
+    rights = _filter_promote_kwargs(bot, _build_admin_rights(invite_only=True))
+    try:
+        await bot.promote_chat_member(chat_id, user_id, **rights)
+    except Exception as e:
+        logger.warning(
+            "Failed to restore admin rights: chat=%s user=%s err=%s",
+            chat_id,
+            user_id,
+            type(e).__name__,
+            exc_info=True,
+        )
+        return False
+    link = None
+    try:
+        link = await get_user_link(user_id)
+    except Exception as e:
+        logger.warning(
+            "Failed to load user link for admin title: chat=%s user=%s err=%s",
+            chat_id,
+            user_id,
+            type(e).__name__,
+            exc_info=True,
+        )
+    title = _normalize_admin_title(link.get("player_name") if link else None)
+    if title and hasattr(bot, "set_chat_administrator_custom_title"):
+        try:
+            await bot.set_chat_administrator_custom_title(chat_id, user_id, title)
+        except Exception as e:
+            logger.warning(
+                "Failed to set admin title: chat=%s user=%s err=%s",
+                chat_id,
+                user_id,
+                type(e).__name__,
+                exc_info=True,
+            )
+    return True
 
 
 def _ensure_required_config() -> str:
@@ -1606,6 +1703,61 @@ async def scheduled_unmute_task(bot: Bot) -> None:
                         user_id,
                     )
                     continue
+
+                unmute_ok = True
+                if member.status not in (
+                    ChatMemberStatus.ADMINISTRATOR,
+                    ChatMemberStatus.CREATOR,
+                ):
+                    try:
+                        await bot.restrict_chat_member(
+                            chat_id,
+                            user_id,
+                            permissions=ChatPermissions(
+                                can_send_messages=True,
+                                can_send_media_messages=True,
+                                can_send_other_messages=True,
+                                can_add_web_page_previews=True,
+                            ),
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "Auto-unmute failed: chat=%s user=%s err=%s",
+                            chat_id,
+                            user_id,
+                            type(e).__name__,
+                        )
+                        unmute_ok = False
+                if not unmute_ok:
+                    continue
+
+                try:
+                    await clear_user_penalty(chat_id, user_id, "mute")
+                except Exception as e:
+                    logger.warning(
+                        "Failed to clear mute penalty: chat=%s user=%s err=%s",
+                        chat_id,
+                        user_id,
+                        type(e).__name__,
+                    )
+
+                state_key = _admin_restore_state_key(chat_id, user_id)
+                try:
+                    state = await get_app_state(state_key)
+                    if state and state.get("restore_admin"):
+                        restored = await _restore_invite_only_admin(
+                            bot, chat_id, user_id
+                        )
+                        if restored:
+                            await delete_app_state(state_key)
+                except Exception as e:
+                    logger.warning(
+                        "Failed to restore admin rights: chat=%s user=%s err=%s",
+                        chat_id,
+                        user_id,
+                        type(e).__name__,
+                        exc_info=True,
+                    )
 
                 user = member.user
                 if user.username:

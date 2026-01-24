@@ -1,5 +1,6 @@
 ﻿"""Telegram bot command handlers using aiogram v3."""
 
+import inspect
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -769,17 +770,7 @@ async def _mute_user(
 ) -> None:
     until = datetime.now(timezone.utc) + timedelta(minutes=minutes)
     try:
-        await message.bot.restrict_chat_member(
-            message.chat.id,
-            user_id,
-            permissions=ChatPermissions(
-                can_send_messages=False,
-                can_send_media_messages=False,
-                can_send_other_messages=False,
-                can_add_web_page_previews=False,
-            ),
-            until_date=until,
-        )
+        await _apply_mute_restriction(message, user_id=user_id, until=until)
         logger.warning(
             "[MOD] mute ok: chat=%s user=%s until=%s reason=%s",
             message.chat.id,
@@ -967,7 +958,196 @@ async def _is_admin_user(message: Message, user_id: int) -> bool:
     if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
         return False
     member = await message.bot.get_chat_member(message.chat.id, user_id)
-    return member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR)
+    return member.status == ChatMemberStatus.CREATOR
+
+
+def _admin_restore_state_key(chat_id: int, user_id: int) -> str:
+    return f"admin_restore:{chat_id}:{user_id}"
+
+
+_PROMOTE_RIGHTS_KEYS: set[str] | None = None
+
+
+def _filter_promote_kwargs(bot: Bot, rights: dict[str, bool]) -> dict[str, bool]:
+    global _PROMOTE_RIGHTS_KEYS
+    if _PROMOTE_RIGHTS_KEYS is None:
+        try:
+            params = inspect.signature(bot.promote_chat_member).parameters
+            if any(
+                param.kind == inspect.Parameter.VAR_KEYWORD
+                for param in params.values()
+            ):
+                _PROMOTE_RIGHTS_KEYS = set(rights.keys())
+            else:
+                _PROMOTE_RIGHTS_KEYS = {
+                    name
+                    for name in params
+                    if name not in ("chat_id", "user_id")
+                }
+        except Exception:
+            _PROMOTE_RIGHTS_KEYS = set(rights.keys())
+    return {key: value for key, value in rights.items() if key in _PROMOTE_RIGHTS_KEYS}
+
+
+def _build_admin_rights(invite_only: bool) -> dict[str, bool]:
+    return {
+        "can_manage_chat": False,
+        "can_change_info": False,
+        "can_post_messages": False,
+        "can_edit_messages": False,
+        "can_delete_messages": False,
+        "can_invite_users": invite_only,
+        "can_restrict_members": False,
+        "can_pin_messages": False,
+        "can_promote_members": False,
+        "can_manage_video_chats": False,
+        "can_manage_topics": False,
+        "is_anonymous": False,
+    }
+
+
+def _normalize_admin_title(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    return text[:16]
+
+
+async def _restore_invite_only_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
+    rights = _filter_promote_kwargs(bot, _build_admin_rights(invite_only=True))
+    try:
+        await bot.promote_chat_member(chat_id, user_id, **rights)
+    except Exception as e:
+        logger.warning(
+            "Failed to restore admin rights: chat=%s user=%s err=%s",
+            chat_id,
+            user_id,
+            type(e).__name__,
+            exc_info=True,
+        )
+        return False
+    link = None
+    try:
+        link = await get_user_link(user_id)
+    except Exception as e:
+        logger.warning(
+            "Failed to load user link for admin title: chat=%s user=%s err=%s",
+            chat_id,
+            user_id,
+            type(e).__name__,
+            exc_info=True,
+        )
+    title = _normalize_admin_title(link.get("player_name") if link else None)
+    if title and hasattr(bot, "set_chat_administrator_custom_title"):
+        try:
+            await bot.set_chat_administrator_custom_title(chat_id, user_id, title)
+        except Exception as e:
+            logger.warning(
+                "Failed to set admin title: chat=%s user=%s err=%s",
+                chat_id,
+                user_id,
+                type(e).__name__,
+                exc_info=True,
+            )
+    return True
+
+
+async def _demote_admin_for_mute(message: Message, user_id: int) -> bool:
+    if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        return False
+    if user_id in ADMIN_USER_IDS:
+        return False
+    member = await message.bot.get_chat_member(message.chat.id, user_id)
+    if member.status != ChatMemberStatus.ADMINISTRATOR:
+        return False
+    rights = _filter_promote_kwargs(
+        message.bot, _build_admin_rights(invite_only=False)
+    )
+    await message.bot.promote_chat_member(message.chat.id, user_id, **rights)
+    return True
+
+
+async def _apply_mute_restriction(
+    message: Message, *, user_id: int, until: datetime
+) -> bool:
+    demoted = False
+    try:
+        demoted = await _demote_admin_for_mute(message, user_id)
+    except Exception as e:
+        logger.warning(
+            "Failed to demote admin before mute: chat=%s user=%s err=%s",
+            message.chat.id,
+            user_id,
+            type(e).__name__,
+            exc_info=True,
+        )
+    try:
+        await message.bot.restrict_chat_member(
+            message.chat.id,
+            user_id,
+            permissions=ChatPermissions(
+                can_send_messages=False,
+                can_send_media_messages=False,
+                can_send_other_messages=False,
+                can_add_web_page_previews=False,
+            ),
+            until_date=until,
+        )
+    except Exception:
+        if demoted:
+            try:
+                await _restore_invite_only_admin(
+                    message.bot, message.chat.id, user_id
+                )
+            except Exception:
+                pass
+        raise
+    if demoted:
+        try:
+            await set_app_state(
+                _admin_restore_state_key(message.chat.id, user_id),
+                {"restore_admin": True, "muted_until": until.isoformat()},
+            )
+        except Exception as e:
+            logger.warning(
+                "Failed to store admin restore state: chat=%s user=%s err=%s",
+                message.chat.id,
+                user_id,
+                type(e).__name__,
+                exc_info=True,
+            )
+    return True
+
+
+async def _restore_admin_after_mute(bot: Bot, chat_id: int, user_id: int) -> None:
+    state_key = _admin_restore_state_key(chat_id, user_id)
+    try:
+        state = await get_app_state(state_key)
+    except Exception as e:
+        logger.warning(
+            "Failed to read admin restore state: chat=%s user=%s err=%s",
+            chat_id,
+            user_id,
+            type(e).__name__,
+            exc_info=True,
+        )
+        return
+    if not state or not state.get("restore_admin"):
+        return
+    restored = await _restore_invite_only_admin(bot, chat_id, user_id)
+    if restored:
+        try:
+            await delete_app_state(state_key)
+        except Exception as e:
+            logger.warning(
+                "Failed to clear admin restore state: chat=%s user=%s err=%s",
+                chat_id,
+                user_id,
+                type(e).__name__,
+                exc_info=True,
+            )
 
 
 async def _send_link_button(message: Message) -> None:
@@ -1309,13 +1489,7 @@ async def cmd_help(message: Message) -> None:
     if message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
         if message.from_user is not None:
             try:
-                member = await message.bot.get_chat_member(
-                    message.chat.id, message.from_user.id
-                )
-                is_admin = member.status in (
-                    ChatMemberStatus.ADMINISTRATOR,
-                    ChatMemberStatus.CREATOR,
-                )
+                is_admin = await _is_admin_user(message, message.from_user.id)
             except Exception:
                 is_admin = False
 
@@ -1948,17 +2122,7 @@ async def cmd_warn(message: Message) -> None:
     if warn_count >= WARN_MUTE_AFTER:
         until = datetime.now(timezone.utc) + timedelta(minutes=WARN_MUTE_MINUTES)
         try:
-            await message.bot.restrict_chat_member(
-                message.chat.id,
-                target.id,
-                permissions=ChatPermissions(
-                    can_send_messages=False,
-                    can_send_media_messages=False,
-                    can_send_other_messages=False,
-                    can_add_web_page_previews=False,
-                ),
-                until_date=until,
-            )
+            await _apply_mute_restriction(message, user_id=target.id, until=until)
         except Exception as e:
             logger.warning("Failed to auto-mute user: %s", e, exc_info=True)
             await send_modlog(
@@ -2124,23 +2288,24 @@ async def cmd_mute(message: Message) -> None:
 
     until = datetime.now(timezone.utc) + timedelta(minutes=minutes)
     try:
-        await message.bot.restrict_chat_member(
-            message.chat.id,
-            target.id,
-            permissions=ChatPermissions(
-                can_send_messages=False,
-                can_send_media_messages=False,
-                can_send_other_messages=False,
-                can_add_web_page_previews=False,
-            ),
-            until_date=until,
-        )
+        await _apply_mute_restriction(message, user_id=target.id, until=until)
     except Exception as e:
         logger.warning("Failed to mute user: %s", e, exc_info=True)
         await message.answer(t("mute_failed", lang), parse_mode=None)
         return
 
     await set_user_penalty(message.chat.id, target.id, "mute", until=until)
+    try:
+        await schedule_unmute_notification(
+            chat_id=message.chat.id,
+            user_id=target.id,
+            unmute_at=until,
+            reason=reason or None,
+        )
+    except Exception as e:
+        logger.warning(
+            "Failed to schedule unmute notification: %s", e, exc_info=True
+        )
     await log_mod_action(
         chat_id=message.chat.id,
         target_user_id=target.id,
@@ -2202,6 +2367,7 @@ async def cmd_unmute(message: Message) -> None:
         return
 
     await clear_user_penalty(message.chat.id, target.id, "mute")
+    await _restore_admin_after_mute(message.bot, message.chat.id, target.id)
     await log_mod_action(
         chat_id=message.chat.id,
         target_user_id=target.id,
@@ -2714,16 +2880,16 @@ async def handle_member_join(event: ChatMemberUpdated) -> None:
             user.id,
         )
         return
-    if event.new_chat_member.status in (
-        ChatMemberStatus.ADMINISTRATOR,
-        ChatMemberStatus.CREATOR,
-    ):
-        logger.info(
-            "CAPTCHA skip: reason=user_is_admin chat_id=%s user_id=%s",
-            event.chat.id,
-            user.id,
-        )
-        return
+    try:
+        if await _is_admin_user(event, user.id):
+            logger.info(
+                "CAPTCHA skip: reason=user_is_admin chat_id=%s user_id=%s",
+                event.chat.id,
+                user.id,
+            )
+            return
+    except Exception:
+        pass
     is_join = (
         old_status in (ChatMemberStatus.LEFT, ChatMemberStatus.KICKED)
         and new_status in (ChatMemberStatus.MEMBER, ChatMemberStatus.RESTRICTED)
@@ -3267,17 +3433,12 @@ async def cmd_bind(message: Message) -> None:
         )
         return
     try:
-        member = await message.bot.get_chat_member(
-            chat_id=message.chat.id, user_id=message.from_user.id
-        )
+        if not await _is_admin_user(message, message.from_user.id):
+            await message.answer(t("bind_admin_only", lang), parse_mode=None)
+            return
     except Exception as e:
-        logger.error("Failed to verify chat member: %s", e, exc_info=True)
-        await message.answer(
-            t("unable_verify_permissions_now", lang), parse_mode=None
-        )
-        return
-    if member.status not in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR):
-        await message.answer(t("bind_admin_only", lang), parse_mode=None)
+        logger.error("Failed to check admin status: %s", e, exc_info=True)
+        await message.answer(t("unable_verify_admin_status", lang), parse_mode=None)
         return
     clan_tag = _require_clan_tag()
     if not clan_tag:
@@ -3776,14 +3937,8 @@ async def cmd_captcha_send(message: Message) -> None:
         return
 
     try:
-        member = await message.bot.get_chat_member(message.chat.id, target.id)
-        if member.status in (
-            ChatMemberStatus.ADMINISTRATOR,
-            ChatMemberStatus.CREATOR,
-        ):
-            await message.answer(
-                t("captcha_send_chat_admin", lang), parse_mode=None
-            )
+        if await _is_admin_user(message, target.id):
+            await message.answer(t("captcha_send_admin", lang), parse_mode=None)
             return
     except Exception:
         pass
