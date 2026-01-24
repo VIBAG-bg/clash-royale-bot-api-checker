@@ -505,7 +505,7 @@ TEXT = {
         "modlog_unmute": "UNMUTE: chat {chat_id} user {user_id}",
         "modlog_warn": "WARN: chat {chat_id} user {user_id} count {count} reason {reason}",
         "mute_done": "Пользователь замьючен.",
-        "mute_failed": "Не удалось замьютить пользователя.",
+        "mute_failed": "Не удалось замьютить пользователя.",`n        "mute_admin_blocked": "Нельзя замьютить админа: у бота нет прав снимать админку.",
         "my_activity_avg_decks_line": "🃏 Среднее колод/нед: {avg}",
         "my_activity_avg_fame_line": "🏆 Средняя слава/нед: {avg}",
         "my_activity_clan_line": "🏠 Клан: {clan}",
@@ -1165,7 +1165,7 @@ TEXT = {
         "modlog_unmute": "UNMUTE: chat {chat_id} user {user_id}",
         "modlog_warn": "WARN: chat {chat_id} user {user_id} count {count} reason {reason}",
         "mute_done": "User muted.",
-        "mute_failed": "Failed to mute user.",
+        "mute_failed": "Failed to mute user.",`n        "mute_admin_blocked": "Cannot mute admin: the bot lacks rights to demote admins.",
         "my_activity_avg_decks_line": "🃏 Avg decks / week: {avg}",
         "my_activity_avg_fame_line": "🏆 Avg fame / week: {avg}",
         "my_activity_clan_line": "🏠 Clan: {clan}",
@@ -1825,7 +1825,7 @@ TEXT = {
         "modlog_unmute": "UNMUTE: chat {chat_id} user {user_id}",
         "modlog_warn": "WARN: chat {chat_id} user {user_id} count {count} reason {reason}",
         "mute_done": "Користувача зам'ючено.",
-        "mute_failed": "Не вдалося зам'ютити користувача.",
+        "mute_failed": "Не вдалося зам'ютити користувача.",`n        "mute_admin_blocked": "Не можна зам'ютити адміна: у бота немає прав знімати адмінку.",
         "my_activity_avg_decks_line": "🃏 Середнє колод/тиж: {avg}",
         "my_activity_avg_fame_line": "🏆 Середня слава/тиж: {avg}",
         "my_activity_clan_line": "🏠 Клан: {clan}",
@@ -1996,4 +1996,5 @@ def t(key: str, lang: str = DEFAULT_LANG, **fmt) -> str:
         return template.format(**fmt)
     except Exception:
         return template
+
 

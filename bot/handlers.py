@@ -1054,27 +1054,19 @@ async def _restore_invite_only_admin(bot: Bot, chat_id: int, user_id: int) -> bo
     return True
 
 
-async def _demote_admin_for_mute(message: Message, user_id: int) -> bool:
+async def _demote_admin_for_mute(message: Message, user_id: int) -> tuple[bool, bool]:
     if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
-        return False
+        return False, False
     if user_id in ADMIN_USER_IDS:
-        return False
+        return False, False
     member = await message.bot.get_chat_member(message.chat.id, user_id)
     if member.status != ChatMemberStatus.ADMINISTRATOR:
-        return False
+        return False, False
     rights = _filter_promote_kwargs(
         message.bot, _build_admin_rights(invite_only=False)
     )
-    await message.bot.promote_chat_member(message.chat.id, user_id, **rights)
-    return True
-
-
-async def _apply_mute_restriction(
-    message: Message, *, user_id: int, until: datetime
-) -> bool:
-    demoted = False
     try:
-        demoted = await _demote_admin_for_mute(message, user_id)
+        await message.bot.promote_chat_member(message.chat.id, user_id, **rights)
     except Exception as e:
         logger.warning(
             "Failed to demote admin before mute: chat=%s user=%s err=%s",
@@ -1083,6 +1075,16 @@ async def _apply_mute_restriction(
             type(e).__name__,
             exc_info=True,
         )
+        return True, False
+    return True, True
+
+
+async def _apply_mute_restriction(
+    message: Message, *, user_id: int, until: datetime
+) -> bool:
+    is_admin, demoted = await _demote_admin_for_mute(message, user_id)
+    if is_admin and not demoted:
+        raise RuntimeError("admin_mute_blocked")
     try:
         await message.bot.restrict_chat_member(
             message.chat.id,
@@ -2289,6 +2291,13 @@ async def cmd_mute(message: Message) -> None:
     until = datetime.now(timezone.utc) + timedelta(minutes=minutes)
     try:
         await _apply_mute_restriction(message, user_id=target.id, until=until)
+    except RuntimeError as e:
+        if str(e) == "admin_mute_blocked":
+            await message.answer(t("mute_admin_blocked", lang), parse_mode=None)
+            return
+        logger.warning("Failed to mute user: %s", e, exc_info=True)
+        await message.answer(t("mute_failed", lang), parse_mode=None)
+        return
     except Exception as e:
         logger.warning("Failed to mute user: %s", e, exc_info=True)
         await message.answer(t("mute_failed", lang), parse_mode=None)
