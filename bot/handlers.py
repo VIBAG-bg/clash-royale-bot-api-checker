@@ -1015,6 +1015,27 @@ def _normalize_admin_title(value: object) -> str | None:
     return text[:16]
 
 
+async def _bot_has_promote_rights(message: Message) -> bool:
+    if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        return False
+    try:
+        me = await message.bot.get_me()
+        bot_member = await message.bot.get_chat_member(message.chat.id, me.id)
+    except Exception as e:
+        logger.warning(
+            "Failed to check bot admin rights: chat=%s err=%s",
+            message.chat.id,
+            type(e).__name__,
+            exc_info=True,
+        )
+        return False
+    if bot_member.status == ChatMemberStatus.CREATOR:
+        return True
+    if bot_member.status != ChatMemberStatus.ADMINISTRATOR:
+        return False
+    return bool(getattr(bot_member, "can_promote_members", False))
+
+
 async def _restore_invite_only_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
     rights = _filter_promote_kwargs(bot, _build_admin_rights(invite_only=True))
     try:
@@ -1054,27 +1075,40 @@ async def _restore_invite_only_admin(bot: Bot, chat_id: int, user_id: int) -> bo
     return True
 
 
-async def _demote_admin_for_mute(message: Message, user_id: int) -> tuple[bool, bool]:
+async def _demote_admin_for_mute(
+    message: Message, user_id: int
+) -> tuple[bool, bool]:
     if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
         return False, False
     if user_id in ADMIN_USER_IDS:
         return False, False
     member = await message.bot.get_chat_member(message.chat.id, user_id)
+    if member.status == ChatMemberStatus.CREATOR:
+        return True, False
     if member.status != ChatMemberStatus.ADMINISTRATOR:
         return False, False
+    if not await _bot_has_promote_rights(message):
+        return True, False
     rights = _filter_promote_kwargs(
         message.bot, _build_admin_rights(invite_only=False)
     )
     try:
         await message.bot.promote_chat_member(message.chat.id, user_id, **rights)
     except Exception as e:
-        logger.warning(
-            "Failed to demote admin before mute: chat=%s user=%s err=%s",
-            message.chat.id,
-            user_id,
-            type(e).__name__,
-            exc_info=True,
-        )
+        if "CHAT_ADMIN_REQUIRED" in str(e):
+            logger.warning(
+                "Demote blocked (CHAT_ADMIN_REQUIRED): chat=%s user=%s",
+                message.chat.id,
+                user_id,
+            )
+        else:
+            logger.warning(
+                "Failed to demote admin before mute: chat=%s user=%s err=%s",
+                message.chat.id,
+                user_id,
+                type(e).__name__,
+                exc_info=True,
+            )
         return True, False
     return True, True
 
@@ -1150,6 +1184,87 @@ async def _restore_admin_after_mute(bot: Bot, chat_id: int, user_id: int) -> Non
                 type(e).__name__,
                 exc_info=True,
             )
+
+
+async def _collect_admin_regrant_candidates(
+    message: Message, *, clan_tag: str, lang: str
+) -> dict[str, object] | None:
+    snapshot = await get_current_members_snapshot(clan_tag)
+    if not snapshot:
+        return None
+    roster: list[dict[str, object]] = []
+    tags: set[str] = set()
+    for row in snapshot:
+        raw_tag = row.get("player_tag")
+        tag = _normalize_tag(raw_tag) if raw_tag else None
+        name = row.get("player_name") or t("unknown", lang)
+        roster.append({"tag": tag, "name": name})
+        if tag:
+            tags.add(tag)
+    links = await get_user_links_by_tags(tags)
+    linked_count = 0
+    in_chat_count = 0
+    candidates: list[dict[str, object]] = []
+    skipped: list[dict[str, object]] = []
+    for row in roster:
+        tag = row.get("tag")
+        name = row.get("name")
+        if not tag:
+            skipped.append({"name": name, "tag": None, "reason": "no_tag"})
+            continue
+        user_id = links.get(tag)
+        if not user_id:
+            skipped.append({"name": name, "tag": tag, "reason": "no_link"})
+            continue
+        linked_count += 1
+        if user_id in ADMIN_USER_IDS:
+            skipped.append({"name": name, "tag": tag, "reason": "protected"})
+            continue
+        try:
+            member = await message.bot.get_chat_member(
+                message.chat.id, user_id
+            )
+        except Exception:
+            skipped.append({"name": name, "tag": tag, "reason": "not_in_chat"})
+            continue
+        if member.status in (ChatMemberStatus.LEFT, ChatMemberStatus.KICKED):
+            skipped.append({"name": name, "tag": tag, "reason": "not_in_chat"})
+            continue
+        in_chat_count += 1
+        if member.user.is_bot:
+            skipped.append({"name": name, "tag": tag, "reason": "bot"})
+            continue
+        if member.status == ChatMemberStatus.CREATOR:
+            skipped.append({"name": name, "tag": tag, "reason": "creator"})
+            continue
+        user_label = _format_user_label(member.user, lang)
+        candidates.append(
+            {
+                "name": name,
+                "tag": tag,
+                "user_id": user_id,
+                "user_label": user_label,
+            }
+        )
+    return {
+        "total": len(snapshot),
+        "linked": linked_count,
+        "in_chat": in_chat_count,
+        "candidates": candidates,
+        "skipped": skipped,
+    }
+
+
+def _admin_regrant_reason_text(reason: str, lang: str) -> str:
+    key_map = {
+        "no_tag": "admin_regrant_reason_no_tag",
+        "no_link": "admin_regrant_reason_no_link",
+        "not_in_chat": "admin_regrant_reason_not_in_chat",
+        "creator": "admin_regrant_reason_creator",
+        "protected": "admin_regrant_reason_protected",
+        "bot": "admin_regrant_reason_bot",
+    }
+    return t(key_map.get(reason, "unknown"), lang)
 
 
 async def _send_link_button(message: Message) -> None:
@@ -1523,6 +1638,8 @@ async def cmd_help(message: Message) -> None:
         t("help_admin_bind", lang),
         t("help_admin_admin_link_name", lang),
         t("help_admin_unlink", lang),
+        t("help_admin_admin_debug", lang),
+        t("help_admin_admin_regrant", lang),
         t("help_admin_apps", lang),
         t("help_admin_app", lang),
         t("help_admin_app_approve", lang),
@@ -4714,6 +4831,238 @@ async def cmd_unlink(message: Message) -> None:
         ),
         parse_mode=None,
     )
+
+
+@router.message(Command("admin_debug"))
+async def cmd_admin_debug(message: Message) -> None:
+    """Dry-run regrant admin rights from /tg links (admin-only)."""
+    lang = await _get_lang_for_message(message)
+    if message.from_user is None:
+        await message.answer(t("unable_verify_permissions", lang), parse_mode=None)
+        return
+    if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await message.answer(t("use_command_in_group", lang), parse_mode=None)
+        return
+    try:
+        if not await _is_admin_user(message, message.from_user.id):
+            await message.answer(t("not_allowed", lang), parse_mode=None)
+            return
+    except Exception as e:
+        logger.error("Failed to check admin status: %s", e, exc_info=True)
+        await message.answer(t("unable_verify_admin_status", lang), parse_mode=None)
+        return
+    clan_tag = _require_clan_tag()
+    if not clan_tag:
+        await message.answer(t("clan_tag_not_configured", lang), parse_mode=None)
+        return
+    plan = await _collect_admin_regrant_candidates(
+        message, clan_tag=clan_tag, lang=lang
+    )
+    if not plan:
+        await message.answer(t("admin_regrant_no_snapshot", lang), parse_mode=None)
+        return
+    candidates = list(plan.get("candidates") or [])
+    skipped = list(plan.get("skipped") or [])
+    lines = [
+        HEADER_LINE,
+        t("admin_debug_title", lang),
+        HEADER_LINE,
+        t(
+            "admin_regrant_summary_line",
+            lang,
+            total=plan.get("total"),
+            linked=plan.get("linked"),
+            in_chat=plan.get("in_chat"),
+            to_grant=len(candidates),
+        ),
+    ]
+    limit = 30
+    if candidates:
+        lines.extend(["", t("admin_regrant_section_grant", lang), DIVIDER_LINE])
+        for index, row in enumerate(candidates[:limit], 1):
+            lines.append(
+                t(
+                    "admin_regrant_line_grant",
+                    lang,
+                    index=index,
+                    name=row.get("name"),
+                    tag=row.get("tag"),
+                    user=row.get("user_label"),
+                )
+            )
+        if len(candidates) > limit:
+            lines.append(
+                t(
+                    "admin_regrant_limited_hint",
+                    lang,
+                    shown=limit,
+                    total=len(candidates),
+                )
+            )
+    if skipped:
+        lines.extend(["", t("admin_regrant_section_skip", lang), DIVIDER_LINE])
+        for index, row in enumerate(skipped[:limit], 1):
+            reason = _admin_regrant_reason_text(
+                str(row.get("reason")), lang
+            )
+            lines.append(
+                t(
+                    "admin_regrant_line_skip",
+                    lang,
+                    index=index,
+                    name=row.get("name"),
+                    tag=row.get("tag") or t("na", lang),
+                    reason=reason,
+                )
+            )
+        if len(skipped) > limit:
+            lines.append(
+                t(
+                    "admin_regrant_limited_hint",
+                    lang,
+                    shown=limit,
+                    total=len(skipped),
+                )
+            )
+    await message.answer("\n".join(lines), parse_mode=None)
+
+
+@router.message(Command("admin_regrant"))
+async def cmd_admin_regrant(message: Message) -> None:
+    """Regrant admin rights (invite-only) from /tg links (admin-only)."""
+    lang = await _get_lang_for_message(message)
+    if message.from_user is None:
+        await message.answer(t("unable_verify_permissions", lang), parse_mode=None)
+        return
+    if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await message.answer(t("use_command_in_group", lang), parse_mode=None)
+        return
+    try:
+        if not await _is_admin_user(message, message.from_user.id):
+            await message.answer(t("not_allowed", lang), parse_mode=None)
+            return
+    except Exception as e:
+        logger.error("Failed to check admin status: %s", e, exc_info=True)
+        await message.answer(t("unable_verify_admin_status", lang), parse_mode=None)
+        return
+    clan_tag = _require_clan_tag()
+    if not clan_tag:
+        await message.answer(t("clan_tag_not_configured", lang), parse_mode=None)
+        return
+    if not await _bot_has_promote_rights(message):
+        await message.answer(t("admin_regrant_bot_no_rights", lang), parse_mode=None)
+        return
+    plan = await _collect_admin_regrant_candidates(
+        message, clan_tag=clan_tag, lang=lang
+    )
+    if not plan:
+        await message.answer(t("admin_regrant_no_snapshot", lang), parse_mode=None)
+        return
+    candidates = list(plan.get("candidates") or [])
+    skipped = list(plan.get("skipped") or [])
+    granted_rows: list[dict[str, object]] = []
+    errors: list[dict[str, object]] = []
+    for row in candidates:
+        ok = await _restore_invite_only_admin(
+            message.bot, message.chat.id, int(row.get("user_id"))
+        )
+        if ok:
+            granted_rows.append(row)
+        else:
+            errors.append(row)
+    lines = [
+        HEADER_LINE,
+        t("admin_regrant_title", lang),
+        HEADER_LINE,
+        t(
+            "admin_regrant_summary_line",
+            lang,
+            total=plan.get("total"),
+            linked=plan.get("linked"),
+            in_chat=plan.get("in_chat"),
+            to_grant=len(candidates),
+        ),
+    ]
+    limit = 30
+    if granted_rows:
+        lines.extend(["", t("admin_regrant_section_grant", lang), DIVIDER_LINE])
+        for index, row in enumerate(granted_rows[:limit], 1):
+            lines.append(
+                t(
+                    "admin_regrant_line_grant",
+                    lang,
+                    index=index,
+                    name=row.get("name"),
+                    tag=row.get("tag"),
+                    user=row.get("user_label"),
+                )
+            )
+        if len(granted_rows) > limit:
+            lines.append(
+                t(
+                    "admin_regrant_limited_hint",
+                    lang,
+                    shown=limit,
+                    total=len(granted_rows),
+                )
+            )
+    if errors:
+        lines.extend(["", t("admin_regrant_section_errors", lang), DIVIDER_LINE])
+        for index, row in enumerate(errors[:limit], 1):
+            lines.append(
+                t(
+                    "admin_regrant_line_error",
+                    lang,
+                    index=index,
+                    name=row.get("name"),
+                    tag=row.get("tag"),
+                    error=t("admin_regrant_reason_failed", lang),
+                )
+            )
+        if len(errors) > limit:
+            lines.append(
+                t(
+                    "admin_regrant_limited_hint",
+                    lang,
+                    shown=limit,
+                    total=len(errors),
+                )
+            )
+    if skipped:
+        lines.extend(["", t("admin_regrant_section_skip", lang), DIVIDER_LINE])
+        for index, row in enumerate(skipped[:limit], 1):
+            reason = _admin_regrant_reason_text(
+                str(row.get("reason")), lang
+            )
+            lines.append(
+                t(
+                    "admin_regrant_line_skip",
+                    lang,
+                    index=index,
+                    name=row.get("name"),
+                    tag=row.get("tag") or t("na", lang),
+                    reason=reason,
+                )
+            )
+        if len(skipped) > limit:
+            lines.append(
+                t(
+                    "admin_regrant_limited_hint",
+                    lang,
+                    shown=limit,
+                    total=len(skipped),
+                )
+            )
+    lines.append(
+        t(
+            "admin_regrant_done_line",
+            lang,
+            granted=len(granted_rows),
+            skipped=len(skipped),
+            errors=len(errors),
+        )
+    )
+    await message.answer("\n".join(lines), parse_mode=None)
 
 
 @router.message(F.text & (F.chat.type == ChatType.PRIVATE))
