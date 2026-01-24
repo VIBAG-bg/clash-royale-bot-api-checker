@@ -1,5 +1,6 @@
 ﻿"""Telegram bot command handlers using aiogram v3."""
 
+import asyncio
 import inspect
 import logging
 from datetime import datetime, timedelta, timezone
@@ -1015,6 +1016,69 @@ def _normalize_admin_title(value: object) -> str | None:
     return text[:16]
 
 
+async def _set_admin_title_if_possible(
+    bot: Bot, *, chat_id: int, user_id: int
+) -> None:
+    if not hasattr(bot, "set_chat_administrator_custom_title"):
+        return
+    try:
+        me = await bot.get_me()
+        bot_member = await bot.get_chat_member(chat_id, me.id)
+    except Exception:
+        return
+    if bot_member.status == ChatMemberStatus.CREATOR:
+        pass
+    elif bot_member.status != ChatMemberStatus.ADMINISTRATOR:
+        return
+    elif not getattr(bot_member, "can_promote_members", False):
+        return
+    link = None
+    try:
+        link = await get_user_link(user_id)
+    except Exception as e:
+        logger.warning(
+            "Failed to load user link for admin title: chat=%s user=%s err=%s",
+            chat_id,
+            user_id,
+            type(e).__name__,
+            exc_info=True,
+        )
+    title = _normalize_admin_title(link.get("player_name") if link else None)
+    if not title:
+        return
+    delays = (0.4, 0.8, 1.2, 1.6, 2.0)
+    for delay in delays:
+        try:
+            member = await bot.get_chat_member(chat_id, user_id)
+        except Exception:
+            member = None
+        if member and member.status in (
+            ChatMemberStatus.ADMINISTRATOR,
+            ChatMemberStatus.CREATOR,
+        ):
+            try:
+                await bot.set_chat_administrator_custom_title(
+                    chat_id, user_id, title
+                )
+            except Exception as e:
+                msg = str(e).lower()
+                if (
+                    "user is not an administrator" in msg
+                    or "chat_admin_required" in msg
+                ):
+                    await asyncio.sleep(delay)
+                    continue
+                logger.warning(
+                    "Failed to set admin title: chat=%s user=%s err=%s",
+                    chat_id,
+                    user_id,
+                    type(e).__name__,
+                    exc_info=True,
+                )
+            return
+        await asyncio.sleep(delay)
+
+
 async def _bot_has_promote_rights(message: Message) -> bool:
     if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
         return False
@@ -1049,29 +1113,7 @@ async def _restore_invite_only_admin(bot: Bot, chat_id: int, user_id: int) -> bo
             exc_info=True,
         )
         return False
-    link = None
-    try:
-        link = await get_user_link(user_id)
-    except Exception as e:
-        logger.warning(
-            "Failed to load user link for admin title: chat=%s user=%s err=%s",
-            chat_id,
-            user_id,
-            type(e).__name__,
-            exc_info=True,
-        )
-    title = _normalize_admin_title(link.get("player_name") if link else None)
-    if title and hasattr(bot, "set_chat_administrator_custom_title"):
-        try:
-            await bot.set_chat_administrator_custom_title(chat_id, user_id, title)
-        except Exception as e:
-            logger.warning(
-                "Failed to set admin title: chat=%s user=%s err=%s",
-                chat_id,
-                user_id,
-                type(e).__name__,
-                exc_info=True,
-            )
+    await _set_admin_title_if_possible(bot, chat_id=chat_id, user_id=user_id)
     return True
 
 
