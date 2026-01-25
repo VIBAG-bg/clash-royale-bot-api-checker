@@ -104,6 +104,8 @@ WAR_DAY_START_KEY = "war_day_start"
 WAR_DAY_NUMBER_KEY = "war_day_number"
 WAR_DAY_NUMBER_DATE_KEY = "war_day_number_date"
 WAR_DAY_RESOLVED_BY_KEY = "war_day_resolved_by"
+ADMIN_GRANT_QUEUE_KEY = "admin_grant_queue"
+ADMIN_GRANT_TTL = timedelta(hours=1)
 BOT: Bot | None = None
 
 
@@ -1831,6 +1833,95 @@ async def scheduled_unmute_task(bot: Bot) -> None:
             await asyncio.sleep(30)
 
 
+def _parse_admin_grant_time(value: object, now: datetime) -> datetime:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            parsed = now
+    else:
+        parsed = now
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+async def admin_grant_task(bot: Bot) -> None:
+    logger.info("Admin grant task started")
+    while True:
+        try:
+            state = await get_app_state(ADMIN_GRANT_QUEUE_KEY)
+            items = list((state or {}).get("items") or [])
+            if not items:
+                await asyncio.sleep(30)
+                continue
+            now = datetime.now(timezone.utc)
+            remaining: list[dict[str, object]] = []
+            for item in items:
+                try:
+                    chat_id = int(item.get("chat_id") or 0)
+                    user_id = int(item.get("user_id") or 0)
+                except Exception:
+                    continue
+                if not chat_id or not user_id:
+                    continue
+                created_at = _parse_admin_grant_time(
+                    item.get("created_at"), now
+                )
+                if now - created_at > ADMIN_GRANT_TTL:
+                    continue
+                try:
+                    member = await bot.get_chat_member(chat_id, user_id)
+                except Exception:
+                    remaining.append(item)
+                    continue
+                if member.status in (
+                    ChatMemberStatus.LEFT,
+                    ChatMemberStatus.KICKED,
+                ):
+                    remaining.append(item)
+                    continue
+                if member.user and member.user.is_bot:
+                    continue
+                try:
+                    me = await bot.get_me()
+                    bot_member = await bot.get_chat_member(chat_id, me.id)
+                except Exception:
+                    remaining.append(item)
+                    continue
+                if bot_member.status not in (
+                    ChatMemberStatus.ADMINISTRATOR,
+                    ChatMemberStatus.CREATOR,
+                ):
+                    remaining.append(item)
+                    continue
+                if (
+                    bot_member.status != ChatMemberStatus.CREATOR
+                    and not getattr(bot_member, "can_promote_members", False)
+                ):
+                    remaining.append(item)
+                    continue
+                ok = await _restore_invite_only_admin(bot, chat_id, user_id)
+                if not ok:
+                    remaining.append(item)
+            if remaining:
+                await set_app_state(
+                    ADMIN_GRANT_QUEUE_KEY,
+                    {"items": remaining, "updated_at": now.isoformat()},
+                )
+            else:
+                await delete_app_state(ADMIN_GRANT_QUEUE_KEY)
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            logger.info("Admin grant task cancelled")
+            break
+        except Exception as e:
+            logger.warning("Admin grant task error: %s", e, exc_info=True)
+            await asyncio.sleep(30)
+
+
 @asynccontextmanager
 async def lifespan(dispatcher: Dispatcher):
     """
@@ -1854,11 +1945,13 @@ async def lifespan(dispatcher: Dispatcher):
     invite_task = None
     unmute_task = None
     clan_place_task = None
+    admin_grant_task_handle = None
     if REMINDER_ENABLED:
         reminder_task = asyncio.create_task(daily_reminder_task(BOT))
     if AUTO_INVITE_ENABLED:
         invite_task = asyncio.create_task(auto_invite_task(BOT))
     unmute_task = asyncio.create_task(scheduled_unmute_task(BOT))
+    admin_grant_task_handle = asyncio.create_task(admin_grant_task(BOT))
     clan_place_task = asyncio.create_task(clan_place_watchdog_task(BOT))
     logger.info("Scheduled unmute notification task started")
     logger.info("Background fetch task started")
@@ -1876,6 +1969,8 @@ async def lifespan(dispatcher: Dispatcher):
         invite_task.cancel()
     if unmute_task is not None:
         unmute_task.cancel()
+    if admin_grant_task_handle is not None:
+        admin_grant_task_handle.cancel()
     if clan_place_task is not None:
         clan_place_task.cancel()
     try:
@@ -1895,6 +1990,11 @@ async def lifespan(dispatcher: Dispatcher):
     if unmute_task is not None:
         try:
             await unmute_task
+        except asyncio.CancelledError:
+            pass
+    if admin_grant_task_handle is not None:
+        try:
+            await admin_grant_task_handle
         except asyncio.CancelledError:
             pass
     if clan_place_task is not None:

@@ -69,6 +69,7 @@ from db import (
     get_captcha_question,
     get_current_member_tags,
     get_current_members_snapshot,
+    get_enabled_clan_chats,
     get_user_language,
     get_first_seen_time,
     get_last_rejected_time_for_user,
@@ -966,6 +967,9 @@ def _admin_restore_state_key(chat_id: int, user_id: int) -> str:
     return f"admin_restore:{chat_id}:{user_id}"
 
 
+ADMIN_GRANT_QUEUE_KEY = "admin_grant_queue"
+
+
 _PROMOTE_RIGHTS_KEYS: set[str] | None = None
 
 
@@ -1309,6 +1313,55 @@ def _admin_regrant_reason_text(reason: str, lang: str) -> str:
     return t(key_map.get(reason, "unknown"), lang)
 
 
+async def _enqueue_admin_grant(chat_id: int, user_id: int) -> None:
+    state = await get_app_state(ADMIN_GRANT_QUEUE_KEY)
+    items = list((state or {}).get("items") or [])
+    for item in items:
+        try:
+            if int(item.get("chat_id")) == int(chat_id) and int(
+                item.get("user_id")
+            ) == int(user_id):
+                return
+        except Exception:
+            continue
+    items.append(
+        {
+            "chat_id": int(chat_id),
+            "user_id": int(user_id),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    await set_app_state(
+        ADMIN_GRANT_QUEUE_KEY,
+        {"items": items, "updated_at": datetime.now(timezone.utc).isoformat()},
+    )
+
+
+async def _resolve_admin_grant_chats(
+    *, clan_tag: str, origin_chat_id: int | None
+) -> list[int]:
+    chats = await get_enabled_clan_chats(clan_tag)
+    seen: set[int] = set()
+    resolved: list[int] = []
+    for chat_id in chats:
+        try:
+            chat_id = int(chat_id)
+        except Exception:
+            continue
+        if chat_id in seen:
+            continue
+        seen.add(chat_id)
+        resolved.append(chat_id)
+    if origin_chat_id is not None:
+        try:
+            origin_id = int(origin_chat_id)
+        except Exception:
+            origin_id = 0
+        if origin_id and origin_id not in seen:
+            resolved.append(origin_id)
+    return resolved
+
+
 async def _send_link_button(message: Message) -> None:
     lang = await _get_lang_for_message(message)
     username = await _get_bot_username(message)
@@ -1434,6 +1487,19 @@ async def _handle_link_candidates(
             player_name=candidate["player_name"],
             source=source,
         )
+        try:
+            chat_ids = await _resolve_admin_grant_chats(
+                clan_tag=clan_tag, origin_chat_id=origin_chat_id
+            )
+            for chat_id in chat_ids:
+                await _enqueue_admin_grant(chat_id, target_user_id)
+        except Exception as e:
+            logger.warning(
+                "Failed to enqueue admin grant: user=%s err=%s",
+                target_user_id,
+                type(e).__name__,
+                exc_info=True,
+            )
         await delete_user_link_request(target_user_id)
         await message.answer(
             t(
@@ -5284,6 +5350,19 @@ async def handle_link_select(query: CallbackQuery) -> None:
         source=source,
     )
     await delete_user_link_request(target_user_id)
+    try:
+        chat_ids = await _resolve_admin_grant_chats(
+            clan_tag=clan_tag, origin_chat_id=request.get("origin_chat_id")
+        )
+        for chat_id in chat_ids:
+            await _enqueue_admin_grant(chat_id, target_user_id)
+    except Exception as e:
+        logger.warning(
+            "Failed to enqueue admin grant: user=%s err=%s",
+            target_user_id,
+            type(e).__name__,
+            exc_info=True,
+        )
 
     if query.message is not None:
         await query.message.answer(
