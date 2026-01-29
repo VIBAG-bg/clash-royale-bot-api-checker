@@ -104,6 +104,8 @@ WAR_DAY_START_KEY = "war_day_start"
 WAR_DAY_NUMBER_KEY = "war_day_number"
 WAR_DAY_NUMBER_DATE_KEY = "war_day_number_date"
 WAR_DAY_RESOLVED_BY_KEY = "war_day_resolved_by"
+CR_API_FORBIDDEN_ALERT_KEY = "cr_api_403_alert"
+CR_API_FORBIDDEN_ALERT_COOLDOWN = timedelta(minutes=30)
 ADMIN_GRANT_QUEUE_KEY = "admin_grant_queue"
 ADMIN_GRANT_TTL = timedelta(hours=1)
 BOT: Bot | None = None
@@ -121,6 +123,44 @@ async def _send_modlog(bot: Bot, text: str) -> None:
         )
     except Exception as e:
         logger.warning("Failed to send modlog: %s", e)
+
+
+def _parse_state_timestamp(value: object, now: datetime) -> datetime:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            parsed = now
+    else:
+        parsed = now
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+async def _notify_cr_api_forbidden(
+    bot: Bot, *, context: str | None = None
+) -> None:
+    if bot is None:
+        return
+    now = datetime.now(timezone.utc)
+    state = await get_app_state(CR_API_FORBIDDEN_ALERT_KEY)
+    if isinstance(state, dict):
+        last_sent = _parse_state_timestamp(state.get("sent_at"), now)
+        if now - last_sent < CR_API_FORBIDDEN_ALERT_COOLDOWN:
+            return
+    await set_app_state(
+        CR_API_FORBIDDEN_ALERT_KEY,
+        {"sent_at": now.isoformat(), "context": context or ""},
+    )
+    text = t(
+        "cr_api_forbidden_alert",
+        DEFAULT_LANG,
+        context=context or "n/a",
+    )
+    await _send_modlog(bot, text)
 
 
 def _admin_restore_state_key(chat_id: int, user_id: int) -> str:
@@ -628,6 +668,10 @@ async def fetch_river_race_stats() -> None:
                 members = await api_client.get_clan_members(CLAN_TAG)
             except ClashRoyaleAPIError as e:
                 logger.warning("Failed to fetch clan members: %s", e)
+                if e.status_code == 403 and BOT is not None:
+                    await _notify_cr_api_forbidden(
+                        BOT, context="clan_members"
+                    )
             except Exception as e:
                 logger.warning(
                     "Failed to fetch clan members: %s", e, exc_info=True
@@ -802,6 +846,10 @@ async def fetch_river_race_stats() -> None:
                     raise
         except ClashRoyaleAPIError as e:
             logger.error(f"Clash Royale API error: {e}")
+            if e.status_code == 403 and BOT is not None:
+                await _notify_cr_api_forbidden(
+                    BOT, context="fetch_river_race_stats"
+                )
         except Exception as e:
             logger.error(f"Error fetching River Race stats: {e}", exc_info=True)
 
@@ -886,6 +934,10 @@ async def maybe_post_daily_war_reminder(
             logger.warning(
                 "Reminder skipped: failed to fetch current river race: %s", e
             )
+            if e.status_code == 403:
+                await _notify_cr_api_forbidden(
+                    bot, context="daily_reminder"
+                )
             if return_status:
                 return {"status": "api_error", "error": str(e)}
             return
@@ -1583,6 +1635,10 @@ async def maybe_auto_invite(bot: Bot) -> None:
         members = await api_client.get_clan_members(CLAN_TAG)
     except ClashRoyaleAPIError as e:
         logger.info("Auto-invite skipped: CR API error: %s", e)
+        if e.status_code == 403:
+            await _notify_cr_api_forbidden(
+                bot, context="auto_invite"
+            )
         return
     except Exception as e:
         logger.info("Auto-invite skipped: API error: %s", e)
