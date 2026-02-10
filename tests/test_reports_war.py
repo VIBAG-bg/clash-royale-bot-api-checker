@@ -455,6 +455,80 @@ class WarReportsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(t("kick_short_status_fallback_weakest", "en"), report)
         self.assertNotIn(t("kick_short_section_not_applicable", "en"), report)
 
+    async def test_kick_shortlist_keeps_four_without_top_up(self) -> None:
+        inactive = [
+            {
+                "player_tag": f"#P{i}",
+                "player_name": f"P{i}",
+                "decks_used": 0,
+                "fame": 0,
+            }
+            for i in range(1, 5)
+        ]
+        tags = {row["player_tag"] for row in inactive}
+        session = _FakeSession(
+            [
+                _FakeResult(
+                    rows=[SimpleNamespace(season_id=128, section_index=3)]
+                ),
+                _FakeResult(first_value=date(2026, 1, 3)),
+                _FakeResult(
+                    rows=[
+                        SimpleNamespace(
+                            snapshot_date=date(2026, 1, 3), player_tag=tag
+                        )
+                        for tag in tags
+                    ]
+                ),
+                _FakeResult(
+                    rows=[
+                        SimpleNamespace(
+                            player_tag=tag,
+                            season_id=128,
+                            section_index=3,
+                            decks_used=0,
+                            fame=0,
+                        )
+                        for tag in tags
+                    ]
+                ),
+            ]
+        )
+
+        @asynccontextmanager
+        async def session_ctx():
+            yield session
+
+        with patch("reports.get_session", new=session_ctx), patch(
+            "reports.get_first_snapshot_date_for_week",
+            new=AsyncMock(return_value=date(2026, 1, 1)),
+        ), patch(
+            "reports.get_rolling_leaderboard",
+            new=AsyncMock(return_value=(inactive, [])),
+        ), patch(
+            "reports.get_participation_week_counts",
+            new=AsyncMock(return_value={tag: 4 for tag in tags}),
+        ), patch(
+            "reports.get_week_decks_map",
+            new=AsyncMock(return_value={tag: 0 for tag in tags}),
+        ), patch(
+            "reports._collect_wtd_donations",
+            new=AsyncMock(return_value={}),
+        ), patch(
+            "reports.get_last_seen_map",
+            new=AsyncMock(return_value={}),
+        ):
+            report = await build_kick_shortlist_report(
+                [(128, 3)], (128, 3), "#CLAN", lang="en"
+            )
+
+        candidate_lines = self._extract_short_section(
+            report, t("kick_short_section_candidates", "en")
+        )
+        self.assertEqual(4, self._count_player_lines(candidate_lines))
+        self.assertNotIn(t("kick_short_status_fallback_weakest", "en"), report)
+        self.assertNotIn(t("kick_short_status_fallback_revived", "en"), report)
+
     async def test_kick_shortlist_tops_up_from_revived_when_needed(self) -> None:
         inactive = [
             {
@@ -545,3 +619,104 @@ class WarReportsTests(unittest.IsolatedAsyncioTestCase):
             report, t("kick_short_section_revived", "en")
         )
         self.assertFalse(revived_lines)
+
+    async def test_kick_shortlist_tops_up_from_new_members_when_needed(self) -> None:
+        inactive = [
+            {
+                "player_tag": "#A",
+                "player_name": "A",
+                "decks_used": 0,
+                "fame": 0,
+            },
+            {
+                "player_tag": "#B",
+                "player_name": "B",
+                "decks_used": 0,
+                "fame": 0,
+            },
+            {
+                "player_tag": "#N2",
+                "player_name": "N2",
+                "decks_used": 0,
+                "fame": 0,
+            },
+            {
+                "player_tag": "#N1",
+                "player_name": "N1",
+                "decks_used": 0,
+                "fame": 0,
+            },
+        ]
+        tags = {"#A", "#B", "#N2", "#N1"}
+        session = _FakeSession(
+            [
+                _FakeResult(
+                    rows=[SimpleNamespace(season_id=128, section_index=3)]
+                ),
+                _FakeResult(first_value=date(2026, 1, 3)),
+                _FakeResult(
+                    rows=[
+                        SimpleNamespace(
+                            snapshot_date=date(2026, 1, 3), player_tag="#A"
+                        )
+                    ]
+                ),
+                _FakeResult(
+                    rows=[
+                        SimpleNamespace(
+                            player_tag="#A",
+                            season_id=128,
+                            section_index=3,
+                            decks_used=0,
+                            fame=0,
+                        )
+                    ]
+                ),
+            ]
+        )
+
+        @asynccontextmanager
+        async def session_ctx():
+            yield session
+
+        with patch("reports.get_session", new=session_ctx), patch(
+            "reports.get_first_snapshot_date_for_week",
+            new=AsyncMock(return_value=date(2026, 1, 1)),
+        ), patch(
+            "reports.get_rolling_leaderboard",
+            new=AsyncMock(return_value=(inactive, [])),
+        ), patch(
+            "reports.get_participation_week_counts",
+            new=AsyncMock(
+                return_value={"#A": 4, "#B": 3, "#N2": 2, "#N1": 1}
+            ),
+        ), patch(
+            "reports.get_week_decks_map",
+            new=AsyncMock(return_value={tag: 0 for tag in tags}),
+        ), patch(
+            "reports._collect_wtd_donations",
+            new=AsyncMock(return_value={}),
+        ), patch(
+            "reports.get_last_seen_map",
+            new=AsyncMock(return_value={}),
+        ):
+            report = await build_kick_shortlist_report(
+                [(128, 3)], (128, 3), "#CLAN", lang="en"
+            )
+
+        candidate_lines = self._extract_short_section(
+            report, t("kick_short_section_candidates", "en")
+        )
+        self.assertEqual(3, self._count_player_lines(candidate_lines))
+        self.assertIn("A", "\n".join(candidate_lines))
+        self.assertIn("B", "\n".join(candidate_lines))
+        self.assertIn("N2", "\n".join(candidate_lines))
+        self.assertIn(
+            t("kick_short_status_fallback_new_member_zero", "en"), report
+        )
+
+        new_member_lines = self._extract_short_section(
+            report, t("kick_short_section_new_members", "en")
+        )
+        self.assertIn("N1", "\n".join(new_member_lines))
+        self.assertNotIn("N2", "\n".join(new_member_lines))

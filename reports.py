@@ -2970,6 +2970,27 @@ async def build_kick_shortlist_report(
                 short_candidates.append(entry)
                 short_candidate_tags.add(tag)
 
+        if len(short_candidates) < short_min_candidates:
+            for entry in new_members:
+                if len(short_candidates) >= short_min_candidates:
+                    break
+                tag = _normalize_tag(entry.get("player_tag"))
+                if not tag or tag in short_candidate_tags:
+                    continue
+                weeks_played = int(entry.get("weeks_played", 0) or 0)
+                decks_window = int(entry.get("decks_used", 0) or 0)
+                fame_window = int(entry.get("fame", 0) or 0)
+                last_week_decks = int(entry.get("last_week_decks", 0) or 0)
+                if weeks_played != NEW_MEMBER_WEEKS_PLAYED:
+                    continue
+                if decks_window > 0 or fame_window > 0 or last_week_decks > 0:
+                    continue
+                entry["short_status_key"] = (
+                    "kick_short_status_fallback_new_member_zero"
+                )
+                short_candidates.append(entry)
+                short_candidate_tags.add(tag)
+
         short_not_applicable = [
             row
             for row in not_applicable
@@ -2978,6 +2999,11 @@ async def build_kick_shortlist_report(
         short_revived = [
             row
             for row in revived_activity
+            if _normalize_tag(row.get("player_tag")) not in short_candidate_tags
+        ]
+        short_new_members = [
+            row
+            for row in new_members
             if _normalize_tag(row.get("player_tag")) not in short_candidate_tags
         ]
 
@@ -3063,13 +3089,13 @@ async def build_kick_shortlist_report(
         _append_short_section(
             "kick_short_section_revived", short_revived
         )
-        _append_new_members_short(new_members)
+        _append_new_members_short(short_new_members)
 
         if (
             not short_candidates
             and not short_not_applicable
             and not short_revived
-            and not new_members
+            and not short_new_members
         ):
             lines.append("")
             lines.append(t("kick_shortlist_none", lang))
