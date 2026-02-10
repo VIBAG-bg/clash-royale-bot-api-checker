@@ -1,0 +1,2 @@
+"""Fast test profile."""
+
