@@ -2850,6 +2850,9 @@ async def build_kick_shortlist_report(
             "history_line": history_line,
             "detail_line": detail_line,
             "eligibility_statuses": eligibility_statuses,
+            "colosseum_latest_is_pass": (
+                bool(eligible_results) and eligible_results[0] == "pass"
+            ),
         }
         inactive_entries_by_tag[normalized_tag] = entry
 
@@ -2932,6 +2935,20 @@ async def build_kick_shortlist_report(
             short_candidates.append(entry)
             short_candidate_tags.add(tag)
 
+        def _get_latest_colosseum_stats_for_tag(
+            tag: str, fallback_entry: dict[str, object]
+        ) -> tuple[int, int]:
+            if colosseum_weeks:
+                latest_week = colosseum_weeks[0]
+                stats = colosseum_stats.get(tag, {}).get(latest_week)
+                if stats:
+                    return int(stats.get("decks_used", 0)), int(
+                        stats.get("fame", 0)
+                    )
+            return int(fallback_entry.get("decks_used", 0) or 0), int(
+                fallback_entry.get("fame", 0) or 0
+            )
+
         if len(short_candidates) < short_min_candidates:
             new_member_tags = {
                 _normalize_tag(row.get("player_tag")) for row in new_members
@@ -2952,6 +2969,8 @@ async def build_kick_shortlist_report(
                     continue
                 fallback_entry = inactive_entries_by_tag.get(tag)
                 if not fallback_entry:
+                    continue
+                if bool(fallback_entry.get("colosseum_latest_is_pass")):
                     continue
                 fallback_entry["short_status_key"] = (
                     "kick_short_status_fallback_weakest"
@@ -2989,6 +3008,74 @@ async def build_kick_shortlist_report(
                     "kick_short_status_fallback_new_member_zero"
                 )
                 short_candidates.append(entry)
+                short_candidate_tags.add(tag)
+
+        if len(short_candidates) == 0:
+            nearest_entry: dict[str, object] | None = None
+            nearest_score: tuple[int, int, int, int, int] | None = None
+            nearest_stats = (0, 0)
+            for row in inactive:
+                tag = _normalize_tag(row.get("player_tag"))
+                if not tag or tag in short_candidate_tags:
+                    continue
+                fallback_entry = inactive_entries_by_tag.get(tag)
+                if not fallback_entry:
+                    continue
+                weeks_played = int(fallback_entry.get("weeks_played", 0) or 0)
+                if weeks_played <= NEW_MEMBER_WEEKS_PLAYED:
+                    continue
+                decks_val, fame_val = _get_latest_colosseum_stats_for_tag(
+                    tag, fallback_entry
+                )
+                decks_delta = abs(decks_val - KICK_COLOSSEUM_SAVE_DECKS)
+                fame_delta = abs(fame_val - KICK_COLOSSEUM_SAVE_FAME)
+                score = (
+                    decks_delta + fame_delta,
+                    decks_delta,
+                    fame_delta,
+                    decks_val,
+                    fame_val,
+                )
+                if nearest_score is None or score < nearest_score:
+                    nearest_score = score
+                    nearest_entry = fallback_entry
+                    nearest_stats = (decks_val, fame_val)
+            if nearest_entry is not None:
+                decks_val, fame_val = nearest_stats
+                nearest_entry["short_status_key"] = (
+                    "kick_short_status_fallback_nearest"
+                )
+                nearest_entry["short_proximity_note"] = t(
+                    "kick_short_nearest_rule_line",
+                    lang,
+                    decks_req=KICK_COLOSSEUM_SAVE_DECKS,
+                    fame_req=KICK_COLOSSEUM_SAVE_FAME,
+                    decks=decks_val,
+                    fame=fame_val,
+                    decks_delta=abs(decks_val - KICK_COLOSSEUM_SAVE_DECKS),
+                    fame_delta=abs(fame_val - KICK_COLOSSEUM_SAVE_FAME),
+                )
+                short_candidates.append(nearest_entry)
+                short_candidate_tags.add(
+                    _normalize_tag(nearest_entry.get("player_tag"))
+                )
+
+        if len(short_candidates) < short_min_candidates:
+            for row in inactive:
+                if len(short_candidates) >= short_min_candidates:
+                    break
+                tag = _normalize_tag(row.get("player_tag"))
+                if not tag or tag in short_candidate_tags:
+                    continue
+                fallback_entry = inactive_entries_by_tag.get(tag)
+                if not fallback_entry:
+                    continue
+                if not bool(fallback_entry.get("colosseum_latest_is_pass")):
+                    continue
+                fallback_entry["short_status_key"] = (
+                    "kick_short_status_fallback_pass_weakest"
+                )
+                short_candidates.append(fallback_entry)
                 short_candidate_tags.add(tag)
 
         short_not_applicable = [
@@ -3045,6 +3132,9 @@ async def build_kick_shortlist_report(
                 status_key = row.get("short_status_key")
                 if status_key:
                     lines.append(t(status_key, lang))
+                proximity_note = row.get("short_proximity_note")
+                if proximity_note:
+                    lines.append(str(proximity_note))
                 last_seen_text = _format_kick_v2_last_seen(
                     row.get("last_seen"), now_utc, lang
                 )
