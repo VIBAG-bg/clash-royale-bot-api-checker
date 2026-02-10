@@ -2812,6 +2812,7 @@ async def build_kick_shortlist_report(
     not_applicable: list[dict[str, object]] = []
     revived_activity: list[dict[str, object]] = []
     new_members: list[dict[str, object]] = []
+    inactive_entries_by_tag: dict[str, dict[str, object]] = {}
 
     has_unknown_colosseum = any(
         eligible_tags_map.get(week) is None for week in colosseum_weeks
@@ -2850,6 +2851,7 @@ async def build_kick_shortlist_report(
             "detail_line": detail_line,
             "eligibility_statuses": eligibility_statuses,
         }
+        inactive_entries_by_tag[normalized_tag] = entry
 
         if weeks_played <= NEW_MEMBER_WEEKS_PLAYED:
             if last_decks < REVIVED_DECKS_THRESHOLD:
@@ -2912,9 +2914,73 @@ async def build_kick_shortlist_report(
             candidates_streak.append(entry)
         else:
             candidates_last_fail.append(entry)
-    candidates_combined = [entry for _, entry in limited_candidates]
 
     if not detailed:
+        # Product rule: short /list_for_kick is always 3..5 candidates.
+        # KICK_SHORTLIST_LIMIT is kept for detailed diagnostics branch.
+        short_min_candidates = 3
+        short_max_candidates = 5
+        short_candidates: list[dict[str, object]] = []
+        short_candidate_tags: set[str] = set()
+
+        for _, entry in candidate_ordered:
+            if len(short_candidates) >= short_max_candidates:
+                break
+            tag = _normalize_tag(entry.get("player_tag"))
+            if not tag or tag in short_candidate_tags:
+                continue
+            short_candidates.append(entry)
+            short_candidate_tags.add(tag)
+
+        if len(short_candidates) < short_min_candidates:
+            new_member_tags = {
+                _normalize_tag(row.get("player_tag")) for row in new_members
+            }
+            revived_tags = {
+                _normalize_tag(row.get("player_tag")) for row in revived_activity
+            }
+            for row in inactive:
+                if len(short_candidates) >= short_min_candidates:
+                    break
+                tag = _normalize_tag(row.get("player_tag"))
+                if (
+                    not tag
+                    or tag in short_candidate_tags
+                    or tag in new_member_tags
+                    or tag in revived_tags
+                ):
+                    continue
+                fallback_entry = inactive_entries_by_tag.get(tag)
+                if not fallback_entry:
+                    continue
+                fallback_entry["short_status_key"] = (
+                    "kick_short_status_fallback_weakest"
+                )
+                short_candidates.append(fallback_entry)
+                short_candidate_tags.add(tag)
+
+        if len(short_candidates) < short_min_candidates:
+            for entry in revived_activity:
+                if len(short_candidates) >= short_min_candidates:
+                    break
+                tag = _normalize_tag(entry.get("player_tag"))
+                if not tag or tag in short_candidate_tags:
+                    continue
+                entry["short_status_key"] = "kick_short_status_fallback_revived"
+                short_candidates.append(entry)
+                short_candidate_tags.add(tag)
+
+        short_not_applicable = [
+            row
+            for row in not_applicable
+            if _normalize_tag(row.get("player_tag")) not in short_candidate_tags
+        ]
+        short_revived = [
+            row
+            for row in revived_activity
+            if _normalize_tag(row.get("player_tag")) not in short_candidate_tags
+        ]
+
         lines = [
             HEADER_LINE,
             t("kick_short_title", lang),
@@ -2989,20 +3055,20 @@ async def build_kick_shortlist_report(
                 )
 
         _append_short_section(
-            "kick_short_section_candidates", candidates_combined
+            "kick_short_section_candidates", short_candidates
         )
         _append_short_section(
-            "kick_short_section_not_applicable", not_applicable
+            "kick_short_section_not_applicable", short_not_applicable
         )
         _append_short_section(
-            "kick_short_section_revived", revived_activity
+            "kick_short_section_revived", short_revived
         )
         _append_new_members_short(new_members)
 
         if (
-            not candidates_combined
-            and not not_applicable
-            and not revived_activity
+            not short_candidates
+            and not short_not_applicable
+            and not short_revived
             and not new_members
         ):
             lines.append("")
