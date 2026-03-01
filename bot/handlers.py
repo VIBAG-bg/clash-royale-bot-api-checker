@@ -3773,19 +3773,31 @@ async def cmd_war_all(message: Message) -> None:
 
 @router.message(Command("list_for_kick"))
 async def cmd_list_for_kick(message: Message) -> None:
-    """Show kick shortlist based on the last 8 completed weeks."""
+    """Show kick shortlist based on the last 8 completed weeks.
+
+    Optional: /list_for_kick <limit>, where limit is 1..50.
+    """
     lang = await _get_lang_for_message(message)
     clan_tag = _require_clan_tag()
     if not clan_tag:
         await message.answer(t("clan_tag_not_configured", lang), parse_mode=None)
         return
+    limit = 5
+    if message.text:
+        parts = message.text.split(maxsplit=1)
+        if len(parts) > 1:
+            try:
+                limit = int(parts[1].strip())
+            except Exception:
+                limit = 5
+    limit = max(1, min(50, limit))
     weeks = await get_last_completed_weeks(8, clan_tag)
     last_week = await get_last_completed_week(clan_tag)
     if not weeks or not last_week:
         await message.answer(t("war_no_completed_weeks", lang), parse_mode=None)
         return
     report = await build_kick_shortlist_report(
-        weeks, last_week, clan_tag, lang=lang
+        weeks, last_week, clan_tag, lang=lang, short_limit=limit
     )
     await message.answer(report, parse_mode=None)
 

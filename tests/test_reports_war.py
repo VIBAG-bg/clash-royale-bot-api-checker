@@ -40,7 +40,7 @@ class _FakeSession:
 
     async def execute(self, *args, **kwargs):
         if not self._results:
-            raise AssertionError("Unexpected session.execute call")
+            return _FakeResult(rows=[], first_value=None)
         return self._results.pop(0)
 
 
@@ -367,6 +367,81 @@ class WarReportsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("P1", report)
         self.assertIn("P5", report)
         self.assertNotIn("P6", report)
+
+    async def test_kick_shortlist_honors_short_limit_argument(self) -> None:
+        inactive = [
+            {
+                "player_tag": f"#P{i}",
+                "player_name": f"P{i}",
+                "decks_used": 0,
+                "fame": 0,
+            }
+            for i in range(1, 7)
+        ]
+        tags = {row["player_tag"] for row in inactive}
+        session = _FakeSession(
+            [
+                _FakeResult(
+                    rows=[SimpleNamespace(season_id=128, section_index=3)]
+                ),
+                _FakeResult(first_value=date(2026, 1, 3)),
+                _FakeResult(
+                    rows=[
+                        SimpleNamespace(
+                            snapshot_date=date(2026, 1, 3), player_tag=tag
+                        )
+                        for tag in tags
+                    ]
+                ),
+                _FakeResult(
+                    rows=[
+                        SimpleNamespace(
+                            player_tag=tag,
+                            season_id=128,
+                            section_index=3,
+                            decks_used=0,
+                            fame=0,
+                        )
+                        for tag in tags
+                    ]
+                ),
+            ]
+        )
+
+        @asynccontextmanager
+        async def session_ctx():
+            yield session
+
+        with patch("reports.get_session", new=session_ctx), patch(
+            "reports.get_first_snapshot_date_for_week",
+            new=AsyncMock(return_value=date(2026, 1, 1)),
+        ), patch(
+            "reports.get_rolling_leaderboard",
+            new=AsyncMock(return_value=(inactive, [])),
+        ), patch(
+            "reports.get_participation_week_counts",
+            new=AsyncMock(return_value={tag: 4 for tag in tags}),
+        ), patch(
+            "reports.get_week_decks_map",
+            new=AsyncMock(return_value={tag: 0 for tag in tags}),
+        ), patch(
+            "reports._collect_wtd_donations",
+            new=AsyncMock(return_value={}),
+        ), patch(
+            "reports.get_last_seen_map",
+            new=AsyncMock(return_value={}),
+        ):
+            report = await build_kick_shortlist_report(
+                [(128, 3)], (128, 3), "#CLAN", lang="en", short_limit=2
+            )
+
+        candidate_lines = self._extract_short_section(
+            report, t("kick_short_section_candidates", "en")
+        )
+        self.assertEqual(2, self._count_player_lines(candidate_lines))
+        self.assertIn("P1", report)
+        self.assertIn("P2", report)
+        self.assertNotIn("P3", report)
 
     async def test_kick_shortlist_tops_up_with_weakest_rolling(self) -> None:
         inactive = [
@@ -820,6 +895,9 @@ class WarReportsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("B", "\n".join(candidate_lines))
         self.assertIn("C", "\n".join(candidate_lines))
         self.assertIn(
+            t("kick_short_status_fallback_weakest", "en"), report
+        )
+        self.assertNotIn(
             t("kick_short_status_fallback_pass_weakest", "en"), report
         )
 
@@ -906,17 +984,7 @@ class WarReportsTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertGreaterEqual(self._count_player_lines(candidate_lines), 1)
         self.assertIn("P1", "\n".join(candidate_lines))
-        self.assertIn(t("kick_short_status_fallback_nearest", "en"), report)
-        self.assertIn(
-            t(
-                "kick_short_nearest_rule_line",
-                "en",
-                decks_req=8,
-                fame_req=1500,
-                decks=8,
-                fame=1700,
-                decks_delta=0,
-                fame_delta=200,
-            ),
-            report,
+        self.assertIn(t("kick_short_status_fallback_weakest", "en"), report)
+        self.assertNotIn(
+            t("kick_short_status_fallback_nearest", "en"), report
         )

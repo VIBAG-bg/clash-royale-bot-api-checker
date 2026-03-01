@@ -2538,7 +2538,17 @@ async def build_kick_shortlist_report(
     *,
     lang: str = DEFAULT_LANG,
     detailed: bool = False,
+    short_limit: int | None = None,
 ) -> str:
+    short_limit_value = 5
+    if short_limit is not None:
+        try:
+            short_limit_value = int(short_limit)
+        except (TypeError, ValueError):
+            short_limit_value = 5
+    short_limit_value = max(1, min(50, short_limit_value))
+    inactive_pool_limit = max(10, short_limit_value)
+
     now_utc = datetime.now(timezone.utc)
     colosseum_weeks: list[tuple[int, int]] = []
     d0_map: dict[tuple[int, int], date | None] = {}
@@ -2550,6 +2560,9 @@ async def build_kick_shortlist_report(
     inactive_tags: set[str] = set()
     history_counts: dict[str, int] = {}
     last_week_decks: dict[str, int] = {}
+    alltime_activity_map: dict[str, dict[str, int]] = {}
+    membership_latest_date: date | None = None
+    membership_first_seen: dict[str, date] = {}
 
     async with get_session() as session:
         colosseum_result = await session.execute(
@@ -2624,6 +2637,7 @@ async def build_kick_shortlist_report(
             inactive, _active = await get_rolling_leaderboard(
                 weeks=weeks,
                 clan_tag=clan_tag,
+                inactive_limit=inactive_pool_limit,
                 session=session,
             )
             inactive = _filter_protected(inactive)
@@ -2666,6 +2680,51 @@ async def build_kick_shortlist_report(
                             "decks_used": int(row.decks_used),
                             "fame": int(row.fame),
                         }
+                latest_membership_result = await session.execute(
+                    select(func.max(ClanMemberDaily.snapshot_date)).where(
+                        ClanMemberDaily.clan_tag == clan_tag
+                    )
+                )
+                membership_latest_date = (
+                    latest_membership_result.scalar_one_or_none()
+                )
+                first_seen_result = await session.execute(
+                    select(
+                        ClanMemberDaily.player_tag,
+                        func.min(ClanMemberDaily.snapshot_date).label(
+                            "first_seen"
+                        ),
+                    )
+                    .where(
+                        ClanMemberDaily.clan_tag == clan_tag,
+                        ClanMemberDaily.player_tag.in_(inactive_tags),
+                    )
+                    .group_by(ClanMemberDaily.player_tag)
+                )
+                membership_first_seen = {
+                    _normalize_tag(row.player_tag): row.first_seen
+                    for row in first_seen_result.all()
+                    if row.player_tag and row.first_seen
+                }
+                alltime_activity_result = await session.execute(
+                    select(
+                        PlayerParticipation.player_tag,
+                        func.sum(PlayerParticipation.decks_used).label(
+                            "decks_sum"
+                        ),
+                        func.sum(PlayerParticipation.fame).label("fame_sum"),
+                    )
+                    .where(PlayerParticipation.player_tag.in_(inactive_tags))
+                    .group_by(PlayerParticipation.player_tag)
+                )
+                alltime_activity_map = {
+                    _normalize_tag(row.player_tag): {
+                        "decks_sum": int(row.decks_sum or 0),
+                        "fame_sum": int(row.fame_sum or 0),
+                    }
+                    for row in alltime_activity_result.all()
+                    if row.player_tag
+                }
 
     col_weeks_count = len(colosseum_weeks)
     fallback_start = t("kick_v2_value_na", lang)
@@ -2823,7 +2882,16 @@ async def build_kick_shortlist_report(
         if not tag:
             continue
         normalized_tag = _normalize_tag(tag)
-        weeks_played = int(history_counts.get(normalized_tag, 0))
+        weeks_played_raw = int(history_counts.get(normalized_tag, 0))
+        weeks_played = weeks_played_raw
+        first_seen = membership_first_seen.get(normalized_tag)
+        if (
+            isinstance(first_seen, date)
+            and isinstance(membership_latest_date, date)
+            and membership_latest_date >= first_seen
+        ):
+            tenure_weeks = ((membership_latest_date - first_seen).days // 7) + 1
+            weeks_played = min(weeks_played_raw, max(0, tenure_weeks))
         last_decks = int(last_week_decks.get(normalized_tag, 0))
         wtd_donations = None
         if normalized_tag in donations_wtd:
@@ -2837,12 +2905,15 @@ async def build_kick_shortlist_report(
             has_unknown,
             eligibility_statuses,
         ) = _build_colosseum_lines(normalized_tag)
+        alltime_stats = alltime_activity_map.get(normalized_tag, {})
 
         entry = {
             "player_tag": normalized_tag,
             "player_name": row.get("player_name") or t("unknown", lang),
             "decks_used": int(row.get("decks_used", 0)),
             "fame": int(row.get("fame", 0)),
+            "alltime_decks": int(alltime_stats.get("decks_sum", 0)),
+            "alltime_fame": int(alltime_stats.get("fame_sum", 0)),
             "last_week_decks": last_decks,
             "donations_wtd": wtd_donations,
             "weeks_played": weeks_played,
@@ -2919,15 +2990,12 @@ async def build_kick_shortlist_report(
             candidates_last_fail.append(entry)
 
     if not detailed:
-        # Product rule: short /list_for_kick is always 3..5 candidates.
-        # KICK_SHORTLIST_LIMIT is kept for detailed diagnostics branch.
-        short_min_candidates = 3
-        short_max_candidates = 5
+        # Short mode: prioritize colosseum candidates, then top up by inactivity.
         short_candidates: list[dict[str, object]] = []
         short_candidate_tags: set[str] = set()
 
         for _, entry in candidate_ordered:
-            if len(short_candidates) >= short_max_candidates:
+            if len(short_candidates) >= short_limit_value:
                 break
             tag = _normalize_tag(entry.get("player_tag"))
             if not tag or tag in short_candidate_tags:
@@ -2935,30 +3003,25 @@ async def build_kick_shortlist_report(
             short_candidates.append(entry)
             short_candidate_tags.add(tag)
 
-        def _get_latest_colosseum_stats_for_tag(
-            tag: str, fallback_entry: dict[str, object]
-        ) -> tuple[int, int]:
-            if colosseum_weeks:
-                latest_week = colosseum_weeks[0]
-                stats = colosseum_stats.get(tag, {}).get(latest_week)
-                if stats:
-                    return int(stats.get("decks_used", 0)), int(
-                        stats.get("fame", 0)
-                    )
-            return int(fallback_entry.get("decks_used", 0) or 0), int(
-                fallback_entry.get("fame", 0) or 0
+        def _activity_sort_key(entry: dict[str, object]) -> tuple[int, int, int, int, int, str]:
+            return (
+                int(entry.get("alltime_decks", 0) or 0),
+                int(entry.get("alltime_fame", 0) or 0),
+                int(entry.get("decks_used", 0) or 0),
+                int(entry.get("fame", 0) or 0),
+                int(entry.get("last_week_decks", 0) or 0),
+                str(entry.get("player_name", "")),
             )
 
-        if len(short_candidates) < short_min_candidates:
+        if len(short_candidates) < short_limit_value:
             new_member_tags = {
                 _normalize_tag(row.get("player_tag")) for row in new_members
             }
             revived_tags = {
                 _normalize_tag(row.get("player_tag")) for row in revived_activity
             }
+            weakest_pool: list[dict[str, object]] = []
             for row in inactive:
-                if len(short_candidates) >= short_min_candidates:
-                    break
                 tag = _normalize_tag(row.get("player_tag"))
                 if (
                     not tag
@@ -2967,20 +3030,26 @@ async def build_kick_shortlist_report(
                     or tag in revived_tags
                 ):
                     continue
-                fallback_entry = inactive_entries_by_tag.get(tag)
-                if not fallback_entry:
+                entry = inactive_entries_by_tag.get(tag)
+                if not entry:
                     continue
-                if bool(fallback_entry.get("colosseum_latest_is_pass")):
-                    continue
-                fallback_entry["short_status_key"] = (
-                    "kick_short_status_fallback_weakest"
-                )
-                short_candidates.append(fallback_entry)
-                short_candidate_tags.add(tag)
+                weakest_pool.append(entry)
+            weakest_pool.sort(key=_activity_sort_key)
+            for entry in weakest_pool:
+                if len(short_candidates) >= short_limit_value:
+                    break
+                if entry.get("short_status_key") not in (
+                    "kick_short_status_fail_streak",
+                    "kick_short_status_fail_last",
+                ):
+                    entry["short_status_key"] = "kick_short_status_fallback_weakest"
+                short_candidates.append(entry)
+                short_candidate_tags.add(_normalize_tag(entry.get("player_tag")))
 
-        if len(short_candidates) < short_min_candidates:
-            for entry in revived_activity:
-                if len(short_candidates) >= short_min_candidates:
+        if len(short_candidates) < short_limit_value:
+            revived_pool = sorted(revived_activity, key=_activity_sort_key)
+            for entry in revived_pool:
+                if len(short_candidates) >= short_limit_value:
                     break
                 tag = _normalize_tag(entry.get("player_tag"))
                 if not tag or tag in short_candidate_tags:
@@ -2989,9 +3058,10 @@ async def build_kick_shortlist_report(
                 short_candidates.append(entry)
                 short_candidate_tags.add(tag)
 
-        if len(short_candidates) < short_min_candidates:
-            for entry in new_members:
-                if len(short_candidates) >= short_min_candidates:
+        if len(short_candidates) < short_limit_value:
+            newbie_pool = sorted(new_members, key=_activity_sort_key)
+            for entry in newbie_pool:
+                if len(short_candidates) >= short_limit_value:
                     break
                 tag = _normalize_tag(entry.get("player_tag"))
                 if not tag or tag in short_candidate_tags:
@@ -2999,100 +3069,37 @@ async def build_kick_shortlist_report(
                 weeks_played = int(entry.get("weeks_played", 0) or 0)
                 decks_window = int(entry.get("decks_used", 0) or 0)
                 fame_window = int(entry.get("fame", 0) or 0)
-                last_week_decks = int(entry.get("last_week_decks", 0) or 0)
+                last_week_decks_val = int(
+                    entry.get("last_week_decks", 0) or 0
+                )
                 if weeks_played != NEW_MEMBER_WEEKS_PLAYED:
                     continue
-                if decks_window > 0 or fame_window > 0 or last_week_decks > 0:
-                    continue
-                entry["short_status_key"] = (
-                    "kick_short_status_fallback_new_member_zero"
-                )
+                if (
+                    decks_window <= 0
+                    and fame_window <= 0
+                    and last_week_decks_val <= 0
+                ):
+                    entry["short_status_key"] = (
+                        "kick_short_status_fallback_new_member_zero"
+                    )
                 short_candidates.append(entry)
-                short_candidate_tags.add(tag)
-
-        if len(short_candidates) == 0:
-            nearest_entry: dict[str, object] | None = None
-            nearest_score: tuple[int, int, int, int, int] | None = None
-            nearest_stats = (0, 0)
-            for row in inactive:
-                tag = _normalize_tag(row.get("player_tag"))
-                if not tag or tag in short_candidate_tags:
-                    continue
-                fallback_entry = inactive_entries_by_tag.get(tag)
-                if not fallback_entry:
-                    continue
-                weeks_played = int(fallback_entry.get("weeks_played", 0) or 0)
-                if weeks_played <= NEW_MEMBER_WEEKS_PLAYED:
-                    continue
-                decks_val, fame_val = _get_latest_colosseum_stats_for_tag(
-                    tag, fallback_entry
-                )
-                decks_delta = abs(decks_val - KICK_COLOSSEUM_SAVE_DECKS)
-                fame_delta = abs(fame_val - KICK_COLOSSEUM_SAVE_FAME)
-                score = (
-                    decks_delta + fame_delta,
-                    decks_delta,
-                    fame_delta,
-                    decks_val,
-                    fame_val,
-                )
-                if nearest_score is None or score < nearest_score:
-                    nearest_score = score
-                    nearest_entry = fallback_entry
-                    nearest_stats = (decks_val, fame_val)
-            if nearest_entry is not None:
-                decks_val, fame_val = nearest_stats
-                nearest_entry["short_status_key"] = (
-                    "kick_short_status_fallback_nearest"
-                )
-                nearest_entry["short_proximity_note"] = t(
-                    "kick_short_nearest_rule_line",
-                    lang,
-                    decks_req=KICK_COLOSSEUM_SAVE_DECKS,
-                    fame_req=KICK_COLOSSEUM_SAVE_FAME,
-                    decks=decks_val,
-                    fame=fame_val,
-                    decks_delta=abs(decks_val - KICK_COLOSSEUM_SAVE_DECKS),
-                    fame_delta=abs(fame_val - KICK_COLOSSEUM_SAVE_FAME),
-                )
-                short_candidates.append(nearest_entry)
-                short_candidate_tags.add(
-                    _normalize_tag(nearest_entry.get("player_tag"))
-                )
-
-        if len(short_candidates) < short_min_candidates:
-            for row in inactive:
-                if len(short_candidates) >= short_min_candidates:
-                    break
-                tag = _normalize_tag(row.get("player_tag"))
-                if not tag or tag in short_candidate_tags:
-                    continue
-                fallback_entry = inactive_entries_by_tag.get(tag)
-                if not fallback_entry:
-                    continue
-                if not bool(fallback_entry.get("colosseum_latest_is_pass")):
-                    continue
-                fallback_entry["short_status_key"] = (
-                    "kick_short_status_fallback_pass_weakest"
-                )
-                short_candidates.append(fallback_entry)
                 short_candidate_tags.add(tag)
 
         short_not_applicable = [
             row
             for row in not_applicable
             if _normalize_tag(row.get("player_tag")) not in short_candidate_tags
-        ]
+        ][:short_limit_value]
         short_revived = [
             row
             for row in revived_activity
             if _normalize_tag(row.get("player_tag")) not in short_candidate_tags
-        ]
+        ][:short_limit_value]
         short_new_members = [
             row
             for row in new_members
             if _normalize_tag(row.get("player_tag")) not in short_candidate_tags
-        ]
+        ][:short_limit_value]
 
         lines = [
             HEADER_LINE,

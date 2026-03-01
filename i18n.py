@@ -52,7 +52,7 @@ TEXT = {
         "/war - недельный отчёт\n"
         "/war8 - отчёт за 8 недель\n"
         "/top [N] - ТОП за 10 недель (только 6+ недель в клане)\n"
-        "/list_for_kick - список на исключение\n"
+        "/list_for_kick [N] - список на исключение (1..50)\n"
         "/kick_newbie - список на кик новичков\n"
         "/tg - ник + telegram username\n"
         "/current_war - текущая неделя\n"
@@ -76,7 +76,7 @@ TEXT = {
         "help_cmd_my_activity": "/my_activity - ваша активность",
         "help_cmd_activity": "/activity <ник>|@username|reply - активность по нику/@/reply",
         "help_cmd_donations": "/donations - таблица донатов",
-        "help_cmd_list_for_kick": "/list_for_kick - список на исключение",
+        "help_cmd_list_for_kick": "/list_for_kick [N] - список на исключение (1..50)",
         "help_cmd_kick_newbie": "/kick_newbie - список на кик новичков",
         "help_cmd_tg": "/tg - ник в игре и telegram username",
         "help_cmd_inactive": "/inactive - список по last seen",
@@ -742,7 +742,7 @@ TEXT = {
         "/war - weekly report\n"
         "/war8 - 8-week report\n"
         "/top [N] - top for last 10 weeks (6+ weeks in clan)\n"
-        "/list_for_kick - kick shortlist\n"
+        "/list_for_kick [N] - kick shortlist (1..50)\n"
         "/kick_newbie - newbie kick list\n"
         "/tg - in-game name + Telegram username\n"
         "/current_war - current week\n"
@@ -766,7 +766,7 @@ TEXT = {
         "help_cmd_my_activity": "/my_activity - your activity",
         "help_cmd_activity": "/activity <nickname>|@username|reply - activity by name/@/reply",
         "help_cmd_donations": "/donations - donations leaderboard",
-        "help_cmd_list_for_kick": "/list_for_kick - kick shortlist",
+        "help_cmd_list_for_kick": "/list_for_kick [N] - kick shortlist (1..50)",
         "help_cmd_kick_newbie": "/kick_newbie - newbie kick list",
         "help_cmd_tg": "/tg - in-game name + Telegram username",
         "help_cmd_inactive": "/inactive - last seen list",
@@ -1432,7 +1432,7 @@ TEXT = {
         "/war - тижневий звіт\n"
         "/war8 - звіт за 8 тижнів\n"
         "/top [N] - ТОП за 10 тижнів (тільки 6+ тижнів у клані)\n"
-        "/list_for_kick - список на виключення\n"
+        "/list_for_kick [N] - список на виключення (1..50)\n"
         "/kick_newbie - список на кік новачків\n"
         "/tg - нік у грі + telegram username\n"
         "/current_war - поточний тиждень\n"
@@ -1456,7 +1456,7 @@ TEXT = {
         "help_cmd_my_activity": "/my_activity - ваша активність",
         "help_cmd_activity": "/activity <нік>|@username|reply - активність за ніком/@/reply",
         "help_cmd_donations": "/donations - таблиця донатів",
-        "help_cmd_list_for_kick": "/list_for_kick - список на виключення",
+        "help_cmd_list_for_kick": "/list_for_kick [N] - список на виключення (1..50)",
         "help_cmd_kick_newbie": "/kick_newbie - список на кік новачків",
         "help_cmd_tg": "/tg - нік у грі + telegram username",
         "help_cmd_inactive": "/inactive - список по last seen",
