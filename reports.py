@@ -1896,6 +1896,9 @@ async def build_promotion_candidates_report(
     clan_tag: str, *, lang: str = DEFAULT_LANG
 ) -> str:
     window_weeks = 8
+    colosseum_lookback = 2
+    colosseum_active_decks_threshold = 8
+    colosseum_bonus_max = 0.10
     weeks = await get_last_completed_weeks(window_weeks, clan_tag)
     season_id = weeks[0][0] if weeks else 0
 
@@ -1931,6 +1934,58 @@ async def build_promotion_candidates_report(
         value.get("weeks_present", 0) > 0 for value in donations_map.values()
     )
 
+    colosseum_weeks: list[tuple[int, int]] = []
+    colosseum_stats: dict[str, dict[tuple[int, int], dict[str, int]]] = {}
+    member_tags = set(members.keys())
+    if member_tags and colosseum_lookback > 0:
+        async with get_session() as session:
+            colosseum_result = await session.execute(
+                select(
+                    RiverRaceState.season_id,
+                    RiverRaceState.section_index,
+                )
+                .where(
+                    RiverRaceState.clan_tag == clan_tag,
+                    RiverRaceState.period_type == "completed",
+                    RiverRaceState.is_colosseum.is_(True),
+                )
+                .order_by(
+                    RiverRaceState.season_id.desc(),
+                    RiverRaceState.section_index.desc(),
+                )
+                .limit(colosseum_lookback)
+            )
+            colosseum_weeks = [
+                (int(row.season_id), int(row.section_index))
+                for row in colosseum_result.all()
+            ]
+
+            if colosseum_weeks:
+                participation_result = await session.execute(
+                    select(
+                        PlayerParticipation.player_tag,
+                        PlayerParticipation.season_id,
+                        PlayerParticipation.section_index,
+                        PlayerParticipation.decks_used,
+                        PlayerParticipation.fame,
+                    ).where(
+                        tuple_(
+                            PlayerParticipation.season_id,
+                            PlayerParticipation.section_index,
+                        ).in_(colosseum_weeks),
+                        PlayerParticipation.player_tag.in_(member_tags),
+                    )
+                )
+                for row in participation_result.all():
+                    tag = _normalize_tag(row.player_tag)
+                    if not tag:
+                        continue
+                    week_key = (int(row.season_id), int(row.section_index))
+                    colosseum_stats.setdefault(tag, {})[week_key] = {
+                        "decks_used": int(row.decks_used or 0),
+                        "fame": int(row.fame or 0),
+                    }
+
     stats_rows: list[dict[str, object]] = []
     for tag, name in members.items():
         stats = war_stats.get(tag, {})
@@ -1943,6 +1998,18 @@ async def build_promotion_candidates_report(
         don_sum = int(don_stats.get("donations_sum", 0))
         don_weeks = int(don_stats.get("weeks_present", 0))
         don_avg = don_sum / don_weeks if don_weeks > 0 else 0.0
+        col_total = len(colosseum_weeks)
+        col_played = 0
+        if col_total > 0:
+            tag_colosseum_stats = colosseum_stats.get(tag, {})
+            for week_key in colosseum_weeks:
+                week_stats = tag_colosseum_stats.get(week_key)
+                if not week_stats:
+                    continue
+                if int(week_stats.get("decks_used", 0)) >= colosseum_active_decks_threshold:
+                    col_played += 1
+        col_ratio = (col_played / col_total) if col_total > 0 else 0.0
+        col_bonus = col_ratio * colosseum_bonus_max
         stats_rows.append(
             {
                 "player_tag": tag,
@@ -1956,6 +2023,10 @@ async def build_promotion_candidates_report(
                 "donations_sum": don_sum,
                 "donations_weeks": don_weeks,
                 "donations_avg": don_avg,
+                "colosseum_played_weeks": col_played,
+                "colosseum_total_weeks": col_total,
+                "colosseum_ratio": col_ratio,
+                "colosseum_bonus": col_bonus,
             }
         )
 
@@ -1983,13 +2054,19 @@ async def build_promotion_candidates_report(
             don_norm = _min_max_norm(row["donations_avg"], don_min, don_max)
         else:
             don_norm = 0.0
-        score = 0.55 * fame_norm + 0.30 * decks_norm + 0.15 * don_norm
+        score = (
+            0.55 * fame_norm
+            + 0.30 * decks_norm
+            + 0.15 * don_norm
+            + float(row.get("colosseum_bonus", 0.0))
+        )
         row["score"] = score
         elder_candidates.append(row)
 
     elder_candidates.sort(
         key=lambda row: (
             -float(row.get("score", 0.0)),
+            -int(row.get("colosseum_played_weeks", 0)),
             -int(row.get("active_weeks", 0)),
             -int(row.get("donations_sum", 0)),
             str(row.get("player_name") or ""),
@@ -2037,10 +2114,21 @@ async def build_promotion_candidates_report(
                 continue
             co_candidates.append(row)
 
+    for row in co_candidates:
+        fame_norm = _min_max_norm(float(row.get("avg_fame", 0.0)), fame_min, fame_max)
+        if donations_available:
+            don_norm = _min_max_norm(float(row.get("donations_avg", 0.0)), don_min, don_max)
+        else:
+            don_norm = 0.0
+        col_ratio = float(row.get("colosseum_ratio", 0.0))
+        row["co_score"] = 0.70 * fame_norm + 0.20 * don_norm + 0.10 * col_ratio
+
     co_candidates.sort(
         key=lambda row: (
+            -float(row.get("co_score", 0.0)),
             -float(row.get("avg_fame", 0.0)),
             -int(row.get("donations_sum", 0)),
+            -int(row.get("colosseum_played_weeks", 0)),
             str(row.get("player_name") or ""),
         )
     )
@@ -2077,6 +2165,18 @@ async def build_promotion_candidates_report(
                     avg_fame=_format_avg(float(row.get("avg_fame", 0.0))),
                 )
             )
+            col_total = int(row.get("colosseum_total_weeks", 0))
+            if col_total > 0:
+                lines.append(
+                    t(
+                        "promotion_colosseum_line",
+                        lang,
+                        weeks_total=col_total,
+                        played_weeks=int(row.get("colosseum_played_weeks", 0)),
+                    )
+                )
+            else:
+                lines.append(t("promotion_colosseum_no_data_line", lang))
             lines.append(
                 t(
                     "promotion_donations_line",
@@ -2112,6 +2212,18 @@ async def build_promotion_candidates_report(
                     avg_fame=_format_avg(float(row.get("avg_fame", 0.0))),
                 )
             )
+            col_total = int(row.get("colosseum_total_weeks", 0))
+            if col_total > 0:
+                lines.append(
+                    t(
+                        "promotion_colosseum_line",
+                        lang,
+                        weeks_total=col_total,
+                        played_weeks=int(row.get("colosseum_played_weeks", 0)),
+                    )
+                )
+            else:
+                lines.append(t("promotion_colosseum_no_data_line", lang))
             lines.append(
                 t(
                     "promotion_donations_line",
@@ -2136,6 +2248,7 @@ async def build_promotion_candidates_report(
                 elder_weeks=PROMOTE_MIN_WEEKS_PLAYED_ELDER,
                 coleader_weeks=PROMOTE_MIN_WEEKS_PLAYED_COLEADER,
             ),
+            t("promotion_notes_colosseum_bonus", lang, weeks=colosseum_lookback),
             t("promotion_notes_protected", lang),
             HEADER_LINE,
         ]
