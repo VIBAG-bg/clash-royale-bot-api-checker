@@ -2130,7 +2130,12 @@ async def build_promotion_candidates_report(
             DIVIDER_LINE,
             t("promotion_notes_header", lang),
             t("promotion_notes_members", lang),
-            t("promotion_notes_new_members", lang),
+            t(
+                "promotion_notes_new_members",
+                lang,
+                elder_weeks=PROMOTE_MIN_WEEKS_PLAYED_ELDER,
+                coleader_weeks=PROMOTE_MIN_WEEKS_PLAYED_COLEADER,
+            ),
             t("promotion_notes_protected", lang),
             HEADER_LINE,
         ]
