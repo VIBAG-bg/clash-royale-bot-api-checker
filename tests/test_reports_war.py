@@ -530,6 +530,90 @@ class WarReportsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(t("kick_short_status_fallback_weakest", "en"), report)
         self.assertNotIn(t("kick_short_section_not_applicable", "en"), report)
 
+    async def test_kick_shortlist_weakest_skips_active_new_member(self) -> None:
+        inactive = [
+            {
+                "player_tag": "#A",
+                "player_name": "A",
+                "decks_used": 0,
+                "fame": 0,
+            },
+            {
+                "player_tag": "#B",
+                "player_name": "B",
+                "decks_used": 1,
+                "fame": 10,
+            },
+            {
+                "player_tag": "#NEW",
+                "player_name": "NEW",
+                "decks_used": 12,
+                "fame": 1950,
+            },
+        ]
+        tags = {"#A", "#B", "#NEW"}
+        session = _FakeSession(
+            [
+                _FakeResult(
+                    rows=[SimpleNamespace(season_id=128, section_index=3)]
+                ),
+                _FakeResult(first_value=date(2026, 1, 3)),
+                _FakeResult(
+                    rows=[
+                        SimpleNamespace(
+                            snapshot_date=date(2026, 1, 3), player_tag="#A"
+                        )
+                    ]
+                ),
+                _FakeResult(
+                    rows=[
+                        SimpleNamespace(
+                            player_tag=tag,
+                            season_id=128,
+                            section_index=3,
+                            decks_used=0,
+                            fame=0,
+                        )
+                        for tag in tags
+                    ]
+                ),
+            ]
+        )
+
+        @asynccontextmanager
+        async def session_ctx():
+            yield session
+
+        with patch("reports.get_session", new=session_ctx), patch(
+            "reports.get_first_snapshot_date_for_week",
+            new=AsyncMock(return_value=date(2026, 1, 1)),
+        ), patch(
+            "reports.get_rolling_leaderboard",
+            new=AsyncMock(return_value=(inactive, [])),
+        ), patch(
+            "reports.get_participation_week_counts",
+            new=AsyncMock(return_value={"#A": 4, "#B": 4, "#NEW": 1}),
+        ), patch(
+            "reports.get_week_decks_map",
+            new=AsyncMock(return_value={"#A": 0, "#B": 0, "#NEW": 12}),
+        ), patch(
+            "reports._collect_wtd_donations",
+            new=AsyncMock(return_value={}),
+        ), patch(
+            "reports.get_last_seen_map",
+            new=AsyncMock(return_value={}),
+        ):
+            report = await build_kick_shortlist_report(
+                [(128, 3)], (128, 3), "#CLAN", lang="en"
+            )
+
+        candidate_lines = self._extract_short_section(
+            report, t("kick_short_section_candidates", "en")
+        )
+        self.assertIn("A", "\n".join(candidate_lines))
+        self.assertIn("B", "\n".join(candidate_lines))
+        self.assertNotIn("NEW", "\n".join(candidate_lines))
+
     async def test_kick_shortlist_keeps_four_without_top_up(self) -> None:
         inactive = [
             {

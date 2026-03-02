@@ -3151,6 +3151,9 @@ async def build_kick_shortlist_report(
                 entry = inactive_entries_by_tag.get(tag)
                 if not entry:
                     continue
+                if int(entry.get("weeks_played", 0) or 0) <= NEW_MEMBER_WEEKS_PLAYED:
+                    if int(entry.get("last_week_decks", 0) or 0) >= 6:
+                        continue
                 weakest_pool.append(entry)
             weakest_pool.sort(key=_activity_sort_key)
             for entry in weakest_pool:
