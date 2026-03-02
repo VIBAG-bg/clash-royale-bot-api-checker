@@ -4010,6 +4010,21 @@ async def search_player_candidates(
     current_members = await get_current_member_tags(clan_tag, session=session)
     latest_date = await get_latest_membership_date(clan_tag, session=session)
 
+    def _normalize_tag_value(raw_tag: object) -> str:
+        tag = str(raw_tag).strip().upper() if raw_tag else ""
+        if not tag:
+            return ""
+        if not tag.startswith("#"):
+            tag = f"#{tag}"
+        return tag
+
+    current_members_normalized = {
+        _normalize_tag_value(tag) for tag in current_members if tag
+    }
+
+    def _is_in_clan_tag(raw_tag: object) -> bool:
+        return _normalize_tag_value(raw_tag) in current_members_normalized
+
     def _format_rows(rows: list[Any], in_clan: bool) -> list[dict[str, Any]]:
         return [
             {
@@ -4018,6 +4033,47 @@ async def search_player_candidates(
                 "in_clan": in_clan,
             }
             for row in rows
+        ]
+
+    # Exact tag lookup hotfix for /activity #TAG when nicknames collide.
+    if nickname.startswith("#"):
+        normalized_tag = _normalize_tag_value(nickname)
+        tag_body = normalized_tag[1:]
+        if not tag_body:
+            return []
+
+        if latest_date is not None:
+            current_tag_query = select(
+                ClanMemberDaily.player_tag, ClanMemberDaily.player_name
+            ).where(
+                ClanMemberDaily.clan_tag == clan_tag,
+                ClanMemberDaily.snapshot_date == latest_date,
+                func.upper(func.replace(ClanMemberDaily.player_tag, "#", ""))
+                == tag_body,
+            )
+            current_tag_rows = (await session.execute(current_tag_query)).all()
+            if current_tag_rows:
+                return _format_rows(current_tag_rows, True)
+
+        hist_tag_query = (
+            select(
+                PlayerParticipation.player_tag,
+                func.max(PlayerParticipation.player_name).label("player_name"),
+            )
+            .where(
+                func.upper(func.replace(PlayerParticipation.player_tag, "#", ""))
+                == tag_body
+            )
+            .group_by(PlayerParticipation.player_tag)
+        )
+        hist_tag_rows = (await session.execute(hist_tag_query)).all()
+        return [
+            {
+                "player_tag": row.player_tag,
+                "player_name": row.player_name,
+                "in_clan": _is_in_clan_tag(row.player_tag),
+            }
+            for row in hist_tag_rows
         ]
 
     if latest_date is not None:
@@ -4057,7 +4113,7 @@ async def search_player_candidates(
             {
                 "player_tag": row.player_tag,
                 "player_name": row.player_name,
-                "in_clan": row.player_tag in current_members,
+                "in_clan": _is_in_clan_tag(row.player_tag),
             }
             for row in exact_hist
         ]
@@ -4075,7 +4131,7 @@ async def search_player_candidates(
         {
             "player_tag": row.player_tag,
             "player_name": row.player_name,
-            "in_clan": row.player_tag in current_members,
+            "in_clan": _is_in_clan_tag(row.player_tag),
         }
         for row in contains_hist
     ]

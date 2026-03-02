@@ -4712,7 +4712,7 @@ async def cmd_my_activity(message: Message) -> None:
 
 @router.message(Command("activity"))
 async def cmd_activity(message: Message) -> None:
-    """Show a player's activity report by nickname, @username, or reply."""
+    """Show a player's activity report by nickname, #tag, @username, or reply."""
     lang = await _get_lang_for_message(message)
     clan_tag = _require_clan_tag()
     if not clan_tag:
