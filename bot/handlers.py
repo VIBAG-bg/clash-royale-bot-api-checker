@@ -4801,6 +4801,7 @@ async def cmd_activity(message: Message) -> None:
             t("activity_usage", lang),
             parse_mode=None,
         )
+        await cmd_my_activity(message)
         return
 
     candidates = await search_player_candidates(clan_tag, args)
